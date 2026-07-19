@@ -70,7 +70,9 @@ The installer verifies both lockfile hashes before running `uv sync --frozen --n
 Fill every empty name in the generated environment file without printing it. Generate independent
 values for `DASHBOARD_JWT_SECRET`, `GITHUB_WEBHOOK_SECRET`, `LINEAR_WEBHOOK_SECRET`, and
 `TOKEN_ENCRYPTION_KEY`; copy the GitHub App identifiers, private key, OAuth secret, and OSWE-scoped
-Linear API key from their respective control planes. Keep the file `0640 root:_openswectl`.
+Linear API key from their respective control planes. Because the declared default model is
+`openai:gpt-5.5`, also copy an OpenAI API key into `OPENAI_API_KEY`. Keep the file
+`0640 root:_openswectl`.
 The non-secret deployment values are:
 
 ```dotenv
