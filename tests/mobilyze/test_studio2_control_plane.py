@@ -15,6 +15,7 @@ MODULE_PATH = PROJECT_ROOT / "scripts" / "mobilyze" / "studio2_control_plane.py"
 MANIFEST_PATH = PROJECT_ROOT / "config" / "mobilyze" / "studio2-control-plane.json"
 INSTALLER_PATH = PROJECT_ROOT / "scripts" / "mobilyze" / "install_studio2_control_plane.sh"
 RUNNER_PATH = PROJECT_ROOT / "scripts" / "mobilyze" / "run_studio2_control_plane.sh"
+RUNBOOK_PATH = PROJECT_ROOT / "docs" / "mobilyze" / "STUDIO2_CONTROL_PLANE.md"
 SPEC = importlib.util.spec_from_file_location("studio2_control_plane", MODULE_PATH)
 assert SPEC and SPEC.loader
 CONTROL_PLANE = importlib.util.module_from_spec(SPEC)
@@ -38,6 +39,7 @@ def test_checked_in_manifest_is_valid_and_pinned() -> None:
     }
     assert data["github"]["repository_selection"] == "selected"
     assert data["github"]["repositories"] == ["mobilyze-llc/open-swe"]
+    assert data["github"]["permissions"]["statuses"] == "read"
     assert data["linear"]["team_key"] == "OSWE"
     assert data["linear"]["team_to_repository"] == {
         "Open SWE": {"name": "open-swe", "owner": "mobilyze-llc"}
@@ -126,3 +128,15 @@ def test_installer_is_pinned_and_uses_the_dedicated_service_boundary() -> None:
     assert "--host 127.0.0.1 --port 2029" in runner
     assert "--host 127.0.0.1 --port 3029" in runner
     assert "exec /opt/homebrew/bin/node node_modules/vite/bin/vite.js preview" in runner
+
+
+def test_runbook_separates_reviewed_tooling_from_the_pinned_application() -> None:
+    runbook = RUNBOOK_PATH.read_text()
+
+    assert "TOOLING_REF=refs/pull/5/head" in runbook
+    assert "TOOLING_SHA=$(git rev-parse FETCH_HEAD)" in runbook
+    assert "APP_SHA=f4e2a6833e403184ee710b102ee9d31bd12a0387" in runbook
+    assert 'git archive "$TOOLING_SHA"' in runbook
+    assert (
+        'git archive --format=tar.gz --output="/tmp/open-swe-$APP_SHA.tar.gz" "$APP_SHA"' in runbook
+    )

@@ -48,6 +48,7 @@
       "members": "read",
       "metadata": "read",
       "pull_requests": "write",
+      "statuses": "read",
       "workflows": "write"
     },
     "events": [

@@ -23,30 +23,45 @@ The GitHub App installation must use **Only select repositories** with
 `mobilyze-llc/open-swe` as its sole repository. Configure exactly the permissions and events in
 the checked-in manifest. Set the dashboard OAuth callback to
 `https://studio2.tail062eee.ts.net/dashboard/api/auth/callback` and the webhook URL to the
-manifest's `github_webhook` endpoint. GitHub's organization Members permission is read-only and
-supports the `ALLOWED_GITHUB_ORGS=mobilyze-llc` login gate.
+manifest's `github_webhook` endpoint. Commit statuses and organization Members are read-only;
+Commit statuses authorizes the subscribed legacy `status` event, while Members supports the
+`ALLOWED_GITHUB_ORGS=mobilyze-llc` login gate.
 
-Create a Linear webhook for `Comment.create` at the manifest's `linear_webhook` endpoint, scoped
-to the Open SWE team (`OSWE`). The declared upstream seam in
+As a Linear workspace admin, use the supported `webhookCreate` GraphQL mutation once to create a
+`Comment.create` webhook at the manifest's `linear_webhook` endpoint, scoped to the Open SWE team
+(`OSWE`), then read its generated signing secret from the webhook detail page. The declared seam in
 `agent/utils/linear_team_repo_map.py` maps that exact team name to `mobilyze-llc/open-swe`.
 
 ## Build and install the pinned release
 
-Run these commands from a clean checkout whose `HEAD` equals the manifest commit:
+The deployment tooling and application archive have separate provenance. Fetch PR #5's head ref
+for the reviewed installer, manifest, and runner, capture its exact immutable commit as
+`TOOLING_SHA`, then archive the application at the separate commit pinned by that manifest. Record
+`TOOLING_SHA` in the deployment evidence; do not substitute the application SHA for it.
 
 ```bash
-SHA=f4e2a6833e403184ee710b102ee9d31bd12a0387
-test "$(git rev-parse HEAD)" = "$SHA"
-python scripts/mobilyze/studio2_control_plane.py validate
-git archive --format=tar.gz --output="/tmp/open-swe-$SHA.tar.gz" "$SHA"
-scp "/tmp/open-swe-$SHA.tar.gz" studio2:/tmp/
-rsync -aR \
+TOOLING_REF=refs/pull/5/head
+APP_SHA=f4e2a6833e403184ee710b102ee9d31bd12a0387
+TOOLING_DIR=$(mktemp -d /tmp/oswe-29-tooling.XXXXXX)
+git fetch origin "$TOOLING_REF"
+TOOLING_SHA=$(git rev-parse FETCH_HEAD)
+git fetch origin "$APP_SHA"
+git archive "$TOOLING_SHA" \
+  config/mobilyze/studio2-control-plane.json \
+  scripts/mobilyze/studio2_control_plane.py \
+  scripts/mobilyze/install_studio2_control_plane.sh \
+  scripts/mobilyze/run_studio2_control_plane.sh | tar -xf - -C "$TOOLING_DIR"
+python "$TOOLING_DIR/scripts/mobilyze/studio2_control_plane.py" \
+  --manifest "$TOOLING_DIR/config/mobilyze/studio2-control-plane.json" validate
+git archive --format=tar.gz --output="/tmp/open-swe-$APP_SHA.tar.gz" "$APP_SHA"
+scp "/tmp/open-swe-$APP_SHA.tar.gz" studio2:/tmp/
+(cd "$TOOLING_DIR" && rsync -aR \
   config/mobilyze/studio2-control-plane.json \
   scripts/mobilyze/studio2_control_plane.py \
   scripts/mobilyze/install_studio2_control_plane.sh \
   scripts/mobilyze/run_studio2_control_plane.sh \
-  studio2:/tmp/oswe-29-deploy/
-ssh studio2 "sudo /tmp/oswe-29-deploy/scripts/mobilyze/install_studio2_control_plane.sh install /tmp/open-swe-$SHA.tar.gz $SHA"
+  studio2:/tmp/oswe-29-deploy/)
+ssh studio2 "sudo /tmp/oswe-29-deploy/scripts/mobilyze/install_studio2_control_plane.sh install /tmp/open-swe-$APP_SHA.tar.gz $APP_SHA"
 ```
 
 The installer verifies both lockfile hashes before running `uv sync --frozen --no-dev` and

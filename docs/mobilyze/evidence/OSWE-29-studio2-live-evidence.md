@@ -58,10 +58,11 @@ com.mobilyze.open-swe-control-plane.dashboard => disabled, not-loaded
 `mobilyze-open-swe-studio2` GitHub App installation. None of
 `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `GITHUB_APP_PRIVATE_KEY`,
 `GITHUB_APP_CLIENT_ID`, or `GITHUB_APP_CLIENT_SECRET` exists in the source environment
-or the root-owned host environment file. GitHub provides no REST endpoint for creating a
-GitHub App, and this executor had no authenticated browser available for the required
-organization settings flow (`No browser is available`). Linear webhook creation is also a
-settings operation not exposed by the supported Printing Press Linear CLI.
+or the root-owned host environment file. The remaining external action is for an organization
+and workspace administrator to create and install the selected-repository GitHub App, create the
+team-scoped Linear `Comment.create` webhook with the supported `webhookCreate` mutation, read the
+generated signing secret from Linear's webhook detail page, and write all values directly to the
+root-owned environment file. No provisioning subsystem is required or included in this change.
 
 The deployment therefore stopped before writing partial credential state, exposing network
 routes, starting services, or sending synthetic events. GitHub, Linear, and dashboard
