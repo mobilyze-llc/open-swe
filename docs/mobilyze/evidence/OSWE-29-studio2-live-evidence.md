@@ -1,18 +1,18 @@
 # OSWE-29 studio2 evidence
 
-Captured on `2026-07-19`, with the final runtime snapshot at `2026-07-19T21:24:24Z`.
+Captured on `2026-07-19`, with the final runtime snapshot at `2026-07-19T21:32:43Z`.
 Secret values, authorization headers, cookies, webhook signatures, and private-key material are
 omitted.
 
 ## Installed boundary
 
 - Baseline and merged PR #1: `4c9201093851f54aba60cf6ec0e814aebb828076`.
-- Live-tested tooling commit: `691fd8624b065698a58fc78b928245d0707eeeb7`; the deployed
+- Live-tested tooling commit: `cb8d9f2449fb0f1eee03f5552e44e0f2db85ffc6`; the deployed
   installer SHA-256 was
-  `11be4ef4c7628385b06ce8c22c69a45aa6e2f9474de7749f3f77e1b3fbf75d75`, matching
+  `9f4ad5702bcd8f81df700265016efa8f2d99a499e7feb1ca952a4c4ab7e8a37d`, matching
   the checked-in script at that commit.
 - The deployed manifest helper SHA-256 was
-  `c8fd5a13a7c72ddbb0643b1f2e8bc71ce722b6604844fa86d17a8c96a00f3a9a`, also
+  `3398b1ddd6d4349818b9757bb57af194d1602932fd168ee7674b262bab279ae1`, also
   matching the checked-in script at that commit.
 - Pinned application release: `f4e2a6833e403184ee710b102ee9d31bd12a0387`.
 - Retained rollback release: `4c9201093851f54aba60cf6ec0e814aebb828076`.
@@ -89,12 +89,12 @@ operation replaced them with PIDs `49499` and `49507`; backend health and dashbo
 recovered. Queries for all three exact thread IDs returned the same creation timestamps,
 terminal statuses, and run IDs after restart.
 
-After the review hardening patch, the deployed environment validator accepted every required
-name exactly once without exposing values, and the managed restart replaced PIDs `58918` and
-`58923` with `60244` and `60252`. Backend health and dashboard HTTP 200 recovered, the current
-release remained `f4e2a6833e403184ee710b102ee9d31bd12a0387`, and all three exact threads remained
-visible. The Linear thread retained final run `019f7c3f-2be5-77f1-bbf7-841b4f0d7305` as terminal
-`error`.
+After the review hardening patch, the deployed status-only environment validator accepted every
+required name exactly once without printing names or values, and the managed restart replaced
+PIDs `60244` and `60252` with `62831` and `62838`. Backend health and dashboard HTTP 200 recovered,
+the current release remained `f4e2a6833e403184ee710b102ee9d31bd12a0387`, and all three exact
+threads remained visible. The Linear thread retained final run
+`019f7c3f-2be5-77f1-bbf7-841b4f0d7305` as terminal `error`.
 
 ## Rollback and restore
 
