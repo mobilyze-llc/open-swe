@@ -140,8 +140,8 @@ start_services() {
   validate_environment
   for label in "$BACKEND_LABEL" "$DASHBOARD_LABEL"; do
     plist=$(service_plist "$label")
-    launchctl print "system/$label" >/dev/null 2>&1 || launchctl bootstrap system "$plist"
     launchctl enable "system/$label"
+    launchctl print "system/$label" >/dev/null 2>&1 || launchctl bootstrap system "$plist"
     launchctl kickstart -k "system/$label"
   done
 }

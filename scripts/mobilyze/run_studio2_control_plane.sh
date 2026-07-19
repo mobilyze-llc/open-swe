@@ -27,8 +27,9 @@ case "$ROLE" in
     ;;
   dashboard)
     cd "$DEPLOYMENT_ROOT/current/ui"
-    exec /opt/homebrew/bin/node node_modules/vite/bin/vite.js preview \
-      --host 127.0.0.1 --port 3029 --strictPort
+    export HOST=127.0.0.1
+    export PORT=3029
+    exec /opt/homebrew/bin/node .output/server/index.mjs
     ;;
   *)
     echo "unknown role: $ROLE" >&2

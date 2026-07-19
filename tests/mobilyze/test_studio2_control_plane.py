@@ -122,12 +122,17 @@ def test_installer_is_pinned_and_uses_the_dedicated_service_boundary() -> None:
     assert "pnpm install --frozen-lockfile" in installer
     assert "environment values are missing:" in installer
     assert 'launchctl disable "system/$label"' in installer
+    assert installer.index('launchctl enable "system/$label"') < installer.index(
+        'launchctl bootstrap system "$plist"'
+    )
     assert "open-swe-orchard" not in installer
     assert "crucible" not in installer.lower()
     assert 'set -a\n. "$ENV_FILE"\nset +a' in runner
     assert "--host 127.0.0.1 --port 2029" in runner
-    assert "--host 127.0.0.1 --port 3029" in runner
-    assert "exec /opt/homebrew/bin/node node_modules/vite/bin/vite.js preview" in runner
+    assert "export HOST=127.0.0.1" in runner
+    assert "export PORT=3029" in runner
+    assert "exec /opt/homebrew/bin/node .output/server/index.mjs" in runner
+    assert "vite/bin/vite.js preview" not in runner
 
 
 def test_runbook_separates_reviewed_tooling_from_the_pinned_application() -> None:
