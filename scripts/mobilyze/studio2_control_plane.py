@@ -157,7 +157,7 @@ def main() -> int:
     subparsers.add_parser("validate")
     env_parser = subparsers.add_parser("render-env-template")
     env_parser.add_argument("--output", type=Path, required=True)
-    check_env_parser = subparsers.add_parser("list-invalid-environment-names")
+    check_env_parser = subparsers.add_parser("validate-environment")
     check_env_parser.add_argument("--input", type=Path, required=True)
     plist_parser = subparsers.add_parser("render-launchd")
     plist_parser.add_argument("--output-dir", type=Path, required=True)
@@ -170,10 +170,9 @@ def main() -> int:
         args.output.write_text(render_env_template(manifest))
         args.output.chmod(0o600)
         return 0
-    if args.command == "list-invalid-environment-names":
+    if args.command == "validate-environment":
         contents = args.input.read_text() if args.input.is_file() else ""
-        print("\n".join(invalid_environment_names(manifest, contents)))
-        return 0
+        return 0 if not invalid_environment_names(manifest, contents) else 78
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for label, payload in render_launchd_plists(manifest).items():
         (args.output_dir / f"{label}.plist").write_bytes(payload)

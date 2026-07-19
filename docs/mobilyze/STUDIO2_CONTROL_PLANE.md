@@ -85,9 +85,9 @@ LOCAL_SANDBOX_ROOT_DIR=/var/db/mobilyze-open-swe-control-plane/sandboxes
 SANDBOX_TYPE=local
 ```
 
-`start` fails closed and prints missing names only while any template entry remains empty. An
-install with empty entries disables both launchd labels, so a reboot cannot start a partially
-configured service.
+`start` fails closed with a generic redacted error while any required entry is missing, duplicated,
+or empty. An install with an invalid environment disables both launchd labels, so a reboot cannot
+start a partially configured service.
 
 ## Network and service operations
 

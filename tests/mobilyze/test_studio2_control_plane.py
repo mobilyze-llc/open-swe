@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import plistlib
+import subprocess
 import sys
 from pathlib import Path
 
@@ -129,6 +130,30 @@ def test_environment_validation_requires_each_declared_name_once_and_nonempty() 
     ) == ["LINEAR_API_KEY"]
 
 
+def test_environment_validation_cli_reports_status_without_names(
+    tmp_path: Path,
+) -> None:
+    data = manifest()
+    env_path = tmp_path / "env"
+    command = [
+        sys.executable,
+        str(MODULE_PATH),
+        "--manifest",
+        str(MANIFEST_PATH),
+        "validate-environment",
+        "--input",
+        str(env_path),
+    ]
+    env_path.write_text("".join(f"{name}=configured\n" for name in data["secrets"]))
+
+    valid = subprocess.run(command, capture_output=True, text=True, check=False)
+    env_path.write_text("LINEAR_API_KEY=\n")
+    invalid = subprocess.run(command, capture_output=True, text=True, check=False)
+
+    assert (valid.returncode, valid.stdout, valid.stderr) == (0, "", "")
+    assert (invalid.returncode, invalid.stdout, invalid.stderr) == (78, "", "")
+
+
 def test_installer_is_pinned_and_uses_the_dedicated_service_boundary() -> None:
     installer = INSTALLER_PATH.read_text()
     runner = RUNNER_PATH.read_text()
@@ -136,8 +161,8 @@ def test_installer_is_pinned_and_uses_the_dedicated_service_boundary() -> None:
     assert "IDENTITY=_openswectl" in installer
     assert "--frozen --no-dev" in installer
     assert "pnpm install --frozen-lockfile" in installer
-    assert 'list-invalid-environment-names --input "$ENV_FILE"' in installer
-    assert "environment values are missing:" in installer
+    assert 'validate-environment --input "$ENV_FILE"' in installer
+    assert "required environment values are missing, duplicated, or empty" in installer
     assert '/usr/bin/mktemp -d "$DEPLOYMENT_ROOT/releases/.install-$sha.XXXXXX"' in installer
     assert '/bin/chmod 0755 "$staging"' in installer
     assert '/bin/mv "$staging" "$release"' in installer

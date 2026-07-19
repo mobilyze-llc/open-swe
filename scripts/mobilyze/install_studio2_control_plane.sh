@@ -125,22 +125,20 @@ install_services() {
     chown root:"$IDENTITY" "$ENV_FILE"
     chmod 0640 "$ENV_FILE"
   fi
-  if [ -n "$(environment_issues)" ]; then
+  if ! environment_is_valid; then
     launchctl disable "system/$BACKEND_LABEL"
     launchctl disable "system/$DASHBOARD_LABEL"
   fi
 }
 
-environment_issues() {
+environment_is_valid() {
   /usr/bin/python3 "$PROJECT_ROOT/scripts/mobilyze/studio2_control_plane.py" \
-    --manifest "$MANIFEST" list-invalid-environment-names --input "$ENV_FILE"
+    --manifest "$MANIFEST" validate-environment --input "$ENV_FILE"
 }
 
 validate_environment() {
-  missing=$(environment_issues)
-  if [ -n "$missing" ]; then
-    echo "environment values are missing:" >&2
-    echo "$missing" >&2
+  if ! environment_is_valid; then
+    echo "required environment values are missing, duplicated, or empty" >&2
     exit 78
   fi
 }
