@@ -35,7 +35,7 @@ to the Open SWE team (`OSWE`). The declared upstream seam in
 Run these commands from a clean checkout whose `HEAD` equals the manifest commit:
 
 ```bash
-SHA=da388407d360c1fc9b643cd56aa69c3b34dcc867
+SHA=f4e2a6833e403184ee710b102ee9d31bd12a0387
 test "$(git rev-parse HEAD)" = "$SHA"
 python scripts/mobilyze/studio2_control_plane.py validate
 git archive --format=tar.gz --output="/tmp/open-swe-$SHA.tar.gz" "$SHA"

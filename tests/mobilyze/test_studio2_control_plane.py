@@ -31,7 +31,7 @@ def test_checked_in_manifest_is_valid_and_pinned() -> None:
 
     CONTROL_PLANE.validate_manifest(data)
 
-    assert data["application"]["commit"] == "da388407d360c1fc9b643cd56aa69c3b34dcc867"
+    assert data["application"]["commit"] == "f4e2a6833e403184ee710b102ee9d31bd12a0387"
     assert data["application"]["dependency_locks"] == {
         "ui/pnpm-lock.yaml": "dc5638471a8fbbf0a0d0de4da0c0b4a7a664ac9a27edcf87234bdb3df3df0b6d",
         "uv.lock": "43aca3bf3c7ac2e975682b01039e10c5998d7a03d70790225c60b673abda770d",
