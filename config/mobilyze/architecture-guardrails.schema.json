@@ -12,6 +12,7 @@
     "waivers"
   ],
   "properties": {
+    "$schema": {"type": "string", "format": "uri-reference"},
     "schema": {"const": "mobilyze.open-swe.architecture-guardrails.v1"},
     "custom_path_globs": {"type": "array", "items": {"type": "string"}, "minItems": 1},
     "source_extensions": {"type": "array", "items": {"type": "string"}, "minItems": 1},

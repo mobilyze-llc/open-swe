@@ -151,33 +151,33 @@ def _line_count_from_ref(ref: str, path: str) -> tuple[bool, int]:
     )
 
 
-def _head_line_count(path: str) -> int:
-    file_path = Path(path)
-    if not file_path.exists() or not file_path.is_file():
-        return 0
-    data = file_path.read_bytes()
-    return data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
-
-
 def collect_changes(base_ref: str, head_ref: str) -> list[Change]:
-    output = _run_git("diff", "--numstat", "--find-renames", f"{base_ref}...{head_ref}")
+    output = _run_git("diff", "--numstat", "-z", "--find-renames", f"{base_ref}...{head_ref}")
     changes: list[Change] = []
-    for line in output.splitlines():
-        added_raw, deleted_raw, path = line.split("\t", 2)
-        if " => " in path:
-            path = path.rsplit(" => ", 1)[-1].rstrip("}")
-            path = path.lstrip("{")
+    entries = output.split("\0")
+    index = 0
+    while index < len(entries) - 1:
+        added_raw, deleted_raw, path = entries[index].split("\t", 2)
+        index += 1
+        if path:
+            base_path = path
+            head_path = path
+        else:
+            base_path = entries[index]
+            head_path = entries[index + 1]
+            index += 2
         added = 0 if added_raw == "-" else int(added_raw)
         deleted = 0 if deleted_raw == "-" else int(deleted_raw)
-        base_exists, base_lines = _line_count_from_ref(base_ref, path)
+        base_exists, base_lines = _line_count_from_ref(base_ref, base_path)
+        _, head_lines = _line_count_from_ref(head_ref, head_path)
         changes.append(
             Change(
-                path=path,
+                path=head_path,
                 added=added,
                 deleted=deleted,
                 base_exists=base_exists,
                 base_lines=base_lines,
-                head_lines=_head_line_count(path),
+                head_lines=head_lines,
             )
         )
     return changes

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).parents[2] / "scripts" / "mobilyze" / "check_architecture.py"
+PROJECT_ROOT = Path(__file__).parents[2]
 SPEC = importlib.util.spec_from_file_location("mobilyze_architecture_guard", MODULE_PATH)
 assert SPEC and SPEC.loader
 GUARD = importlib.util.module_from_spec(SPEC)
@@ -37,6 +42,61 @@ def rules(findings):
 
 
 class ArchitectureGuardTests(unittest.TestCase):
+    def test_checked_in_config_keys_are_allowed_by_strict_schema(self):
+        schema = json.loads(
+            (PROJECT_ROOT / "config/mobilyze/architecture-guardrails.schema.json").read_text()
+        )
+        checked_in_config = json.loads(
+            (PROJECT_ROOT / "config/mobilyze/architecture-guardrails.json").read_text()
+        )
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(set(checked_in_config).difference(schema["properties"]), set())
+        self.assertEqual(schema["properties"]["$schema"]["type"], "string")
+
+    def test_collect_changes_uses_requested_refs_for_nested_rename_line_counts(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+
+            git("init", "--initial-branch=main")
+            git("config", "user.name", "Test User")
+            git("config", "user.email", "test@example.com")
+            source = repo / "agent/mobilyze/nested/source.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("".join(f"line_{index} = {index}\n" for index in range(600)))
+            git("add", ".")
+            git("commit", "-m", "base")
+            base_ref = git("rev-parse", "HEAD")
+
+            destination = repo / "agent/mobilyze/deeper/nested/renamed.py"
+            destination.parent.mkdir(parents=True)
+            git("mv", str(source.relative_to(repo)), str(destination.relative_to(repo)))
+            with destination.open("a") as file:
+                file.write("grown = True\n")
+            git("add", ".")
+            git("commit", "-m", "rename and grow")
+            head_ref = git("rev-parse", "HEAD")
+            with destination.open("a") as file:
+                file.write("dirty = True\n")
+
+            with contextlib.chdir(repo):
+                changes = GUARD.collect_changes(base_ref, head_ref)
+
+        self.assertEqual(len(changes), 1)
+        change = changes[0]
+        self.assertEqual(change.path, "agent/mobilyze/deeper/nested/renamed.py")
+        self.assertTrue(change.base_exists)
+        self.assertEqual(change.base_lines, 600)
+        self.assertEqual(change.head_lines, 601)
+
     def test_rejects_new_custom_source_over_cap(self):
         findings = GUARD.evaluate_change(
             change(
