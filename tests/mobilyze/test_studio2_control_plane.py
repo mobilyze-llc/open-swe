@@ -58,7 +58,6 @@ def test_manifest_contains_secret_names_but_no_values() -> None:
         "GITHUB_WEBHOOK_SECRET",
         "LINEAR_API_KEY",
         "LINEAR_WEBHOOK_SECRET",
-        "OPENAI_API_KEY",
         "TOKEN_ENCRYPTION_KEY",
     }
     assert "secret_values" not in data
