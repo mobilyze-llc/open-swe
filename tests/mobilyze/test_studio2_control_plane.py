@@ -225,5 +225,7 @@ def test_runbook_separates_reviewed_tooling_from_the_pinned_application() -> Non
     assert (
         'git archive --format=tar.gz --output="/tmp/open-swe-$APP_SHA.tar.gz" "$APP_SHA"' in runbook
     )
+    assert "/usr/bin/mktemp -d /tmp/oswe-29-deploy.XXXXXX" in runbook
+    assert r"chmod 0755 \"$REMOTE_TOOLING_DIR\"" in runbook
     assert "--set-path=/dashboard/api http://127.0.0.1:2029/dashboard/api" in runbook
     assert "--set-path=/webhooks http://127.0.0.1:2029/webhooks" in runbook

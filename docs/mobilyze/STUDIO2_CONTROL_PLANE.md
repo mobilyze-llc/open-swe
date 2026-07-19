@@ -62,6 +62,7 @@ scp "/tmp/open-swe-$APP_SHA.tar.gz" studio2:/tmp/
   scripts/mobilyze/install_studio2_control_plane.sh \
   scripts/mobilyze/run_studio2_control_plane.sh \
   studio2:"$REMOTE_TOOLING_DIR"/)
+ssh studio2 "chmod 0755 \"$REMOTE_TOOLING_DIR\""
 ssh studio2 "sudo \"$REMOTE_TOOLING_DIR/scripts/mobilyze/install_studio2_control_plane.sh\" install /tmp/open-swe-$APP_SHA.tar.gz $APP_SHA"
 ```
 
