@@ -6,7 +6,6 @@ import unittest
 from datetime import date
 from pathlib import Path
 
-
 MODULE_PATH = Path(__file__).parents[2] / "scripts" / "mobilyze" / "check_architecture.py"
 SPEC = importlib.util.spec_from_file_location("mobilyze_architecture_guard", MODULE_PATH)
 assert SPEC and SPEC.loader

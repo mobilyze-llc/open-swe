@@ -52,7 +52,9 @@ def _active_waiver(config: dict[str, Any], finding: Finding, today: date) -> dic
     return None
 
 
-def evaluate_change(change: Change, config: dict[str, Any], *, today: date | None = None) -> list[Finding]:
+def evaluate_change(
+    change: Change, config: dict[str, Any], *, today: date | None = None
+) -> list[Finding]:
     today = today or date.today()
     findings: list[Finding] = []
     custom_globs = list(config["custom_path_globs"])
@@ -74,7 +76,11 @@ def evaluate_change(change: Change, config: dict[str, Any], *, today: date | Non
                 )
             )
         threshold = int(config["no_growth_line_threshold"])
-        if change.base_exists and change.base_lines >= threshold and change.head_lines > change.base_lines:
+        if (
+            change.base_exists
+            and change.base_lines >= threshold
+            and change.head_lines > change.base_lines
+        ):
             findings.append(
                 Finding(
                     path,
@@ -140,7 +146,9 @@ def _line_count_from_ref(ref: str, path: str) -> tuple[bool, int]:
     )
     if result.returncode != 0:
         return False, 0
-    return True, result.stdout.count(b"\n") + (1 if result.stdout and not result.stdout.endswith(b"\n") else 0)
+    return True, result.stdout.count(b"\n") + (
+        1 if result.stdout and not result.stdout.endswith(b"\n") else 0
+    )
 
 
 def _head_line_count(path: str) -> int:
