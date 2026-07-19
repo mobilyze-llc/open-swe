@@ -53,7 +53,7 @@ class ArchitectureGuardTests(unittest.TestCase):
         self.assertEqual(set(checked_in_config).difference(schema["properties"]), set())
         self.assertEqual(schema["properties"]["$schema"]["type"], "string")
 
-    def test_collect_changes_uses_requested_refs_for_nested_rename_line_counts(self):
+    def test_collect_changes_uses_merge_base_and_requested_head_for_all_paths(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = Path(temp_dir)
 
@@ -70,32 +70,51 @@ class ArchitectureGuardTests(unittest.TestCase):
             git("config", "user.name", "Test User")
             git("config", "user.email", "test@example.com")
             source = repo / "agent/mobilyze/nested/source.py"
+            ordinary = repo / "agent/mobilyze/ordinary.py"
             source.parent.mkdir(parents=True)
             source.write_text("".join(f"line_{index} = {index}\n" for index in range(600)))
+            ordinary.write_text("".join(f"ordinary_{index} = {index}\n" for index in range(10)))
             git("add", ".")
-            git("commit", "-m", "base")
+            git("commit", "-m", "merge base")
+            git("branch", "feature")
+
+            with source.open("a") as file:
+                file.write("main_source_one = True\nmain_source_two = True\n")
+            with ordinary.open("a") as file:
+                file.write("main_ordinary_one = True\nmain_ordinary_two = True\n")
+            git("add", ".")
+            git("commit", "-m", "advance base")
             base_ref = git("rev-parse", "HEAD")
 
+            git("switch", "feature")
             destination = repo / "agent/mobilyze/deeper/nested/renamed.py"
             destination.parent.mkdir(parents=True)
             git("mv", str(source.relative_to(repo)), str(destination.relative_to(repo)))
             with destination.open("a") as file:
                 file.write("grown = True\n")
+            with ordinary.open("a") as file:
+                file.write("feature_ordinary = True\n")
             git("add", ".")
-            git("commit", "-m", "rename and grow")
+            git("commit", "-m", "feature changes")
             head_ref = git("rev-parse", "HEAD")
             with destination.open("a") as file:
                 file.write("dirty = True\n")
+            with ordinary.open("a") as file:
+                file.write("dirty_ordinary = True\n")
 
             with contextlib.chdir(repo):
                 changes = GUARD.collect_changes(base_ref, head_ref)
 
-        self.assertEqual(len(changes), 1)
-        change = changes[0]
-        self.assertEqual(change.path, "agent/mobilyze/deeper/nested/renamed.py")
-        self.assertTrue(change.base_exists)
-        self.assertEqual(change.base_lines, 600)
-        self.assertEqual(change.head_lines, 601)
+        self.assertEqual(len(changes), 2)
+        changes_by_path = {change.path: change for change in changes}
+        renamed = changes_by_path["agent/mobilyze/deeper/nested/renamed.py"]
+        self.assertTrue(renamed.base_exists)
+        self.assertEqual(renamed.base_lines, 600)
+        self.assertEqual(renamed.head_lines, 601)
+        unchanged_path = changes_by_path["agent/mobilyze/ordinary.py"]
+        self.assertTrue(unchanged_path.base_exists)
+        self.assertEqual(unchanged_path.base_lines, 10)
+        self.assertEqual(unchanged_path.head_lines, 11)
 
     def test_rejects_new_custom_source_over_cap(self):
         findings = GUARD.evaluate_change(

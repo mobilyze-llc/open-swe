@@ -152,6 +152,7 @@ def _line_count_from_ref(ref: str, path: str) -> tuple[bool, int]:
 
 
 def collect_changes(base_ref: str, head_ref: str) -> list[Change]:
+    merge_base = _run_git("merge-base", base_ref, head_ref).strip()
     output = _run_git("diff", "--numstat", "-z", "--find-renames", f"{base_ref}...{head_ref}")
     changes: list[Change] = []
     entries = output.split("\0")
@@ -168,7 +169,7 @@ def collect_changes(base_ref: str, head_ref: str) -> list[Change]:
             index += 2
         added = 0 if added_raw == "-" else int(added_raw)
         deleted = 0 if deleted_raw == "-" else int(deleted_raw)
-        base_exists, base_lines = _line_count_from_ref(base_ref, base_path)
+        base_exists, base_lines = _line_count_from_ref(merge_base, base_path)
         _, head_lines = _line_count_from_ref(head_ref, head_path)
         changes.append(
             Change(
