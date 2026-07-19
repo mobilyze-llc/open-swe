@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from enum import Enum, StrEnum
 from typing import Any, ClassVar, Self
@@ -13,7 +14,13 @@ _REDACTED = "<redacted>"
 class PersistedContract(BaseModel):
     """Strict JSON contract with separate persistence and log serialization."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(
+        allow_inf_nan=False,
+        extra="forbid",
+        frozen=True,
+        hide_input_in_errors=True,
+        strict=True,
+    )
 
     def to_persisted_dict(self) -> dict[str, Any]:
         """Return complete JSON values; callers must protect fields marked secret."""
@@ -25,7 +32,8 @@ class PersistedContract(BaseModel):
 
     @classmethod
     def from_persisted_dict(cls, value: dict[str, Any]) -> Self:
-        return cls.model_validate(value)
+        encoded = json.dumps(value, allow_nan=False, separators=(",", ":"))
+        return cls.model_validate_json(encoded)
 
     @classmethod
     def from_persisted_json(cls, value: str | bytes) -> Self:

@@ -151,14 +151,18 @@ class UnknownEventKindError(HarnessEventValidationError):
 
 def event_from_persisted_dict(value: dict[str, Any]) -> HarnessEvent:
     version = value.get("version")
-    if version != 1:
+    if type(version) is not int or version != 1:
         raise UnknownEventVersionError(f"unsupported harness event version: {version!r}")
 
     kind = value.get("kind")
-    if kind not in _EVENT_KINDS:
+    if not isinstance(kind, str) or kind not in _EVENT_KINDS:
         raise UnknownEventKindError(f"unsupported harness event kind: {kind!r}")
 
-    return _EVENT_ADAPTER.validate_python(value)
+    try:
+        encoded = json.dumps(value, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise HarnessEventValidationError(f"invalid persisted harness event: {exc}") from exc
+    return _EVENT_ADAPTER.validate_json(encoded)
 
 
 def event_from_persisted_json(value: str | bytes) -> HarnessEvent:

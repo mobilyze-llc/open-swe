@@ -90,6 +90,15 @@ def test_event_parser_fails_closed_on_unknown_version() -> None:
         event_from_persisted_dict(payload)
 
 
+@pytest.mark.parametrize("version", [True, 1.0, "1", None])
+def test_event_parser_fails_closed_on_malformed_version_types(version: object) -> None:
+    payload = _events()[0].to_persisted_dict()
+    payload["version"] = version
+
+    with pytest.raises(UnknownEventVersionError, match="unsupported harness event version"):
+        event_from_persisted_dict(payload)
+
+
 def test_event_parser_fails_closed_on_unknown_kind() -> None:
     payload = _events()[0].to_persisted_dict()
     payload["kind"] = "provider_raw_log"
@@ -98,6 +107,15 @@ def test_event_parser_fails_closed_on_unknown_kind() -> None:
         UnknownEventKindError,
         match="unsupported harness event kind: 'provider_raw_log'",
     ):
+        event_from_persisted_dict(payload)
+
+
+@pytest.mark.parametrize("kind", [[], {}, 1, True, None])
+def test_event_parser_fails_closed_on_malformed_kind_types(kind: object) -> None:
+    payload = _events()[0].to_persisted_dict()
+    payload["kind"] = kind
+
+    with pytest.raises(UnknownEventKindError, match="unsupported harness event kind"):
         event_from_persisted_dict(payload)
 
 
