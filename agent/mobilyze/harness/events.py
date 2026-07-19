@@ -7,12 +7,7 @@ from typing import Annotated, Any, Literal, TypeAlias
 
 from pydantic import Field, TypeAdapter, field_validator
 
-from agent.mobilyze.harness.contracts import (
-    PersistedContract,
-    TerminalStatus,
-    Usage,
-    _encode_persisted_dict,
-)
+from agent.mobilyze.harness.contracts import PersistedContract, TerminalStatus, Usage
 
 MAX_EVENT_MESSAGE_LENGTH = 16_384
 
@@ -157,27 +152,17 @@ class UnknownEventKindError(HarnessEventValidationError):
 def event_from_persisted_dict(value: dict[str, Any]) -> HarnessEvent:
     version = value.get("version")
     if type(version) is not int or version != 1:
-        raise UnknownEventVersionError(
-            f"unsupported harness event version ({_discriminator_description(version)})"
-        )
+        raise UnknownEventVersionError(f"unsupported harness event version: {version!r}")
 
     kind = value.get("kind")
     if not isinstance(kind, str) or kind not in _EVENT_KINDS:
-        raise UnknownEventKindError(
-            f"unsupported harness event kind ({_discriminator_description(kind)})"
-        )
+        raise UnknownEventKindError(f"unsupported harness event kind: {kind!r}")
 
     try:
-        encoded = _encode_persisted_dict(value)
+        encoded = json.dumps(value, allow_nan=False, separators=(",", ":"))
     except (TypeError, ValueError) as exc:
         raise HarnessEventValidationError(f"invalid persisted harness event: {exc}") from exc
     return _EVENT_ADAPTER.validate_json(encoded)
-
-
-def _discriminator_description(value: object) -> str:
-    if isinstance(value, str):
-        return f"type=str, length={len(value)}"
-    return f"type={type(value).__name__}"
 
 
 def event_from_persisted_json(value: str | bytes) -> HarnessEvent:
