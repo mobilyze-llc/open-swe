@@ -101,6 +101,20 @@ def render_env_template(manifest: dict[str, Any]) -> str:
     return "".join(f"{name}=\n" for name in manifest["secrets"])
 
 
+def invalid_environment_names(manifest: dict[str, Any], contents: str) -> list[str]:
+    validate_manifest(manifest)
+    assignments: dict[str, list[str]] = {}
+    for line in contents.splitlines():
+        name, separator, value = line.partition("=")
+        if separator and name in manifest["secrets"]:
+            assignments.setdefault(name, []).append(value)
+    return [
+        name
+        for name in manifest["secrets"]
+        if len(assignments.get(name, [])) != 1 or not assignments[name][0].strip()
+    ]
+
+
 def render_launchd_plists(manifest: dict[str, Any]) -> dict[str, bytes]:
     validate_manifest(manifest)
     host = manifest["host"]
@@ -143,6 +157,8 @@ def main() -> int:
     subparsers.add_parser("validate")
     env_parser = subparsers.add_parser("render-env-template")
     env_parser.add_argument("--output", type=Path, required=True)
+    check_env_parser = subparsers.add_parser("list-invalid-environment-names")
+    check_env_parser.add_argument("--input", type=Path, required=True)
     plist_parser = subparsers.add_parser("render-launchd")
     plist_parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
@@ -153,6 +169,10 @@ def main() -> int:
     if args.command == "render-env-template":
         args.output.write_text(render_env_template(manifest))
         args.output.chmod(0o600)
+        return 0
+    if args.command == "list-invalid-environment-names":
+        contents = args.input.read_text() if args.input.is_file() else ""
+        print("\n".join(invalid_environment_names(manifest, contents)))
         return 0
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for label, payload in render_launchd_plists(manifest).items():

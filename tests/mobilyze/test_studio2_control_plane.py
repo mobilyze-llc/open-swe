@@ -113,6 +113,22 @@ def test_runtime_environment_template_lists_names_only() -> None:
     assert all(line.endswith("=") for line in template.splitlines())
 
 
+def test_environment_validation_requires_each_declared_name_once_and_nonempty() -> None:
+    data = manifest()
+    valid = "".join(f"{name}=configured-{index}\n" for index, name in enumerate(data["secrets"]))
+
+    assert CONTROL_PLANE.invalid_environment_names(data, valid) == []
+    assert CONTROL_PLANE.invalid_environment_names(data, valid.replace("LINEAR_API_KEY=", "")) == [
+        "LINEAR_API_KEY"
+    ]
+    assert CONTROL_PLANE.invalid_environment_names(data, f"{valid}LINEAR_API_KEY=duplicate\n") == [
+        "LINEAR_API_KEY"
+    ]
+    assert CONTROL_PLANE.invalid_environment_names(
+        data, valid.replace("LINEAR_API_KEY=configured-15", "LINEAR_API_KEY=   ")
+    ) == ["LINEAR_API_KEY"]
+
+
 def test_installer_is_pinned_and_uses_the_dedicated_service_boundary() -> None:
     installer = INSTALLER_PATH.read_text()
     runner = RUNNER_PATH.read_text()
@@ -120,7 +136,11 @@ def test_installer_is_pinned_and_uses_the_dedicated_service_boundary() -> None:
     assert "IDENTITY=_openswectl" in installer
     assert "--frozen --no-dev" in installer
     assert "pnpm install --frozen-lockfile" in installer
+    assert 'list-invalid-environment-names --input "$ENV_FILE"' in installer
     assert "environment values are missing:" in installer
+    assert '/usr/bin/mktemp -d "$DEPLOYMENT_ROOT/releases/.install-$sha.XXXXXX"' in installer
+    assert '/bin/chmod 0755 "$staging"' in installer
+    assert '/bin/mv "$staging" "$release"' in installer
     assert 'launchctl disable "system/$label"' in installer
     assert installer.index('launchctl enable "system/$label"') < installer.index(
         'launchctl bootstrap system "$plist"'

@@ -82,11 +82,14 @@ install_release() {
     echo "release already exists: $release" >&2
     exit 73
   }
-  /usr/bin/install -d -o root -g wheel -m 0755 "$release"
-  /usr/bin/tar -xzf "$archive" -C "$release"
+  staging=$(/usr/bin/mktemp -d "$DEPLOYMENT_ROOT/releases/.install-$sha.XXXXXX")
+  trap 'if [ -n "${staging:-}" ] && [ -d "$staging" ]; then /bin/rm -rf "$staging"; fi' \
+    EXIT INT TERM
+  /bin/chmod 0755 "$staging"
+  /usr/bin/tar -xzf "$archive" -C "$staging"
 
-  actual_uv=$(shasum -a 256 "$release/uv.lock" | awk '{print $1}')
-  actual_ui=$(shasum -a 256 "$release/ui/pnpm-lock.yaml" | awk '{print $1}')
+  actual_uv=$(shasum -a 256 "$staging/uv.lock" | awk '{print $1}')
+  actual_ui=$(shasum -a 256 "$staging/ui/pnpm-lock.yaml" | awk '{print $1}')
   expected_uv=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["application"]["dependency_locks"]["uv.lock"])' "$MANIFEST")
   expected_ui=$(/usr/bin/python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["application"]["dependency_locks"]["ui/pnpm-lock.yaml"])' "$MANIFEST")
   [ "$actual_uv" = "$expected_uv" ] && [ "$actual_ui" = "$expected_ui" ] || {
@@ -95,13 +98,14 @@ install_release() {
   }
 
   env HOME="$STATE_ROOT/home" UV_CACHE_DIR="$STATE_ROOT/cache/uv" \
-    /opt/homebrew/bin/uv sync --directory "$release" --frozen --no-dev --python 3.12
+    /opt/homebrew/bin/uv sync --directory "$staging" --frozen --no-dev --python 3.12
   (
-    cd "$release/ui"
+    cd "$staging/ui"
     /opt/homebrew/bin/pnpm install --frozen-lockfile
     env VITE_DASHBOARD_API_BASE_URL= /opt/homebrew/bin/pnpm run build
   )
-  chmod -R go-w "$release"
+  chmod -R go-w "$staging"
+  /bin/mv "$staging" "$release"
   /usr/bin/install -o root -g "$IDENTITY" -m 0755 \
     "$PROJECT_ROOT/scripts/mobilyze/run_studio2_control_plane.sh" "$CONFIG_ROOT/run"
   ln -sfn "$release" "$DEPLOYMENT_ROOT/current"
@@ -121,14 +125,19 @@ install_services() {
     chown root:"$IDENTITY" "$ENV_FILE"
     chmod 0640 "$ENV_FILE"
   fi
-  if grep -Eq '^[A-Z][A-Z0-9_]*=$' "$ENV_FILE"; then
+  if [ -n "$(environment_issues)" ]; then
     launchctl disable "system/$BACKEND_LABEL"
     launchctl disable "system/$DASHBOARD_LABEL"
   fi
 }
 
+environment_issues() {
+  /usr/bin/python3 "$PROJECT_ROOT/scripts/mobilyze/studio2_control_plane.py" \
+    --manifest "$MANIFEST" list-invalid-environment-names --input "$ENV_FILE"
+}
+
 validate_environment() {
-  missing=$(grep -E '^[A-Z][A-Z0-9_]*=$' "$ENV_FILE" | cut -d= -f1 || true)
+  missing=$(environment_issues)
   if [ -n "$missing" ]; then
     echo "environment values are missing:" >&2
     echo "$missing" >&2
