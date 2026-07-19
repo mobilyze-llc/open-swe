@@ -1,5 +1,5 @@
 OSWE-14 live evidence (redacted)
-Captured: 2026-07-19T16:57:59Z
+Captured: 2026-07-19T17:30:43Z
 Host: studio2, macOS 26.5.1 (25F80), arm64, 128 GiB RAM, 24 logical CPUs
 Baseline: origin/main 4c9201093851f54aba60cf6ec0e814aebb828076 (merged PR #1)
 
@@ -25,7 +25,7 @@ Security and service proof
   bootstrap-admin, operator-token, worker-token, and worker-bootstrap values: absent from service logs
 
 Live redacted manifest
-  {"schema":"mobilyze.open-swe.studio2-orchard-live.v1","host":"studio2","controller_url":"https://100.107.128.12:6120","authentication":"required","credential":"REDACTED","service_identity":"_opensweorchard","tart_version":"2.32.1","orchard_version":"0.55.0","controller_state":"running","worker_state":"running","max_concurrent_vms":2,"minimum_free_disk_gib":512,"observed_free_disk_gib":1577,"secrets_present":false}
+  {"schema":"mobilyze.open-swe.studio2-orchard-live.v1","host":"studio2","controller_url":"https://100.107.128.12:6120","authentication":"required","credential":"REDACTED","service_identity":"_opensweorchard","tart_version":"2.32.1","orchard_version":"0.55.0","controller_state":"running","worker_state":"running","max_concurrent_vms":2,"observed_free_disk_gib":1577,"secrets_present":false}
 
 Lifecycle A
   create/list: oswe14-proof-a assigned to studio2-open-swe; image resolved to sha256:6c88f37c40254499ecae810fd450fa7f92e0f1f68c48bc3339ee18522b9c8655
@@ -43,12 +43,19 @@ Restart and lifecycle B
   stop: orchard-oswe14-proof-b-<redacted-uuid>-0
   delete: Orchard resource and Tart backing VM absent
 
-Static limit proof
+Static sizing and concurrency proof
   oswe14-limit-a: running, assigned studio2-open-swe, oswe.vm-slots=1
   oswe14-limit-b: running, assigned studio2-open-swe, oswe.vm-slots=1
   oswe14-limit-c: pending, assigned worker=none, oswe.vm-slots=1
   After stop/delete/reconciliation: Orchard VM list empty; Tart local VM list empty
-  Admission floor: configured 512 GiB; observed 1577 GiB free after reboot
+  Disk reporting: observed 1577 GiB free after reboot; no minimum enforcement threshold is asserted
+
+Report-only disk-policy update
+  Installed operator and worker wrapper contained no MIN_FREE, available_kib, or minimum_free_disk enforcement fields.
+  status reported /System/Volumes/Data at 3.6 TiB total, 2.1 TiB used, and 1.5 TiB available without rejecting service startup or VM admission.
+  live manifest retained observed_free_disk_gib=1577 and omitted any minimum threshold.
+  oswe14-report-only completed authenticated create/list/start/execute/stop/delete with the unchanged immutable image, slot request, CPU, memory, and disk settings.
+  after reconciliation: Orchard VM list empty; Tart local VM list empty
 
 Cold reboot and lifecycle C
   First boot at 2026-07-19T16:39:55Z exposed a dependency: Tailscale remained stopped after FileVault unlock, so the controller failed closed instead of binding another interface.

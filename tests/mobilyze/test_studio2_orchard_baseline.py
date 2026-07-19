@@ -39,7 +39,6 @@ def test_runtime_roots_and_static_limits_are_explicit() -> None:
         "default_cpu": 4,
         "default_memory_mib": 8192,
         "default_disk_gib": 40,
-        "minimum_free_disk_gib": 512,
         "dhcp_lease_seconds": 600,
     }
 
@@ -60,6 +59,7 @@ def test_operator_is_fixed_surface_and_validates_manifest() -> None:
     assert "--insecure-ssh-no-client-auth" not in source
     assert "eval " not in source
     assert "ghcr.io/cirruslabs/ubuntu@sha256:" in source
+    assert "observed_free_disk_gib" in source
     assert 'TAILSCALE_BIN="/usr/local/bin/tailscale"' in source
     assert "DHCPLeaseTimeSecs -int 600" in source
     assert "vm-exec" in source

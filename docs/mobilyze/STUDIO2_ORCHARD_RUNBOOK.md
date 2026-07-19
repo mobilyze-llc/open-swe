@@ -20,7 +20,7 @@ Launchd runs the controller as hidden, disabled-login `_opensweorchard` UID/GID 
 - Logs: `/var/log/mobilyze-open-swe-orchard`
 - Controller backups: `/var/backups/mobilyze-open-swe-orchard`
 
-Every admitted VM receives `oswe.vm-slots=1`; the worker advertises two slots, so a third VM remains unassigned and pending. The fixed create command applies 4 CPUs, 8192 MiB memory, and a 40 GiB disk. VM admission and worker startup fail closed below 512 GiB free on the state volume. This is static Orchard resource configuration plus a start/admission preflight, not a dynamic scheduler or host monitor.
+Every admitted VM receives `oswe.vm-slots=1`; the worker advertises two slots, so a third VM remains unassigned and pending. The fixed create command applies 4 CPUs, 8192 MiB memory, and a 40 GiB disk. This initial baseline reports free capacity on the state volume through `status` and `manifest`, but it does not enforce an unproven disk threshold.
 
 ## Install and inspect
 
@@ -68,7 +68,7 @@ ssh studio2 'sudo tail -200 /var/log/mobilyze-open-swe-orchard/worker-launchd.lo
 ssh studio2 'sudo -u _opensweorchard env HOME=/var/db/mobilyze-open-swe-orchard /opt/mobilyze/open-swe-orchard/current/tart list'
 ```
 
-The expected listener is exactly `100.107.128.12:6120`. A wildcard listener, a missing worker heartbeat, a free-disk failure, or any credential text in logs blocks VM admission.
+The expected listener is exactly `100.107.128.12:6120`. A wildcard listener, a missing worker heartbeat, or any credential text in logs blocks operation. `status` prints current free capacity for operator decisions without turning an unvalidated value into an admission rule.
 
 ## Authentication rotation
 
@@ -104,7 +104,7 @@ sudo -u _opensweorchard env HOME=/var/db/mobilyze-open-swe-orchard /opt/mobilyze
 sudo -u _opensweorchard env HOME=/var/db/mobilyze-open-swe-orchard ORCHARD_HOME=/var/db/mobilyze-open-swe-orchard/operator /opt/mobilyze/open-swe-orchard/current/orchard resume worker studio2-open-swe
 ```
 
-For a stuck VM, try `studio2-orchard vm-stop NAME`, then `vm-delete NAME`. Confirm the Orchard resource is absent and wait for worker reconciliation to remove the generated `orchard-NAME-...` Tart VM. When free disk is below 512 GiB, leave scheduling paused, delete failed resources through Orchard, prune only caches or explicitly identified disposable local VMs, and confirm the floor with `df -h /var/db/mobilyze-open-swe-orchard` before resuming.
+For a stuck VM, try `studio2-orchard vm-stop NAME`, then `vm-delete NAME`. Confirm the Orchard resource is absent and wait for worker reconciliation to remove the generated `orchard-NAME-...` Tart VM. If the reported free capacity is insufficient for the intended VM operation, leave scheduling paused, delete failed resources through Orchard, prune only caches or explicitly identified disposable local VMs, and inspect `df -h /var/db/mobilyze-open-swe-orchard` before resuming.
 
 ## Uninstall
 

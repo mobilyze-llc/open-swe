@@ -23,7 +23,6 @@ CONTROLLER_URL="https://${CONTROLLER_ADDRESS}:6120"
 CONTROLLER_LABEL="com.mobilyze.open-swe.orchard.controller"
 WORKER_LABEL="com.mobilyze.open-swe.orchard.worker"
 WORKER_NAME="studio2-open-swe"
-MIN_FREE_GIB="512"
 TART_BIN="${SOFTWARE_ROOT}/current/tart.app/Contents/MacOS/tart"
 ORCHARD_BIN="${SOFTWARE_ROOT}/current/orchard"
 OPERATOR_HOME="${STATE_ROOT}/operator"
@@ -40,16 +39,6 @@ require_root() {
 
 validate_name() {
   [[ "${1:-}" =~ ^[a-z][a-z0-9-]{2,40}$ ]] || { echo "invalid VM name" >&2; exit 64; }
-}
-
-check_disk_floor() {
-  local available_kib required_kib
-  available_kib="$(df -Pk "${STATE_ROOT}" | awk 'NR == 2 {print $4}')"
-  required_kib="$((MIN_FREE_GIB * 1024 * 1024))"
-  [[ "$available_kib" -ge "$required_kib" ]] || {
-    echo "free disk is below ${MIN_FREE_GIB} GiB; refusing VM admission" >&2
-    exit 78
-  }
 }
 
 as_service() {
@@ -73,7 +62,6 @@ assert manifest["controller"]["url"].startswith("https://100.107.128.12:")
 assert manifest["controller"]["credential"] == "REDACTED"
 assert manifest["worker"]["bootstrap_credential"] == "REDACTED"
 assert manifest["limits"]["max_concurrent_vms"] == 2
-assert manifest["limits"]["minimum_free_disk_gib"] == 512
 assert manifest["secrets_present"] is False
 for path in manifest["paths"].values():
     assert path.startswith(("/opt/", "/var/", "/Library/"))
@@ -170,8 +158,6 @@ EOF
   cat >/usr/local/libexec/open-swe-orchard-worker <<EOF
 #!/bin/bash
 set -euo pipefail
-available_kib="\$(df -Pk '${STATE_ROOT}' | awk 'NR == 2 {print \$4}')"
-[[ "\$available_kib" -ge "$((MIN_FREE_GIB * 1024 * 1024))" ]] || exit 78
 export HOME='${STATE_ROOT}'
 export ORCHARD_HOME='${STATE_ROOT}/worker'
 export PATH='${SOFTWARE_ROOT}/current:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin'
@@ -234,7 +220,7 @@ status_all() {
   launchctl print "system/${CONTROLLER_LABEL}" | grep -E 'state =|pid ='
   launchctl print "system/${WORKER_LABEL}" | grep -E 'state =|pid ='
   orchard list workers
-  check_disk_floor
+  df -h "$STATE_ROOT" | awk 'NR == 1 || NR == 2'
 }
 
 start_all() {
@@ -250,7 +236,7 @@ stop_all() {
 }
 
 vm_create() {
-  require_root; validate_name "$1"; check_disk_floor
+  require_root; validate_name "$1"
   orchard create vm "$1" --image "$VALIDATION_IMAGE" --os linux --runtime tart --cpu 4 --memory 8192 --disk-size 40 --resources oswe.vm-slots=1 --labels oswe.pool=apple --restart-policy Never
 }
 
@@ -295,7 +281,7 @@ write_manifest() {
   free_gib="$(( $(df -Pk "$STATE_ROOT" | awk 'NR == 2 {print $4}') / 1024 / 1024 ))"
   controller_state="$(launchctl print "system/${CONTROLLER_LABEL}" | awk '/state =/ {print $3; exit}')"
   worker_state="$(launchctl print "system/${WORKER_LABEL}" | awk '/state =/ {print $3; exit}')"
-  printf '{"schema":"mobilyze.open-swe.studio2-orchard-live.v1","host":"studio2","controller_url":"%s","authentication":"required","credential":"REDACTED","service_identity":"%s","tart_version":"%s","orchard_version":"%s","controller_state":"%s","worker_state":"%s","max_concurrent_vms":2,"minimum_free_disk_gib":512,"observed_free_disk_gib":%s,"secrets_present":false}\n' "$CONTROLLER_URL" "$SERVICE_USER" "$TART_VERSION" "$ORCHARD_VERSION" "$controller_state" "$worker_state" "$free_gib"
+  printf '{"schema":"mobilyze.open-swe.studio2-orchard-live.v1","host":"studio2","controller_url":"%s","authentication":"required","credential":"REDACTED","service_identity":"%s","tart_version":"%s","orchard_version":"%s","controller_state":"%s","worker_state":"%s","max_concurrent_vms":2,"observed_free_disk_gib":%s,"secrets_present":false}\n' "$CONTROLLER_URL" "$SERVICE_USER" "$TART_VERSION" "$ORCHARD_VERSION" "$controller_state" "$worker_state" "$free_gib"
 }
 
 backup_state() {
