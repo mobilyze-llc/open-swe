@@ -178,6 +178,56 @@ class ArchitectureGuardTests(unittest.TestCase):
             },
         )
 
+    def test_custom_to_upstream_renames_check_destination_and_full_file_budget(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+
+            git("init", "--initial-branch=main")
+            git("config", "user.name", "Test User")
+            git("config", "user.email", "test@example.com")
+            undeclared = repo / "agent/mobilyze/reviewer.py"
+            declared = repo / "agent/mobilyze/server.py"
+            undeclared.parent.mkdir(parents=True)
+            undeclared.write_text("".join(f"reviewer_{index} = {index}\n" for index in range(5)))
+            declared.write_text("".join(f"server_{index} = {index}\n" for index in range(11)))
+            git("add", ".")
+            git("commit", "-m", "base")
+            base_ref = git("rev-parse", "HEAD")
+
+            git("mv", "agent/mobilyze/reviewer.py", "agent/reviewer.py")
+            git("mv", "agent/mobilyze/server.py", "agent/server.py")
+            git("commit", "-m", "move custom files upstream")
+            head_ref = git("rev-parse", "HEAD")
+
+            with contextlib.chdir(repo):
+                changes = GUARD.collect_changes(base_ref, head_ref)
+
+        findings = [
+            finding
+            for collected_change in changes
+            for finding in GUARD.evaluate_change(collected_change, config())
+        ]
+        self.assertEqual(
+            {(finding.path, finding.rule) for finding in findings},
+            {
+                ("agent/reviewer.py", "fork_delta.undeclared_upstream_change"),
+                ("agent/server.py", "fork_delta.integration_budget"),
+            },
+        )
+        budget_finding = next(
+            finding for finding in findings if finding.rule == "fork_delta.integration_budget"
+        )
+        self.assertIn("added 11 lines", budget_finding.message)
+
     def test_rejects_new_custom_source_over_cap(self):
         findings = GUARD.evaluate_change(
             change(
@@ -324,7 +374,7 @@ class ArchitectureGuardTests(unittest.TestCase):
                 findings = GUARD.evaluate_change(target, cfg, today=date(2026, 7, 19))
                 self.assertEqual(rules(findings), {"file_size.new_file_line_cap"})
 
-    def test_workflow_resolves_valid_push_fallbacks_and_preserves_pr_base(self):
+    def test_workflow_resolves_initial_and_valid_push_bases_and_preserves_pr_base(self):
         script = workflow_script("Resolve comparison base")
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = Path(temp_dir)
@@ -366,13 +416,100 @@ class ArchitectureGuardTests(unittest.TestCase):
             git("commit", "-m", "first")
             first = git("rev-parse", "HEAD")
 
-            self.assertEqual(resolve(event="push", before="0" * 40), first)
+            empty_tree = resolve(event="push", before="0" * 40)
+            self.assertEqual(git("cat-file", "-t", empty_tree), "tree")
+            self.assertEqual(git("ls-tree", "--name-only", empty_tree), "")
 
             (repo / "file.txt").write_text("second\n")
             git("commit", "-am", "second")
-            self.assertEqual(resolve(event="push", before="f" * 40), first)
             self.assertEqual(resolve(event="push", before=first), first)
             self.assertEqual(resolve(event="pull_request", before="", pr_base=first), first)
+
+    def test_initial_push_checks_the_complete_multi_commit_history(self):
+        script = workflow_script("Resolve comparison base")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=repo,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip()
+
+            git("init", "--initial-branch=main")
+            git("config", "user.name", "Test User")
+            git("config", "user.email", "test@example.com")
+            source = repo / "agent/mobilyze/large.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("".join(f"line_{index} = {index}\n" for index in range(351)))
+            git("add", ".")
+            git("commit", "-m", "introduce violating file")
+            marker = repo / "tests/mobilyze/marker.txt"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("initial push\n")
+            git("add", ".")
+            git("commit", "-m", "second commit")
+            head_ref = git("rev-parse", "HEAD")
+
+            output = repo / "github-output"
+            env = {
+                **os.environ,
+                "EVENT_NAME": "push",
+                "PR_BASE_SHA": "",
+                "PUSH_BEFORE_SHA": "0" * 40,
+                "GITHUB_OUTPUT": str(output),
+            }
+            subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", script],
+                cwd=repo,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            base_ref = output.read_text().strip().removeprefix("ref=")
+            with contextlib.chdir(repo):
+                changes = GUARD.collect_changes(base_ref, head_ref)
+
+        findings = [
+            finding
+            for collected_change in changes
+            for finding in GUARD.evaluate_change(collected_change, config())
+        ]
+        self.assertIn("agent/mobilyze/large.py", {change.path for change in changes})
+        self.assertEqual(rules(findings), {"file_size.new_file_line_cap"})
+
+    def test_workflow_rejects_unresolvable_nonzero_push_base(self):
+        script = workflow_script("Resolve comparison base")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            subprocess.run(
+                ["git", "init", "--initial-branch=main"],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            result = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", script],
+                cwd=repo,
+                env={
+                    **os.environ,
+                    "EVENT_NAME": "push",
+                    "PR_BASE_SHA": "",
+                    "PUSH_BEFORE_SHA": "f" * 40,
+                    "GITHUB_OUTPUT": str(repo / "github-output"),
+                },
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("is not a resolvable commit", result.stderr)
 
 
 if __name__ == "__main__":

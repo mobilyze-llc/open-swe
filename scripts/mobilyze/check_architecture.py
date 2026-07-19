@@ -175,8 +175,18 @@ def _line_count_from_ref(ref: str, path: str) -> tuple[bool, int]:
 
 
 def collect_changes(base_ref: str, head_ref: str) -> list[Change]:
-    merge_base = _run_git("merge-base", base_ref, head_ref).strip()
-    output = _run_git("diff", "--numstat", "-z", "--find-renames", f"{base_ref}...{head_ref}")
+    base_type = _run_git("cat-file", "-t", base_ref).strip()
+    if base_type == "commit":
+        comparison_base = _run_git("merge-base", base_ref, head_ref).strip()
+        diff_range = f"{base_ref}...{head_ref}"
+    elif base_type == "tree":
+        comparison_base = base_ref
+        diff_range = f"{base_ref}..{head_ref}"
+    else:
+        raise RuntimeError(
+            f"comparison base {base_ref} is a {base_type} object, not a commit or tree"
+        )
+    output = _run_git("diff", "--numstat", "-z", "--find-renames", diff_range)
     changes: list[Change] = []
     entries = output.split("\0")
     index = 0
@@ -192,7 +202,7 @@ def collect_changes(base_ref: str, head_ref: str) -> list[Change]:
             index += 2
         added = 0 if added_raw == "-" else int(added_raw)
         deleted = 0 if deleted_raw == "-" else int(deleted_raw)
-        base_exists, base_lines = _line_count_from_ref(merge_base, base_path)
+        base_exists, base_lines = _line_count_from_ref(comparison_base, base_path)
         _, head_lines = _line_count_from_ref(head_ref, head_path)
         changes.append(
             Change(
