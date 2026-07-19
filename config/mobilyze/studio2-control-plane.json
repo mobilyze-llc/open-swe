@@ -1,0 +1,101 @@
+{
+  "schema": "mobilyze.open-swe.studio2-control-plane.v1",
+  "application": {
+    "commit": "4c9201093851f54aba60cf6ec0e814aebb828076",
+    "dependency_locks": {
+      "ui/pnpm-lock.yaml": "dc5638471a8fbbf0a0d0de4da0c0b4a7a664ac9a27edcf87234bdb3df3df0b6d",
+      "uv.lock": "43aca3bf3c7ac2e975682b01039e10c5998d7a03d70790225c60b673abda770d"
+    },
+    "executor": "upstream-local-sandbox",
+    "repository": "mobilyze-llc/open-swe"
+  },
+  "host": {
+    "name": "studio2",
+    "service_identity": "_openswectl",
+    "deployment_root": "/opt/mobilyze/open-swe-control-plane",
+    "state_root": "/var/db/mobilyze-open-swe-control-plane",
+    "log_root": "/var/log/mobilyze-open-swe-control-plane",
+    "config_root": "/Library/Application Support/MobilyzeOpenSWEControlPlane"
+  },
+  "services": {
+    "backend": {
+      "label": "com.mobilyze.open-swe-control-plane.backend",
+      "listen": "127.0.0.1:2029"
+    },
+    "dashboard": {
+      "label": "com.mobilyze.open-swe-control-plane.dashboard",
+      "listen": "127.0.0.1:3029"
+    }
+  },
+  "endpoints": {
+    "dashboard": "https://studio2.tail062eee.ts.net/",
+    "backend": "https://studio2.tail062eee.ts.net/dashboard/api",
+    "github_webhook": "https://studio2.tail062eee.ts.net:8443/webhooks/github",
+    "linear_webhook": "https://studio2.tail062eee.ts.net:8443/webhooks/linear"
+  },
+  "github": {
+    "app_slug": "mobilyze-open-swe-studio2",
+    "organization": "mobilyze-llc",
+    "repository_selection": "selected",
+    "repositories": [
+      "mobilyze-llc/open-swe"
+    ],
+    "permissions": {
+      "actions": "read",
+      "checks": "write",
+      "contents": "write",
+      "issues": "write",
+      "members": "read",
+      "metadata": "read",
+      "pull_requests": "write",
+      "workflows": "write"
+    },
+    "events": [
+      "check_run",
+      "check_suite",
+      "issue_comment",
+      "issues",
+      "pull_request",
+      "pull_request_review",
+      "pull_request_review_comment",
+      "push",
+      "status",
+      "workflow_run"
+    ]
+  },
+  "linear": {
+    "organization": "mobilyze-llc",
+    "team_key": "OSWE",
+    "team_to_repository": {
+      "Open SWE": {
+        "owner": "mobilyze-llc",
+        "name": "open-swe"
+      }
+    },
+    "events": [
+      "Comment.create"
+    ]
+  },
+  "secrets": [
+    "ALLOWED_GITHUB_ORGS",
+    "CONFIGURED_ADMINS",
+    "DASHBOARD_ALLOWED_ORIGINS",
+    "DASHBOARD_API_BASE_URL",
+    "DASHBOARD_BASE_URL",
+    "DASHBOARD_JWT_SECRET",
+    "DEFAULT_REPO_NAME",
+    "DEFAULT_REPO_OWNER",
+    "GITHUB_APP_CLIENT_ID",
+    "GITHUB_APP_CLIENT_SECRET",
+    "GITHUB_APP_ID",
+    "GITHUB_APP_INSTALLATION_ID",
+    "GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_WEBHOOK_SECRET",
+    "LANGGRAPH_URL",
+    "LINEAR_API_KEY",
+    "LINEAR_WEBHOOK_SECRET",
+    "LOCAL_SANDBOX_ROOT_DIR",
+    "SANDBOX_TYPE",
+    "TOKEN_ENCRYPTION_KEY"
+  ]
+}

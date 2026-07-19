@@ -33,6 +33,11 @@
       "path": "AGENTS.md",
       "purpose": "Point agents at the Mobilyze fork policy without replacing upstream guidance.",
       "max_added_lines_per_pr": 16
+    },
+    {
+      "path": "agent/utils/linear_team_repo_map.py",
+      "purpose": "Route the fork's Open SWE Linear team to the selected Mobilyze pilot repository.",
+      "max_added_lines_per_pr": 1
     }
   ],
   "waivers": []
