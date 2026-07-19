@@ -1,0 +1,44 @@
+name: Mobilyze architecture guard
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  architecture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Resolve comparison base
+        id: base
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            ref="$PR_BASE_SHA"
+          elif [[ "$PUSH_BEFORE_SHA" =~ ^0+$ ]]; then
+            ref="$(git hash-object -t tree -w /dev/null)"
+          elif git cat-file -e "$PUSH_BEFORE_SHA^{commit}" 2>/dev/null; then
+            ref="$PUSH_BEFORE_SHA"
+          else
+            echo "Push comparison base $PUSH_BEFORE_SHA is not a resolvable commit" >&2
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - name: Run architecture guard tests
+        run: python -m unittest tests/mobilyze/test_architecture_guard.py
+      - name: Check fork boundaries and file growth
+        run: python scripts/mobilyze/check_architecture.py --base-ref "${{ steps.base.outputs.ref }}"

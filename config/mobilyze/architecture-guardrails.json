@@ -1,0 +1,39 @@
+{
+  "$schema": "./architecture-guardrails.schema.json",
+  "schema": "mobilyze.open-swe.architecture-guardrails.v1",
+  "custom_path_globs": [
+    "agent/mobilyze/**",
+    "tests/mobilyze/**",
+    "docs/mobilyze/**",
+    "config/mobilyze/**",
+    "scripts/mobilyze/**",
+    ".github/workflows/mobilyze-*.yml"
+  ],
+  "source_extensions": [
+    ".py",
+    ".js",
+    ".mjs",
+    ".cjs",
+    ".ts",
+    ".tsx",
+    ".swift",
+    ".sh"
+  ],
+  "exempt_path_globs": [
+    "tests/**",
+    "docs/**",
+    "**/__generated__/**",
+    "**/generated/**",
+    "**/*.generated.*"
+  ],
+  "new_file_line_cap": 350,
+  "no_growth_line_threshold": 600,
+  "integration_seams": [
+    {
+      "path": "AGENTS.md",
+      "purpose": "Point agents at the Mobilyze fork policy without replacing upstream guidance.",
+      "max_added_lines_per_pr": 16
+    }
+  ],
+  "waivers": []
+}
