@@ -86,7 +86,7 @@ def test_event_parser_fails_closed_on_unknown_version() -> None:
     payload = _events()[0].to_persisted_dict()
     payload["version"] = 2
 
-    with pytest.raises(UnknownEventVersionError, match="unsupported harness event version: 2"):
+    with pytest.raises(UnknownEventVersionError, match="unsupported harness event version"):
         event_from_persisted_dict(payload)
 
 
@@ -105,7 +105,7 @@ def test_event_parser_fails_closed_on_unknown_kind() -> None:
 
     with pytest.raises(
         UnknownEventKindError,
-        match="unsupported harness event kind: 'provider_raw_log'",
+        match="unsupported harness event kind",
     ):
         event_from_persisted_dict(payload)
 
@@ -139,3 +139,16 @@ def test_provider_session_identity_is_redacted_from_event_logs() -> None:
 
     assert "provider-session-secret" not in repr(event)
     assert event.to_log_dict()["provider_session_id"] == "<redacted>"
+
+
+@pytest.mark.parametrize("field", ["version", "kind"])
+def test_discriminator_errors_do_not_reproduce_untrusted_values(field: str) -> None:
+    secret = "secret-bearing-discriminator"
+    payload = _events()[0].to_persisted_dict()
+    payload[field] = secret * 10_000
+
+    with pytest.raises((UnknownEventVersionError, UnknownEventKindError)) as raised:
+        event_from_persisted_dict(payload)
+
+    assert secret not in str(raised.value)
+    assert len(str(raised.value)) < 256

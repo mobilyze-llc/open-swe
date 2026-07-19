@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime
 from enum import Enum, StrEnum
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar, Self, cast
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 _SECRET_MARKER = "secret"
 _REDACTED = "<redacted>"
+_TRUNCATED = "<truncated>"
+_MAX_LOG_RECORD_BYTES = 16_384
+_MAX_LOG_STRING_LENGTH = 1_024
+_MAX_LOG_COLLECTION_ITEMS = 32
+_MAX_LOG_DEPTH = 8
 
 
 class PersistedContract(BaseModel):
@@ -24,16 +30,17 @@ class PersistedContract(BaseModel):
 
     def to_persisted_dict(self) -> dict[str, Any]:
         """Return complete JSON values; callers must protect fields marked secret."""
-        return self.model_dump(mode="json")
+        current = self.model_dump(mode="python", round_trip=True)
+        validated = type(self).model_validate(current)
+        return validated.model_dump(mode="json")
 
     def to_persisted_json(self) -> str:
         """Return complete JSON, including secret-bearing values."""
-        return self.model_dump_json()
+        return _encode_persisted_dict(self.to_persisted_dict())
 
     @classmethod
     def from_persisted_dict(cls, value: dict[str, Any]) -> Self:
-        encoded = json.dumps(value, allow_nan=False, separators=(",", ":"))
-        return cls.model_validate_json(encoded)
+        return cls.model_validate_json(_encode_persisted_dict(value))
 
     @classmethod
     def from_persisted_json(cls, value: str | bytes) -> Self:
@@ -47,20 +54,80 @@ class PersistedContract(BaseModel):
             metadata = field.json_schema_extra
             is_secret = isinstance(metadata, dict) and metadata.get(_SECRET_MARKER) is True
             output[name] = _REDACTED if is_secret and value is not None else _to_log_value(value)
+        if len(_encode_log_dict(output).encode()) > _MAX_LOG_RECORD_BYTES:
+            return {"contract": type(self).__name__, "summary": _TRUNCATED}
         return output
 
 
-def _to_log_value(value: object) -> object:
+def _encode_persisted_dict(value: dict[str, Any]) -> str:
+    if type(value) is not dict:
+        raise ValueError("persisted contract must be a JSON object")
+    _validate_json_shape(value)
+    return json.dumps(value, allow_nan=False, separators=(",", ":"))
+
+
+def _validate_json_shape(value: object, *, depth: int = 0, seen: set[int] | None = None) -> None:
+    if depth > 100:
+        raise ValueError("persisted JSON exceeds the maximum nesting depth")
+    if value is None or type(value) in {str, bool, int}:
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError("persisted JSON numbers must be finite")
+        return
+    if type(value) not in {dict, list}:
+        raise ValueError(f"persisted JSON contains a non-JSON value of type {type(value).__name__}")
+
+    if seen is None:
+        seen = set()
+    identity = id(value)
+    if identity in seen:
+        raise ValueError("persisted JSON contains a circular reference")
+    seen.add(identity)
+    try:
+        if type(value) is dict:
+            for key, item in cast(dict[object, object], value).items():
+                if type(key) is not str:
+                    raise ValueError("persisted JSON object keys must be strings")
+                _validate_json_shape(item, depth=depth + 1, seen=seen)
+        else:
+            for item in cast(list[object], value):
+                _validate_json_shape(item, depth=depth + 1, seen=seen)
+    finally:
+        seen.remove(identity)
+
+
+def _encode_log_dict(value: dict[str, object]) -> str:
+    return json.dumps(value, allow_nan=False, separators=(",", ":"))
+
+
+def _to_log_value(value: object, *, depth: int = 0) -> object:
+    if depth >= _MAX_LOG_DEPTH:
+        return _TRUNCATED
     if isinstance(value, PersistedContract):
         return value.to_log_dict()
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, datetime):
         return value.isoformat()
+    if isinstance(value, str):
+        if len(value) <= _MAX_LOG_STRING_LENGTH:
+            return value
+        return f"{value[:_MAX_LOG_STRING_LENGTH]}{_TRUNCATED}"
     if isinstance(value, tuple | list):
-        return [_to_log_value(item) for item in value]
+        items = [_to_log_value(item, depth=depth + 1) for item in value[:_MAX_LOG_COLLECTION_ITEMS]]
+        if len(value) > _MAX_LOG_COLLECTION_ITEMS:
+            items.append(_TRUNCATED)
+        return items
     if isinstance(value, dict):
-        return {str(key): _to_log_value(item) for key, item in value.items()}
+        items = list(value.items())
+        output = {
+            str(key): _to_log_value(item, depth=depth + 1)
+            for key, item in items[:_MAX_LOG_COLLECTION_ITEMS]
+        }
+        if len(items) > _MAX_LOG_COLLECTION_ITEMS:
+            output["__truncated__"] = _TRUNCATED
+        return output
     return value
 
 

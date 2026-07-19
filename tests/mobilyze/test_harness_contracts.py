@@ -147,7 +147,7 @@ def test_expected_result_schema_rejects_non_finite_json_numbers(non_finite: floa
     payload = _spec().to_persisted_dict()
     payload["expected_result_schema"] = {"const": non_finite}
 
-    with pytest.raises(ValueError, match="Out of range float values are not JSON compliant"):
+    with pytest.raises(ValueError, match="persisted JSON numbers must be finite"):
         HarnessSpec.from_persisted_dict(payload)
 
 
@@ -159,6 +159,50 @@ def test_validation_errors_hide_secret_inputs() -> None:
 
     assert secret not in str(raised.value)
     assert secret not in repr(raised.value)
+
+
+def test_persistence_revalidates_mutated_nested_schema_values() -> None:
+    spec = _spec()
+    assert spec.expected_result_schema is not None
+    spec.expected_result_schema["const"] = nan
+
+    with pytest.raises(ValidationError, match="Input should be a finite number"):
+        spec.to_persisted_dict()
+    with pytest.raises(ValidationError, match="Input should be a finite number"):
+        spec.to_persisted_json()
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {"type": "object", 1: "integer key"},
+        {"type": "object", "required": ("summary",)},
+    ],
+)
+def test_persisted_dict_rejects_python_only_json_values(malformed: dict[object, object]) -> None:
+    payload = _spec().to_persisted_dict()
+    payload["expected_result_schema"] = malformed
+
+    with pytest.raises(ValueError, match="persisted JSON"):
+        HarnessSpec.from_persisted_dict(payload)
+
+
+def test_log_serialization_is_bounded_for_large_non_secret_fields() -> None:
+    spec = HarnessSpec(
+        provider="codex",
+        executable="codex",
+        working_directory="/workspace/repo",
+        environment_allowlist=("X" * 100_000,),
+        prompt_source=PromptSource(kind=PromptSourceKind.TEXT, value="prompt"),
+        timeout_seconds=900,
+        permissions_profile=PermissionProfile.READ_WRITE,
+        expected_result_schema={f"field-{index}": "x" * 10_000 for index in range(100)},
+    )
+
+    rendered = str(spec.to_log_dict())
+
+    assert len(rendered.encode()) <= 16_384
+    assert "<truncated>" in rendered
 
 
 class _FakeExecutor:
