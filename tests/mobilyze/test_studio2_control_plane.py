@@ -125,6 +125,8 @@ def test_installer_is_pinned_and_uses_the_dedicated_service_boundary() -> None:
     assert installer.index('launchctl enable "system/$label"') < installer.index(
         'launchctl bootstrap system "$plist"'
     )
+    assert 'while launchctl print "system/$label" >/dev/null 2>&1; do' in installer
+    assert 'echo "service did not unload: $label" >&2' in installer
     assert "open-swe-orchard" not in installer
     assert "crucible" not in installer.lower()
     assert 'set -a\n. "$ENV_FILE"\nset +a' in runner

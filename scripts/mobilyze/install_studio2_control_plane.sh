@@ -150,6 +150,15 @@ stop_services() {
   for label in "$DASHBOARD_LABEL" "$BACKEND_LABEL"; do
     launchctl disable "system/$label"
     launchctl bootout "system/$label" >/dev/null 2>&1 || true
+    attempts=0
+    while launchctl print "system/$label" >/dev/null 2>&1; do
+      attempts=$((attempts + 1))
+      [ "$attempts" -lt 30 ] || {
+        echo "service did not unload: $label" >&2
+        exit 70
+      }
+      sleep 1
+    done
   done
 }
 
