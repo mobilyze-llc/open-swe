@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mobilyze.open-swe.architecture-guardrails.schema.v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "custom_path_globs",
+    "source_extensions",
+    "new_file_line_cap",
+    "no_growth_line_threshold",
+    "integration_seams",
+    "waivers"
+  ],
+  "properties": {
+    "schema": {"const": "mobilyze.open-swe.architecture-guardrails.v1"},
+    "custom_path_globs": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "source_extensions": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    "exempt_path_globs": {"type": "array", "items": {"type": "string"}},
+    "new_file_line_cap": {"type": "integer", "minimum": 1, "maximum": 500},
+    "no_growth_line_threshold": {"type": "integer", "minimum": 1},
+    "integration_seams": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "purpose", "max_added_lines_per_pr"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "purpose": {"type": "string", "minLength": 1},
+          "max_added_lines_per_pr": {"type": "integer", "minimum": 0, "maximum": 80}
+        },
+        "additionalProperties": false
+      }
+    },
+    "waivers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "rule", "reason", "expires"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "rule": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 1},
+          "expires": {"type": "string", "format": "date"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
