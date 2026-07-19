@@ -128,6 +128,10 @@ def test_environment_validation_requires_each_declared_name_once_and_nonempty() 
     assert CONTROL_PLANE.invalid_environment_names(
         data, valid.replace("LINEAR_API_KEY=configured-15", "LINEAR_API_KEY=   ")
     ) == ["LINEAR_API_KEY"]
+    environment = dict.fromkeys(data["secrets"], "configured")
+    assert CONTROL_PLANE.invalid_process_environment_names(data, environment) == []
+    environment["LINEAR_API_KEY"] = ""
+    assert CONTROL_PLANE.invalid_process_environment_names(data, environment) == ["LINEAR_API_KEY"]
 
 
 def test_environment_validation_cli_reports_status_without_names(
@@ -149,9 +153,30 @@ def test_environment_validation_cli_reports_status_without_names(
     valid = subprocess.run(command, capture_output=True, text=True, check=False)
     env_path.write_text("LINEAR_API_KEY=\n")
     invalid = subprocess.run(command, capture_output=True, text=True, check=False)
+    process_command = [
+        sys.executable,
+        str(MODULE_PATH),
+        "--manifest",
+        str(MANIFEST_PATH),
+        "validate-process-environment",
+    ]
+    environment = dict.fromkeys(data["secrets"], "configured")
+    valid_process = subprocess.run(
+        process_command, env=environment, capture_output=True, text=True, check=False
+    )
+    environment["LINEAR_API_KEY"] = ""
+    invalid_process = subprocess.run(
+        process_command, env=environment, capture_output=True, text=True, check=False
+    )
 
     assert (valid.returncode, valid.stdout, valid.stderr) == (0, "", "")
     assert (invalid.returncode, invalid.stdout, invalid.stderr) == (78, "", "")
+    assert (valid_process.returncode, valid_process.stdout, valid_process.stderr) == (0, "", "")
+    assert (invalid_process.returncode, invalid_process.stdout, invalid_process.stderr) == (
+        78,
+        "",
+        "",
+    )
 
 
 def test_installer_is_pinned_and_uses_the_dedicated_service_boundary() -> None:
@@ -160,12 +185,20 @@ def test_installer_is_pinned_and_uses_the_dedicated_service_boundary() -> None:
 
     assert "IDENTITY=_openswectl" in installer
     assert "--frozen --no-dev" in installer
+    assert '--directory "$release"' in installer
+    assert "$staging" not in installer
     assert "pnpm install --frozen-lockfile" in installer
     assert 'validate-environment --input "$ENV_FILE"' in installer
+    assert "validate-process-environment" in installer
+    assert '/usr/bin/sudo -u "$IDENTITY" /bin/sh -c' in installer
     assert "required environment values are missing, duplicated, or empty" in installer
-    assert '/usr/bin/mktemp -d "$DEPLOYMENT_ROOT/releases/.install-$sha.XXXXXX"' in installer
-    assert '/bin/chmod 0755 "$staging"' in installer
-    assert '/bin/mv "$staging" "$release"' in installer
+    assert "cleanup_release=true" in installer
+    assert '/bin/rm -rf "$release"' in installer
+    assert "stop control-plane services before installing a release" in installer
+    assert "GID $IDENTITY_ID is already allocated" in installer
+    assert installer.index('"$PROJECT_ROOT/scripts/mobilyze/run_studio2_control_plane.sh"') > (
+        installer.index("install_services()")
+    )
     assert 'launchctl disable "system/$label"' in installer
     assert installer.index('launchctl enable "system/$label"') < installer.index(
         'launchctl bootstrap system "$plist"'

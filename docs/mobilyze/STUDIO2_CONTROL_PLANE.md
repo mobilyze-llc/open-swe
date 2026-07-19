@@ -43,6 +43,7 @@ for the reviewed installer, manifest, and runner, capture its exact immutable co
 TOOLING_REF=refs/pull/5/head
 APP_SHA=f4e2a6833e403184ee710b102ee9d31bd12a0387
 TOOLING_DIR=$(mktemp -d /tmp/oswe-29-tooling.XXXXXX)
+REMOTE_TOOLING_DIR=$(ssh studio2 '/usr/bin/mktemp -d /tmp/oswe-29-deploy.XXXXXX')
 git fetch origin "$TOOLING_REF"
 TOOLING_SHA=$(git rev-parse FETCH_HEAD)
 git fetch origin "$APP_SHA"
@@ -60,8 +61,8 @@ scp "/tmp/open-swe-$APP_SHA.tar.gz" studio2:/tmp/
   scripts/mobilyze/studio2_control_plane.py \
   scripts/mobilyze/install_studio2_control_plane.sh \
   scripts/mobilyze/run_studio2_control_plane.sh \
-  studio2:/tmp/oswe-29-deploy/)
-ssh studio2 "sudo /tmp/oswe-29-deploy/scripts/mobilyze/install_studio2_control_plane.sh install /tmp/open-swe-$APP_SHA.tar.gz $APP_SHA"
+  studio2:"$REMOTE_TOOLING_DIR"/)
+ssh studio2 "sudo \"$REMOTE_TOOLING_DIR/scripts/mobilyze/install_studio2_control_plane.sh\" install /tmp/open-swe-$APP_SHA.tar.gz $APP_SHA"
 ```
 
 The installer verifies both lockfile hashes before running `uv sync --frozen --no-dev` and
@@ -86,8 +87,8 @@ SANDBOX_TYPE=local
 ```
 
 `start` fails closed with a generic redacted error while any required entry is missing, duplicated,
-or empty. An install with an invalid environment disables both launchd labels, so a reboot cannot
-start a partially configured service.
+empty, or invalid when sourced by the dedicated service identity. An install with an invalid
+environment disables both launchd labels, so a reboot cannot start a partially configured service.
 
 ## Network and service operations
 

@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import plistlib
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -115,6 +117,13 @@ def invalid_environment_names(manifest: dict[str, Any], contents: str) -> list[s
     ]
 
 
+def invalid_process_environment_names(
+    manifest: dict[str, Any], environment: Mapping[str, str]
+) -> list[str]:
+    validate_manifest(manifest)
+    return [name for name in manifest["secrets"] if not environment.get(name, "").strip()]
+
+
 def render_launchd_plists(manifest: dict[str, Any]) -> dict[str, bytes]:
     validate_manifest(manifest)
     host = manifest["host"]
@@ -159,6 +168,7 @@ def main() -> int:
     env_parser.add_argument("--output", type=Path, required=True)
     check_env_parser = subparsers.add_parser("validate-environment")
     check_env_parser.add_argument("--input", type=Path, required=True)
+    subparsers.add_parser("validate-process-environment")
     plist_parser = subparsers.add_parser("render-launchd")
     plist_parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
@@ -173,6 +183,8 @@ def main() -> int:
     if args.command == "validate-environment":
         contents = args.input.read_text() if args.input.is_file() else ""
         return 0 if not invalid_environment_names(manifest, contents) else 78
+    if args.command == "validate-process-environment":
+        return 0 if not invalid_process_environment_names(manifest, os.environ) else 78
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for label, payload in render_launchd_plists(manifest).items():
         (args.output_dir / f"{label}.plist").write_bytes(payload)
