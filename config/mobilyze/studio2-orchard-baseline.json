@@ -1,0 +1,76 @@
+{
+  "schema": "mobilyze.open-swe.studio2-orchard-baseline.v1",
+  "captured_at": "2026-07-19T16:57:59Z",
+  "host": {
+    "name": "studio2",
+    "management_address": "100.107.128.12",
+    "network": "tailscale",
+    "os": "macOS 26.5.1 (25F80)",
+    "architecture": "arm64",
+    "memory_gib": 128
+  },
+  "software": {
+    "tart": {
+      "version": "2.32.1",
+      "sha256": "8554ab4f7fc12afe52f9b7e3093a935673cbac737a83973d2db7a0683c814529",
+      "license": "Fair Source License 0.9; free tier, internal use",
+      "source": "https://github.com/openai/tart/releases/tag/2.32.1"
+    },
+    "orchard": {
+      "version": "0.55.0",
+      "sha256": "35a6ca9f1770a6da9ccc508cee46df21f962d4c5fb437161e4fe8daa34bb14fe",
+      "license": "Fair Source License 0.9; free tier, internal use",
+      "source": "https://github.com/openai/orchard/releases/tag/0.55.0"
+    },
+    "softnet": {
+      "version": "0.20.1",
+      "source": "openai/tools/softnet"
+    }
+  },
+  "controller": {
+    "url": "https://100.107.128.12:6120",
+    "authentication": "orchard-service-account",
+    "credential": "REDACTED",
+    "tls": "orchard-self-signed-pinned-by-context",
+    "launchd_label": "com.mobilyze.open-swe.orchard.controller"
+  },
+  "worker": {
+    "name": "studio2-open-swe",
+    "launchd_label": "com.mobilyze.open-swe.orchard.worker",
+    "runtime": "tart",
+    "service_identity": "_opensweorchard",
+    "bootstrap_credential": "REDACTED",
+    "labels": {
+      "oswe.pool": "apple"
+    },
+    "validation_image": "ghcr.io/cirruslabs/ubuntu@sha256:6c88f37c40254499ecae810fd450fa7f92e0f1f68c48bc3339ee18522b9c8655"
+  },
+  "paths": {
+    "software_root": "/opt/mobilyze/open-swe-orchard",
+    "state_root": "/var/db/mobilyze-open-swe-orchard",
+    "configuration_root": "/Library/Application Support/Mobilyze/OpenSWEOrchard",
+    "log_root": "/var/log/mobilyze-open-swe-orchard",
+    "backup_root": "/var/backups/mobilyze-open-swe-orchard"
+  },
+  "limits": {
+    "max_concurrent_vms": 2,
+    "default_cpu": 4,
+    "default_memory_mib": 8192,
+    "default_disk_gib": 40,
+    "minimum_free_disk_gib": 512,
+    "dhcp_lease_seconds": 600
+  },
+  "candidate_rejections": [
+    {
+      "software": "tart",
+      "version": "2.33.0",
+      "reason": "macOS AMFI rejected the release signature/provisioning profile for com.apple.vm.networking"
+    },
+    {
+      "software": "orchard",
+      "version": "0.56.0",
+      "reason": "macOS AMFI reported a broken signature with Team ID"
+    }
+  ],
+  "secrets_present": false
+}

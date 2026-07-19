@@ -1,0 +1,67 @@
+OSWE-14 live evidence (redacted)
+Captured: 2026-07-19T16:57:59Z
+Host: studio2, macOS 26.5.1 (25F80), arm64, 128 GiB RAM, 24 logical CPUs
+Baseline: origin/main 4c9201093851f54aba60cf6ec0e814aebb828076 (merged PR #1)
+
+Installed software
+  Tart 2.32.1, release archive SHA-256 8554ab4f7fc12afe52f9b7e3093a935673cbac737a83973d2db7a0683c814529
+  Orchard 0.55.0-3083b54, release binary SHA-256 35a6ca9f1770a6da9ccc508cee46df21f962d4c5fb437161e4fe8daa34bb14fe
+  Softnet 0.20.1
+  Tart/Orchard license: Fair Source License 0.9; live use is 24/100 Tart CPU-core users and 1/4 Orchard macOS workers.
+
+Rejected release candidates
+  Tart 2.33.0: exit 137; taskgated-helper reported unsatisfied com.apple.vm.networking entitlement and AMFI reported no matching profile.
+  Orchard 0.56.0: exit 137; AMFI reported "Broken signature with Team ID fatal."
+  No Gatekeeper bypass, local re-signing, or unsigned build was used.
+
+Security and service proof
+  Listener after clean reboot: orchard PID 603, _opensweorchard, TCP 100.107.128.12:6120 (LISTEN)
+  Unauthenticated GET https://100.107.128.12:6120/v1/vms: HTTP 401
+  Controller launchd state: running
+  Worker launchd state: running
+  Worker: studio2-open-swe, heartbeat current, scheduling paused=false
+  Service identity: hidden disabled-login _opensweorchard UID/GID 450
+  Credential fields in live and repository manifests: REDACTED
+  bootstrap-admin, operator-token, worker-token, and worker-bootstrap values: absent from service logs
+
+Live redacted manifest
+  {"schema":"mobilyze.open-swe.studio2-orchard-live.v1","host":"studio2","controller_url":"https://100.107.128.12:6120","authentication":"required","credential":"REDACTED","service_identity":"_opensweorchard","tart_version":"2.32.1","orchard_version":"0.55.0","controller_state":"running","worker_state":"running","max_concurrent_vms":2,"minimum_free_disk_gib":512,"observed_free_disk_gib":1577,"secrets_present":false}
+
+Lifecycle A
+  create/list: oswe14-proof-a assigned to studio2-open-swe; image resolved to sha256:6c88f37c40254499ecae810fd450fa7f92e0f1f68c48bc3339ee18522b9c8655
+  start: status=running, CPU=4, memory=8192 MiB, disk=40 GiB, resources=oswe.vm-slots:1
+  execute: oswe14-exec-ok; Linux ubuntu 6.8.0-134-generic aarch64
+  stop: generated Tart VM stopped as _opensweorchard
+  delete: Orchard resource absent; Tart backing VM absent after worker reconciliation
+
+Restart and lifecycle B
+  controller and worker launchd jobs were booted out and bootstrapped without an interactive shell
+  restored PIDs: controller 71474, worker 71476; worker heartbeat current
+  unauthenticated management remained HTTP 401
+  oswe14-proof-b create/list/start/execute/stop/delete completed
+  execute: oswe14-exec-ok; Linux ubuntu 6.8.0-134-generic aarch64
+  stop: orchard-oswe14-proof-b-<redacted-uuid>-0
+  delete: Orchard resource and Tart backing VM absent
+
+Static limit proof
+  oswe14-limit-a: running, assigned studio2-open-swe, oswe.vm-slots=1
+  oswe14-limit-b: running, assigned studio2-open-swe, oswe.vm-slots=1
+  oswe14-limit-c: pending, assigned worker=none, oswe.vm-slots=1
+  After stop/delete/reconciliation: Orchard VM list empty; Tart local VM list empty
+  Admission floor: configured 512 GiB; observed 1577 GiB free after reboot
+
+Cold reboot and lifecycle C
+  First boot at 2026-07-19T16:39:55Z exposed a dependency: Tailscale remained stopped after FileVault unlock, so the controller failed closed instead of binding another interface.
+  The controller wrapper was corrected to run idempotent Tailscale activation as _opensweorchard and wait for exactly 100.107.128.12 before Orchard starts.
+  A live Tailscale-down/service-start simulation restored Tailscale and both launchd jobs in six seconds; listener and HTTP 401 were unchanged.
+  Second reboot requested at 2026-07-19T16:52:58Z; host boot time 2026-07-19T16:53:19Z.
+  Immediate read-only inspection after FileVault unlock, before any service command: Tailscale=Running; controller PID 603 runs=1; worker PID 606 runs=1; both had never exited.
+  DHCPLeaseTimeSecs persisted at 600; worker advertised oswe.vm-slots=2 with defaults CPU=4 and memory=8192 MiB.
+  oswe14-proof-reboot2 used the immutable Ubuntu digest and completed create/list/start/execute/stop/delete.
+  execute: oswe14-exec-ok; Linux ubuntu 6.8.0-134-generic aarch64
+  after reconciliation: Orchard VM list empty; Tart local VM list empty
+
+Backup, rollback, uninstall proof
+  backup: /var/backups/mobilyze-open-swe-orchard/controller-20260719T163426Z.tar.gz, root:wheel, mode 0600
+  rollback: versioned links restored Tart 2.32.1 and Orchard 0.55.0, services restarted, worker heartbeat restored
+  uninstall dry run named only /opt/mobilyze/open-swe-orchard, /var/db/mobilyze-open-swe-orchard, /Library/Application Support/Mobilyze/OpenSWEOrchard, /var/log/mobilyze-open-swe-orchard, /var/backups/mobilyze-open-swe-orchard, and _opensweorchard
