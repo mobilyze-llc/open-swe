@@ -95,8 +95,8 @@ Configure private same-origin access and the signed webhook-only public listener
 
 ```bash
 tailscale serve --bg --https=443 http://127.0.0.1:3029
-tailscale serve --bg --https=443 --set-path=/dashboard/api http://127.0.0.1:2029
-tailscale funnel --bg --https=8443 --set-path=/webhooks http://127.0.0.1:2029
+tailscale serve --bg --https=443 --set-path=/dashboard/api http://127.0.0.1:2029/dashboard/api
+tailscale funnel --bg --https=8443 --set-path=/webhooks http://127.0.0.1:2029/webhooks
 sudo scripts/mobilyze/install_studio2_control_plane.sh start
 sudo scripts/mobilyze/install_studio2_control_plane.sh status
 curl --fail --silent http://127.0.0.1:2029/health
