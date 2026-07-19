@@ -34,7 +34,7 @@ ssh studio2 'sudo /usr/local/sbin/studio2-orchard manifest'
 ssh studio2 'sudo /usr/local/sbin/studio2-orchard unauthenticated-probe'
 ```
 
-`install` refuses any host except `studio2`, verifies Tailscale address `100.107.128.12`, downloads exact upstream releases, verifies their SHA-256 values and executable signatures, creates the identity and roots, sets Tart's recommended 600-second DHCP lease, bootstraps least-privilege operator and worker service accounts, and loads both launch daemons. The controller launch wrapper re-enables the host's existing enrolled Tailscale node and waits for its exact address before Orchard binds; it neither creates a Tailscale identity nor stores a Tailscale credential. The bootstrap administrator secret is retained only for Orchard credential recovery. Operator credentials have `compute:read`, `compute:write`, `compute:connect`, and `admin:read`; worker credentials have only `compute:read` and `compute:write`.
+`install` refuses any host except `studio2`, verifies Tailscale address `100.107.128.12`, downloads exact upstream releases, verifies their SHA-256 values and executable signatures, creates the identity and roots, sets Tart's recommended 600-second DHCP lease, bootstraps least-privilege operator and worker service accounts, and loads both launch daemons. It exits before account creation if UID or GID 450 belongs to another identity. The controller launch wrapper re-enables the host's existing enrolled Tailscale node and waits for its exact address before Orchard binds; it neither creates a Tailscale identity nor stores a Tailscale credential. The bootstrap administrator secret is retained only for Orchard credential recovery. Operator credentials have `compute:read`, `compute:write`, `compute:connect`, and `admin:read`; worker credentials have only `compute:read` and `compute:write`.
 
 ## VM lifecycle
 
@@ -53,6 +53,8 @@ ssh studio2 'sudo /usr/local/sbin/studio2-orchard vm-delete disposable-name'
 ```bash
 ssh studio2 'sudo /usr/local/sbin/studio2-orchard verify disposable-name'
 ```
+
+`verify` installs an exit cleanup before creation, so an interrupted readiness, execution, or stop step still deletes the Orchard resource and releases its slot.
 
 ## Service lifecycle and diagnostics
 
@@ -84,12 +86,14 @@ Create a consistent controller backup before changing binaries or credentials:
 ssh studio2 'sudo /usr/local/sbin/studio2-orchard backup'
 ```
 
-Upgrade only through a reviewed change to the versions, release checksums, and redacted manifest in `scripts/mobilyze/studio2-orchard` and `config/mobilyze/studio2-orchard-baseline.json`. Re-run `install`, both lifecycle proofs, the unauthenticated probe, log redaction check, and the repository validation gate. This keeps version selection and executable provenance in the PR instead of an untracked host command.
+The backup command restores both launchd services on archive failure as well as success; a failed archive returns nonzero after service restoration.
 
-Rollback re-points the versioned `current-tart` and `current-orchard` links to the pinned baseline and restarts both services:
+Upgrade only through a reviewed change to the versions, release checksums, and redacted manifest in `scripts/mobilyze/studio2-orchard` and `config/mobilyze/studio2-orchard-baseline.json`. Before the upgrade, record the active `current-tart` and `current-orchard` release names; `install` retains versioned releases. Re-run `install`, both lifecycle proofs, the unauthenticated probe, log redaction check, and the repository validation gate. This keeps version selection and executable provenance in the PR instead of an untracked host command.
+
+Rollback accepts the recorded pre-upgrade pair, verifies both binaries already exist under the dedicated release roots, re-points `current-tart` and `current-orchard`, and restarts both services:
 
 ```bash
-ssh studio2 'sudo /usr/local/sbin/studio2-orchard rollback'
+ssh studio2 'sudo /usr/local/sbin/studio2-orchard rollback 2.32.1-r1 0.55.0'
 ```
 
 If controller data also needs restoration, stop both services, move the failed controller directory aside, extract a named backup under `/var/db/mobilyze-open-swe-orchard/controller`, restore `_opensweorchard:_opensweorchard` ownership, and start the services. Never extract over a live BadgerDB directory.

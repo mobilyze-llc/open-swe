@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -65,3 +66,37 @@ def test_operator_is_fixed_surface_and_validates_manifest() -> None:
     assert "vm-exec" in source
     assert "vm-stop" in source
     assert "vm-delete" in source
+    assert "if dscl . -list /Groups PrimaryGroupID" in source
+    assert "if dscl . -list /Users UniqueID" in source
+    assert "trap start_all EXIT" in source
+    assert 'nc -z "$CONTROLLER_ADDRESS" 6120' in source
+    assert 'orchard delete vm "$1" >/dev/null 2>&1 || true' in source
+    assert "rollback TART_RELEASE ORCHARD_VERSION" in source
+    assert "installed rollback pair not found" in source
+    assert '"$BACKUP_ROOT" "$SERVICE_USER"' in source
+
+
+def test_uninstall_preview_names_backup_and_rollback_rejects_invalid_targets(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_id = fake_bin / "id"
+    fake_id.write_text("#!/bin/sh\necho 0\n")
+    fake_id.chmod(0o755)
+    env = {**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"}
+
+    preview = subprocess.run(
+        [str(OPERATOR), "uninstall"], check=False, capture_output=True, text=True, env=env
+    )
+    invalid_rollback = subprocess.run(
+        [str(OPERATOR), "rollback", "../escape", "0.55.0"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert preview.returncode == 0
+    assert "/var/backups/mobilyze-open-swe-orchard" in preview.stdout
+    assert invalid_rollback.returncode == 64

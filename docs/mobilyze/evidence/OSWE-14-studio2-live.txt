@@ -1,5 +1,5 @@
 OSWE-14 live evidence (redacted)
-Captured: 2026-07-19T17:30:43Z
+Captured: 2026-07-19T20:23:21Z
 Host: studio2, macOS 26.5.1 (25F80), arm64, 128 GiB RAM, 24 logical CPUs
 Baseline: origin/main 4c9201093851f54aba60cf6ec0e814aebb828076 (merged PR #1)
 
@@ -15,7 +15,7 @@ Rejected release candidates
   No Gatekeeper bypass, local re-signing, or unsigned build was used.
 
 Security and service proof
-  Listener after clean reboot: orchard PID 603, _opensweorchard, TCP 100.107.128.12:6120 (LISTEN)
+  Listener after current deployment: orchard PID 40870, _opensweorchard, TCP 100.107.128.12:6120 (LISTEN)
   Unauthenticated GET https://100.107.128.12:6120/v1/vms: HTTP 401
   Controller launchd state: running
   Worker launchd state: running
@@ -25,7 +25,7 @@ Security and service proof
   bootstrap-admin, operator-token, worker-token, and worker-bootstrap values: absent from service logs
 
 Live redacted manifest
-  {"schema":"mobilyze.open-swe.studio2-orchard-live.v1","host":"studio2","controller_url":"https://100.107.128.12:6120","authentication":"required","credential":"REDACTED","service_identity":"_opensweorchard","tart_version":"2.32.1","orchard_version":"0.55.0","controller_state":"running","worker_state":"running","max_concurrent_vms":2,"observed_free_disk_gib":1577,"secrets_present":false}
+  {"schema":"mobilyze.open-swe.studio2-orchard-live.v1","host":"studio2","controller_url":"https://100.107.128.12:6120","authentication":"required","credential":"REDACTED","service_identity":"_opensweorchard","tart_version":"2.32.1","orchard_version":"0.55.0","controller_state":"running","worker_state":"running","max_concurrent_vms":2,"observed_free_disk_gib":1583,"secrets_present":false}
 
 Lifecycle A
   create/list: oswe14-proof-a assigned to studio2-open-swe; image resolved to sha256:6c88f37c40254499ecae810fd450fa7f92e0f1f68c48bc3339ee18522b9c8655
@@ -69,6 +69,20 @@ Cold reboot and lifecycle C
   after reconciliation: Orchard VM list empty; Tart local VM list empty
 
 Backup, rollback, uninstall proof
-  backup: /var/backups/mobilyze-open-swe-orchard/controller-20260719T163426Z.tar.gz, root:wheel, mode 0600
-  rollback: versioned links restored Tart 2.32.1 and Orchard 0.55.0, services restarted, worker heartbeat restored
+  backup: /var/backups/mobilyze-open-swe-orchard/controller-20260719T201857Z.tar.gz, root:wheel, mode 0600; archive lists the controller state tree
+  forced tar failure: backup exited 1; the EXIT restoration brought controller PID 39708 and worker PID 39710 back to running, heartbeat current, HTTP 401 retained
+  rollback setup: current links were moved to controlled 9.9.9-r1/9.9.9 aliases of the same validated binaries and both services restarted
+  rollback target: rollback 2.32.1-r1 0.55.0 exited 0, restored exact versioned links, controller PID 40648, worker PID 40663, current heartbeat, and free-capacity reporting
+  missing rollback pair: rollback 9.9.9-r1 9.9.9 exited 66 with installed rollback pair not found; links were unchanged
   uninstall dry run named only /opt/mobilyze/open-swe-orchard, /var/db/mobilyze-open-swe-orchard, /Library/Application Support/Mobilyze/OpenSWEOrchard, /var/log/mobilyze-open-swe-orchard, /var/backups/mobilyze-open-swe-orchard, and _opensweorchard
+
+Post-review blocker correction proof
+  deployed operator SHA-256 c3fb686860d69db7acf3653853ad49f7012bed52a2457d6a1e84227de28fe12d matched the checkout
+  live UID/GID queries returned only _opensweorchard at 450; installer collision branches now exit 78 before dscl create
+  forced verify failure: fake readiness tools caused exit 1 after oswe14-cleanup was created; the EXIT cleanup removed the Orchard resource and Tart list reconciled empty
+  lifecycle oswe14-fix-a: authenticated create/list/start/execute/stop/delete completed; execute printed oswe14-exec-ok and Linux aarch64
+  service restart waited for 100.107.128.12:6120, restored controller PID 40870 and worker PID 40885, current heartbeat, and HTTP 401
+  lifecycle oswe14-fix-b after restart: authenticated create/list/start/execute/stop/delete completed; execute printed oswe14-exec-ok and Linux aarch64
+  limits: oswe14-fix-limit-a and -b ran on studio2-open-swe with CPU=4, memory=8192 MiB, disk=40 GB, oswe.vm-slots=1; -c remained pending with worker=none
+  final reconciliation: Orchard VM list empty; Tart local list empty; worker still advertised oswe.vm-slots=2 with 4 CPU / 8192 MiB defaults
+  final security: exact _opensweorchard listener at 100.107.128.12:6120, unauthenticated HTTP 401, all four secret files mode 0400, and secret values absent from service logs

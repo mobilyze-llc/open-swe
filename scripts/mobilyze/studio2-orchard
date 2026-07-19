@@ -29,7 +29,7 @@ OPERATOR_HOME="${STATE_ROOT}/operator"
 SECRETS_ROOT="${CONFIG_ROOT}/secrets"
 
 usage() {
-  echo "usage: $0 validate MANIFEST | install | status | start | stop | restart | unauthenticated-probe | vm-create NAME | vm-list | vm-exec NAME | vm-stop NAME | vm-delete NAME | verify NAME | manifest | backup | rollback | uninstall [--confirm]" >&2
+  echo "usage: $0 validate MANIFEST | install | status | start | stop | restart | unauthenticated-probe | vm-create NAME | vm-list | vm-exec NAME | vm-stop NAME | vm-delete NAME | verify NAME | manifest | backup | rollback TART_RELEASE ORCHARD_VERSION | uninstall [--confirm]" >&2
   exit 64
 }
 
@@ -72,12 +72,12 @@ PY
 
 install_identity() {
   if ! dscl . -read "/Groups/${SERVICE_GROUP}" >/dev/null 2>&1; then
-    ! dscl . -list /Groups PrimaryGroupID | awk '{print $2}' | grep -qx "$SERVICE_GID"
+    if dscl . -list /Groups PrimaryGroupID | awk '{print $2}' | grep -qx "$SERVICE_GID"; then echo "GID ${SERVICE_GID} is already in use" >&2; exit 78; fi
     dscl . -create "/Groups/${SERVICE_GROUP}"
     dscl . -create "/Groups/${SERVICE_GROUP}" PrimaryGroupID "$SERVICE_GID"
   fi
   if ! dscl . -read "/Users/${SERVICE_USER}" >/dev/null 2>&1; then
-    ! dscl . -list /Users UniqueID | awk '{print $2}' | grep -qx "$SERVICE_UID"
+    if dscl . -list /Users UniqueID | awk '{print $2}' | grep -qx "$SERVICE_UID"; then echo "UID ${SERVICE_UID} is already in use" >&2; exit 78; fi
     dscl . -create "/Users/${SERVICE_USER}"
     dscl . -create "/Users/${SERVICE_USER}" UniqueID "$SERVICE_UID"
     dscl . -create "/Users/${SERVICE_USER}" PrimaryGroupID "$SERVICE_GID"
@@ -226,6 +226,8 @@ status_all() {
 start_all() {
   require_root
   launchctl bootstrap system "/Library/LaunchDaemons/${CONTROLLER_LABEL}.plist" 2>/dev/null || launchctl kickstart -k "system/${CONTROLLER_LABEL}"
+  for _ in {1..30}; do nc -z "$CONTROLLER_ADDRESS" 6120 && break; sleep 1; done
+  nc -z "$CONTROLLER_ADDRESS" 6120
   launchctl bootstrap system "/Library/LaunchDaemons/${WORKER_LABEL}.plist" 2>/dev/null || launchctl kickstart -k "system/${WORKER_LABEL}"
 }
 
@@ -256,6 +258,7 @@ vm_stop() {
 
 verify_vm() {
   require_root; validate_name "$1"
+  trap 'orchard delete vm "$1" >/dev/null 2>&1 || true' EXIT
   vm_create "$1"
   orchard list vms
   for _ in {1..180}; do orchard get vm "$1" | awk '$1 == "Status" && $2 == "running" {found=1} END {exit !found}' && break; sleep 5; done
@@ -264,6 +267,7 @@ verify_vm() {
   vm_stop "$1"
   orchard delete vm "$1"
   ! orchard get vm "$1" >/dev/null 2>&1
+  trap - EXIT
   echo "lifecycle complete: $1"
 }
 
@@ -287,17 +291,22 @@ write_manifest() {
 backup_state() {
   require_root
   stop_all
+  trap start_all EXIT
   local archive="${BACKUP_ROOT}/controller-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
   tar -czf "$archive" -C "$STATE_ROOT" controller
   chmod 0600 "$archive"
   start_all
+  trap - EXIT
   echo "$archive"
 }
 
 rollback_pins() {
   require_root
-  ln -sfn "${SOFTWARE_ROOT}/releases/tart/${TART_RELEASE}" "${SOFTWARE_ROOT}/current-tart"
-  ln -sfn "${SOFTWARE_ROOT}/releases/orchard/${ORCHARD_VERSION}" "${SOFTWARE_ROOT}/current-orchard"
+  [[ $# == 2 && "$1" =~ ^[0-9]+(\.[0-9]+){2}-r[0-9]+$ && "$2" =~ ^[0-9]+(\.[0-9]+){2}$ ]] || usage
+  local tart_release="$1" orchard_version="$2"
+  [[ -x "${SOFTWARE_ROOT}/releases/tart/${tart_release}/tart.app/Contents/MacOS/tart" && -x "${SOFTWARE_ROOT}/releases/orchard/${orchard_version}/orchard" ]] || { echo "installed rollback pair not found" >&2; exit 66; }
+  ln -sfn "${SOFTWARE_ROOT}/releases/tart/${tart_release}" "${SOFTWARE_ROOT}/current-tart"
+  ln -sfn "${SOFTWARE_ROOT}/releases/orchard/${orchard_version}" "${SOFTWARE_ROOT}/current-orchard"
   restart_all
   status_all
 }
@@ -307,7 +316,7 @@ restart_all() { stop_all; start_all; }
 uninstall_all() {
   require_root
   [[ "${1:-}" == "--confirm" ]] || {
-    printf 'would remove %s, %s, %s, %s and identity %s\n' "$SOFTWARE_ROOT" "$STATE_ROOT" "$CONFIG_ROOT" "$LOG_ROOT" "$SERVICE_USER"
+    printf 'would remove %s, %s, %s, %s, %s and identity %s\n' "$SOFTWARE_ROOT" "$STATE_ROOT" "$CONFIG_ROOT" "$LOG_ROOT" "$BACKUP_ROOT" "$SERVICE_USER"
     return
   }
   stop_all
@@ -333,7 +342,7 @@ case "$command" in
   verify) [[ $# == 1 ]] || usage; verify_vm "$1" ;;
   manifest) write_manifest ;;
   backup) backup_state ;;
-  rollback) rollback_pins ;;
+  rollback) rollback_pins "$@" ;;
   uninstall) uninstall_all "$@" ;;
   *) usage ;;
 esac
