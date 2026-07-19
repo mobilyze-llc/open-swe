@@ -6,11 +6,25 @@ Mobilyze code exists only where product requirements cannot be met upstream with
 
 ## Permitted extension areas
 
-1. **Native CLI harness execution** — invoke coding agents through provider CLIs such as `claude -p` and `codex exec`, normalize their events, and persist provider session identities.
+1. **Approved agent execution** — run API models through Open SWE, provider-owned CLI agents through the Mobilyze harness, or pinned external helpers under the explicit contracts below.
 2. **Apple execution** — route iOS and macOS work to Tart VMs scheduled by Orchard on `studio2`, with task-scoped homes, workspaces, simulators, skills, and MCP configuration.
 3. **Decorrelated review** — prepare immutable review capsules, run independent read-only CLI lanes, normalize findings, and publish SHA-bound review evidence through Open SWE's existing review surfaces.
 
 Do not add a backlog manager, fleet pressure controller, token allocator, general scheduler, custom merge queue, or replacement dashboard. Prefer GitHub checks, branch protection, static concurrency limits, and provider or sandbox lifecycle primitives.
+
+## Approved executor kinds
+
+Every Mobilyze Agent Definition selects exactly one approved executor kind. The definition also owns the behavior, model policy, instructions, schemas, limits, and named endpoint, profile, tool, or helper references used by that executor.
+
+- **`api_model`** — Open SWE owns conversation state, model turns, tools, checkpoints, cancellation, and task results. The Agent Definition selects an approved provider/model and endpoint profile; Mobilyze code must not introduce a second agent loop.
+- **`cli_agent`** — a provider CLI owns its internal agent loop. The Mobilyze harness owns the outer lifecycle, isolation, normalized status and artifacts, and continuity through the exact provider-generated session identity.
+- **`external_helper`** — a pinned and hash-verified executable owns one bounded operation under an explicit input/output contract. It is not an agent loop or an implicit model-access path.
+
+Endpoint profiles describe deployment metadata and capabilities; they are not separate agent implementations. Evidence and compatibility checks must bind the endpoint-profile identity and capability hash without changing graph or executor selection.
+
+Task profiles own the sandbox or image, skills, MCP servers, permissions, credentials, and cleanup. API agents receive MCP capabilities through Open SWE's MCP bridge and task profile, not through Codex-native configuration.
+
+No executor may be introduced implicitly or bypass the approved Agent Definition, endpoint/profile, provider-session, or helper identity that governs it. Direct or unclassified model calls remain prohibited; approved subscription-backed and official provider API access both use `api_model` rather than separate graph or executor kinds.
 
 ## Ownership boundaries
 
@@ -31,11 +45,12 @@ Upstream-owned files may be changed only as declared integration seams. A seam s
 - Prefer explicit protocols and small dataclasses over inheritance trees or generic plugin frameworks.
 - Keep provider adapters separate. Shared code may own process lifecycle and normalized events, not provider-specific flags or parsers.
 - Implement async-only runtime paths. Do not add parallel sync implementations.
+- Let Open SWE own the agent/tool loop for `api_model`; do not wrap approved API access in a provider-specific Mobilyze loop.
 - Persist opaque provider-generated session IDs instead of requiring caller-generated IDs.
 - Never retry a side-effectful coding run blindly. Classify whether execution started, whether writes occurred, and whether the provider session can resume.
-- Treat skills, MCP configuration, credentials, and provider homes as task-profile inputs staged inside the sandbox, not global host state.
+- Treat sandbox/image selection, skills, MCP configuration, permissions, credentials, cleanup, and provider homes as task-profile inputs, not global host state.
 - Read reviewer skills and policy from a trusted base SHA or administrator-controlled source, never an untrusted PR head.
-- Disable optional model-backed features in Mobilyze mode until they use the approved CLI harness path.
+- Disable optional model-backed features in Mobilyze mode until an approved Agent Definition selects their executor and named endpoint/profile/helper identities.
 
 ## Upstream integration policy
 
@@ -83,5 +98,7 @@ Before merging a Mobilyze change, confirm:
 2. New behavior lives in a Mobilyze-owned namespace.
 3. Upstream file edits are narrow declared seams.
 4. The architecture guard and focused tests pass.
-5. No direct provider API model call was introduced in Mobilyze mode.
-6. No new orchestration subsystem was created where Open SWE, GitHub, Orchard, Tart, or the provider CLI already owns the lifecycle.
+5. Every model or helper call uses an explicit `api_model`, `cli_agent`, or `external_helper` definition and its approved identities; direct or unclassified calls remain prohibited.
+6. Endpoint-profile identity and capability hashes are present where evidence or compatibility decisions depend on them, without selecting a different graph.
+7. API-agent MCP capabilities come from Open SWE's MCP bridge and task profile, not Codex-native configuration.
+8. No new orchestration subsystem was created where Open SWE, GitHub, Orchard, Tart, a provider CLI, or a pinned helper already owns the lifecycle.
