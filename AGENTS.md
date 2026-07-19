@@ -123,3 +123,11 @@ Webhooks compute deterministic thread ids so the same Linear issue / Slack threa
 - New dashboard endpoints: add to `agent/dashboard/routes.py`. The router is auto-mounted on the FastAPI app.
 - New graphs: register the entrypoint in `langgraph.json` under `graphs`.
 - Minimal-to-no code comments — only when the *why* isn't obvious from the code.
+
+## Mobilyze fork boundary
+
+Mobilyze-specific production code belongs under `agent/mobilyze/`; tests, policy, scripts, and workflows use the corresponding Mobilyze namespaces documented in `docs/mobilyze/FORK_ARCHITECTURE.md`.
+
+Before changing a Mobilyze extension or an upstream integration seam, read that policy and the nearest scoped `AGENTS.md`. Run `python scripts/mobilyze/check_architecture.py --base-ref origin/main` and `python -m unittest tests/mobilyze/test_architecture_guard.py`.
+
+Do not add backlog management, fleet pressure, token allocation, a custom merge queue, or a replacement control plane to this fork.
