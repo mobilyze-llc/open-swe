@@ -63,20 +63,80 @@ async def root_instruction_path(
     )
 
 
+async def _trusted_skill_dirs_at_ref(
+    backend: SandboxBackendProtocol, repo_dir: str, base_sha: str
+) -> set[str]:
+    paths = " ".join(shlex.quote(path) for path in DEFAULT_SKILL_DIRS)
+    marker = "__mobilyze_git_status__="
+    command = (
+        f"git ls-tree -d --name-only {shlex.quote(base_sha)} -- {paths}; "
+        f"status=$?; echo {marker}$status"
+    )
+    try:
+        result = await asyncio.to_thread(
+            backend.execute, f"cd {shlex.quote(repo_dir)} && {command}"
+        )
+    except Exception as exc:
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_SKILLS_UNAVAILABLE,
+            "failed to inspect trusted skill sources at the base SHA",
+        ) from exc
+    lines = _result_output(result).splitlines()
+    status_lines = [line for line in lines if line.startswith(marker)]
+    if _result_exit_code(result) not in (0, None) or len(status_lines) != 1:
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_SKILLS_UNAVAILABLE,
+            "failed to inspect trusted skill sources at the base SHA",
+        )
+    try:
+        status = int(status_lines[0].removeprefix(marker))
+    except ValueError as exc:
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_SKILLS_UNAVAILABLE,
+            "failed to inspect trusted skill sources at the base SHA",
+        ) from exc
+    if status != 0:
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_SKILLS_UNAVAILABLE,
+            "failed to inspect trusted skill sources at the base SHA",
+        )
+    present = {line for line in lines if not line.startswith(marker)}
+    if not present.issubset(DEFAULT_SKILL_DIRS):
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_SKILLS_UNAVAILABLE,
+            "trusted skill source inspection returned an unexpected path",
+        )
+    return present
+
+
 async def trusted_skill_records(
     backend: SandboxBackendProtocol,
     repo_dir: str,
     base_sha: str,
 ) -> list[dict[str, str]]:
+    expected = await _trusted_skill_dirs_at_ref(backend, repo_dir, base_sha)
     sources = await materialize_trusted_skills(backend, repo_dir=repo_dir, trusted_ref=base_sha)
-    records: list[dict[str, str]] = []
+    materialized: dict[str, str] = {}
     for source in sources:
-        source_dir = next((item for item in DEFAULT_SKILL_DIRS if item in source), None)
-        if source_dir is None:
+        normalized_source = source.rstrip("/")
+        source_dir = next(
+            (item for item in DEFAULT_SKILL_DIRS if normalized_source.endswith(f"/{item}")), None
+        )
+        if source_dir is None or source_dir in materialized or source_dir not in expected:
             raise ReviewSubjectBlocked(
                 ReviewSubjectBlockerCode.TRUSTED_SKILLS_UNAVAILABLE,
                 f"unexpected trusted skill source: {source}",
             )
+        materialized[source_dir] = source
+    missing = sorted(expected.difference(materialized))
+    if missing:
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_SKILLS_UNAVAILABLE,
+            f"failed to materialize trusted skill sources: {', '.join(missing)}",
+        )
+
+    records: list[dict[str, str]] = []
+    for source_dir, source in materialized.items():
         git_oid = await git_value(
             backend,
             repo_dir,

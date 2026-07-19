@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 from agent.review.diff import (
     changed_files,
     compute_diff_line_set,
-    fetch_pr_diff,
     fetch_pr_metadata,
     materialize_review_diff,
     review_diff_range,
@@ -79,22 +78,10 @@ def _normalized_line_map(diff_text: str) -> dict[str, dict[str, list[int]]]:
     }
 
 
-async def materialize_review_subject(
-    backend: SandboxBackendProtocol,
-    *,
-    github_token: str,
-    work_dir: str,
-    request: ReviewSubjectRequest,
-) -> MaterializedReviewSubject:
-    """Materialize a SHA-bound subject before any review model is invoked."""
-    _validate_request(request)
-    base_sha = request.base_sha.lower()
-    head_sha = request.head_sha.lower()
-    last_reviewed_sha = request.last_reviewed_sha.lower()
-
-    pr = await fetch_pr(
-        owner=request.owner, repo=request.repo, pr_number=request.pr_number, token=github_token
-    )
+async def _assert_live_pr_identity(
+    *, owner: str, repo: str, pr_number: int, token: str, base_sha: str, head_sha: str
+) -> None:
+    pr = await fetch_pr(owner=owner, repo=repo, pr_number=pr_number, token=token)
     if pr is None:
         raise ReviewSubjectBlocked(
             ReviewSubjectBlockerCode.PR_METADATA_UNAVAILABLE, "live PR metadata is unavailable"
@@ -111,6 +98,29 @@ async def materialize_review_subject(
             ReviewSubjectBlockerCode.STALE_HEAD_SHA,
             f"requested head {head_sha} does not match live PR head {live_head or '<missing>'}",
         )
+
+
+async def materialize_review_subject(
+    backend: SandboxBackendProtocol,
+    *,
+    github_token: str,
+    work_dir: str,
+    request: ReviewSubjectRequest,
+) -> MaterializedReviewSubject:
+    """Materialize a SHA-bound subject before any review model is invoked."""
+    _validate_request(request)
+    base_sha = request.base_sha.lower()
+    head_sha = request.head_sha.lower()
+    last_reviewed_sha = request.last_reviewed_sha.lower()
+
+    await _assert_live_pr_identity(
+        owner=request.owner,
+        repo=request.repo,
+        pr_number=request.pr_number,
+        token=github_token,
+        base_sha=base_sha,
+        head_sha=head_sha,
+    )
 
     repo_ready = await prepare_review_repo(
         backend,
@@ -157,19 +167,6 @@ async def materialize_review_subject(
         last_reviewed_sha=last_reviewed_sha,
         re_review=re_review,
     )
-    supplied_diff = None
-    if not re_review:
-        supplied_diff = await fetch_pr_diff(
-            owner=request.owner,
-            repo=request.repo,
-            pr_number=request.pr_number,
-            token=github_token,
-        )
-        if supplied_diff is None:
-            raise ReviewSubjectBlocked(
-                ReviewSubjectBlockerCode.DIFF_MATERIALIZATION_FAILED,
-                "canonical PR diff is unavailable",
-            )
     try:
         diff = await materialize_review_diff(
             backend,
@@ -177,7 +174,7 @@ async def materialize_review_subject(
             base_ref=diff_base,
             head_ref=diff_head,
             merge_base=use_merge_base,
-            diff_text=supplied_diff,
+            diff_text=None,
         )
     except (RuntimeError, ValueError) as exc:
         raise ReviewSubjectBlocked(
@@ -224,6 +221,14 @@ async def materialize_review_subject(
         request.owner, request.repo, base_sha, files, token=github_token
     )
     skill_records = await trusted_skill_records(backend, repo_dir, base_sha)
+    await _assert_live_pr_identity(
+        owner=request.owner,
+        repo=request.repo,
+        pr_number=request.pr_number,
+        token=github_token,
+        base_sha=base_sha,
+        head_sha=head_sha,
+    )
 
     return await persist_review_subject(
         backend,

@@ -40,18 +40,21 @@ index 1111111..2222222 100644
 
 
 class FakeBackend:
-    def __init__(self) -> None:
+    def __init__(self, *, trusted_skill_dirs: set[str] | None = None) -> None:
         self.files: dict[str, bytes] = {}
         self.commands: list[str] = []
         self.fail_commit = False
         self.upload_error: str | None = None
+        self.trusted_skill_dirs = trusted_skill_dirs or set()
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         del timeout
         self.commands.append(command)
         if self.fail_commit and "^{commit}" in command:
             return ExecuteResponse(output="missing", exit_code=1, truncated=False)
-        if "git rev-parse HEAD" in command:
+        if "git ls-tree -d --name-only" in command:
+            output = "\n".join([*sorted(self.trusted_skill_dirs), "__mobilyze_git_status__=0"])
+        elif "git rev-parse HEAD" in command:
             output = HEAD_SHA
         elif "git merge-base" in command:
             output = BASE_SHA
@@ -114,24 +117,25 @@ def install_sources(
     root_instructions: str | None = "# safe base instructions",
     live_base: str = BASE_SHA,
     live_head: str = HEAD_SHA,
+    final_live_head: str | None = None,
     prep_ok: bool = True,
     diff_error: bool = False,
     skill_sources: list[str] | None = None,
 ) -> dict[str, Any]:
-    calls: dict[str, Any] = {"diff": [], "instruction_refs": [], "pr_diff": 0}
+    calls: dict[str, Any] = {"diff": [], "instruction_refs": [], "pr": 0}
 
     async def fetch_pr(**_: object) -> dict[str, object]:
+        calls["pr"] += 1
         return {
             "base": {"sha": live_base, "repo": {"full_name": "acme/widget"}},
-            "head": {"sha": live_head, "repo": {"full_name": "contributor/fork"}},
+            "head": {
+                "sha": final_live_head if calls["pr"] % 2 == 0 and final_live_head else live_head,
+                "repo": {"full_name": "contributor/fork"},
+            },
         }
 
     async def prepare_review_repo(*_: object, **__: object) -> bool:
         return prep_ok
-
-    async def fetch_pr_diff(**_: object) -> str:
-        calls["pr_diff"] += 1
-        return diff_text
 
     async def materialize_review_diff(*_: object, **kwargs: object) -> MaterializedReviewDiff:
         calls["diff"].append(kwargs)
@@ -170,7 +174,6 @@ def install_sources(
 
     monkeypatch.setattr(subject_module, "fetch_pr", fetch_pr)
     monkeypatch.setattr(subject_module, "prepare_review_repo", prepare_review_repo)
-    monkeypatch.setattr(subject_module, "fetch_pr_diff", fetch_pr_diff)
     monkeypatch.setattr(subject_module, "materialize_review_diff", materialize_review_diff)
     monkeypatch.setattr(subject_module, "fetch_pr_metadata", fetch_pr_metadata)
     monkeypatch.setattr(subject_module, "fetch_pr_review_threads", fetch_pr_review_threads)
@@ -198,7 +201,7 @@ async def test_first_review_is_deterministic_and_reuses_open_swe_diff_utilities(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = install_sources(monkeypatch, skill_sources=["/work/.review-skills/.agents/skills/"])
-    backend = FakeBackend()
+    backend = FakeBackend(trusted_skill_dirs={".agents/skills"})
 
     first = await materialize_review_subject(
         cast(Any, backend), github_token="token", work_dir="/work", request=request()
@@ -213,7 +216,7 @@ async def test_first_review_is_deterministic_and_reuses_open_swe_diff_utilities(
     assert diff_call["base_ref"] == BASE_SHA
     assert diff_call["head_ref"] == HEAD_SHA
     assert diff_call["merge_base"] is True
-    assert calls["pr_diff"] == 2
+    assert diff_call["diff_text"] is None
     assert set(calls["instruction_refs"]) == {BASE_SHA}
 
     line_ref = manifest_artifact(first, "changed_lines")
@@ -249,7 +252,6 @@ async def test_rereview_uses_exact_previous_head_range(monkeypatch: pytest.Monke
     assert diff_call["head_ref"] == HEAD_SHA
     assert diff_call["merge_base"] is False
     assert diff_call["diff_text"] is None
-    assert calls["pr_diff"] == 0
     revisions = cast(dict[str, Any], result.manifest["revisions"])
     assert revisions["diff_mode"] == "re_review_range"
     assert revisions["merge_base_sha"] == BASE_SHA
@@ -337,6 +339,18 @@ async def test_stale_live_sha_blocks(
 
 
 @pytest.mark.asyncio
+async def test_live_head_change_during_materialization_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_sources(monkeypatch, final_live_head="e" * 40)
+    with pytest.raises(ReviewSubjectBlocked) as blocked:
+        await materialize_review_subject(
+            cast(Any, FakeBackend()), github_token="token", work_dir="/work", request=request()
+        )
+    assert blocked.value.code == ReviewSubjectBlockerCode.STALE_HEAD_SHA
+
+
+@pytest.mark.asyncio
 async def test_missing_commit_and_diff_failure_are_typed_blockers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -355,6 +369,42 @@ async def test_missing_commit_and_diff_failure_are_typed_blockers(
             cast(Any, FakeBackend()), github_token="token", work_dir="/work", request=request()
         )
     assert diff.value.code == ReviewSubjectBlockerCode.DIFF_MATERIALIZATION_FAILED
+
+
+@pytest.mark.asyncio
+async def test_existing_trusted_skill_that_fails_extraction_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_sources(monkeypatch)
+    backend = FakeBackend(trusted_skill_dirs={".agents/skills"})
+    with pytest.raises(ReviewSubjectBlocked) as blocked:
+        await materialize_review_subject(
+            cast(Any, backend), github_token="token", work_dir="/work", request=request()
+        )
+    assert blocked.value.code == ReviewSubjectBlockerCode.TRUSTED_SKILLS_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_subject_identity_does_not_depend_on_storage_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_sources(monkeypatch, skill_sources=["/work-one/.review-skills/.agents/skills/"])
+    first = await materialize_review_subject(
+        cast(Any, FakeBackend(trusted_skill_dirs={".agents/skills"})),
+        github_token="token",
+        work_dir="/work-one",
+        request=request(artifact_root="/artifacts-one"),
+    )
+    install_sources(monkeypatch, skill_sources=["/work-two/.review-skills/.agents/skills/"])
+    second = await materialize_review_subject(
+        cast(Any, FakeBackend(trusted_skill_dirs={".agents/skills"})),
+        github_token="token",
+        work_dir="/work-two",
+        request=request(artifact_root="/artifacts-two"),
+    )
+
+    assert first.subject_hash == second.subject_hash
+    assert first.manifest_path != second.manifest_path
 
 
 @pytest.mark.asyncio

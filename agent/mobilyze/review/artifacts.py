@@ -6,7 +6,7 @@ import hashlib
 import json
 import posixpath
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from .contracts import (
     ArtifactRef,
@@ -22,6 +22,23 @@ if TYPE_CHECKING:
 
 def canonical_json(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+
+
+def _artifact_identity(ref: ArtifactRef) -> dict[str, object]:
+    return {"bytes": ref.bytes, "sha256": ref.sha256, "trust": ref.trust}
+
+
+def _without_storage_paths(value: object) -> object:
+    if isinstance(value, list):
+        return [_without_storage_paths(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    is_artifact_ref = {"bytes", "path", "sha256", "trust"}.issubset(value)
+    return {
+        key: _without_storage_paths(item)
+        for key, item in value.items()
+        if not (is_artifact_ref and key == "path")
+    }
 
 
 @dataclass(frozen=True)
@@ -104,6 +121,21 @@ async def persist_review_subject(
         },
         "trusted",
     )
+    trusted_context_identity = {
+        "administrator_skill_refs": sorted(
+            (_artifact_identity(ref) for ref in request.administrator_skill_refs),
+            key=canonical_json,
+        ),
+        "base_sha": materials.base_sha,
+        "instructions": _artifact_identity(instructions_ref),
+        "repository_skill_refs": [
+            {key: value for key, value in ref.items() if key != "materialized_path"}
+            for ref in materials.repository_skill_refs
+        ],
+    }
+    trusted_context_identity_sha = hashlib.sha256(
+        canonical_json(trusted_context_identity)
+    ).hexdigest()
     trusted_context_ref = add(
         "trusted-context",
         {
@@ -144,7 +176,10 @@ async def persist_review_subject(
                 "count": len(materials.review_threads),
                 "ref": threads_ref.to_dict(),
             },
-            "trusted_context": trusted_context_ref.to_dict(),
+            "trusted_context": {
+                "identity_sha256": trusted_context_identity_sha,
+                "ref": trusted_context_ref.to_dict(),
+            },
         },
         "review_policy": {
             "agent_definitions": [
@@ -172,7 +207,10 @@ async def persist_review_subject(
         else None,
         "degradations": sorted(materials.degradations),
     }
-    subject_hash = hashlib.sha256(canonical_json(manifest)).hexdigest()
+    identity_manifest = cast(dict[str, object], _without_storage_paths(manifest))
+    identity_artifacts = cast(dict[str, object], identity_manifest["artifacts"])
+    identity_artifacts["trusted_context"] = {"identity_sha256": trusted_context_identity_sha}
+    subject_hash = hashlib.sha256(canonical_json(identity_manifest)).hexdigest()
     manifest_path = posixpath.join(
         request.artifact_root.rstrip("/"), f"review-subject-{subject_hash}.json"
     )
