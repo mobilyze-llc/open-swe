@@ -38,6 +38,11 @@
       "path": "agent/utils/linear_team_repo_map.py",
       "purpose": "Route the fork's Open SWE Linear team to the selected Mobilyze pilot repository.",
       "max_added_lines_per_pr": 1
+    },
+    {
+      "path": "tests/github/test_repo_extraction.py",
+      "purpose": "Keep the upstream Linear routing contract aligned with the declared Mobilyze team mapping seam.",
+      "max_added_lines_per_pr": 2
     }
   ],
   "waivers": []

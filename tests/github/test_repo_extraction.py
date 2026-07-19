@@ -182,8 +182,8 @@ class TestLinearWebhookRepoOverride:
             result = await linear_webhook(mock_request, bg_tasks)
 
             assert result["status"] == "accepted"
-            assert "langchain-ai/open-swe" in result["message"]
+            assert "mobilyze-llc/open-swe" in result["message"]
 
             call_args = bg_tasks.add_task.call_args
             repo_config = call_args[0][2]
-            assert repo_config == {"owner": "langchain-ai", "name": "open-swe"}
+            assert repo_config == {"owner": "mobilyze-llc", "name": "open-swe"}
