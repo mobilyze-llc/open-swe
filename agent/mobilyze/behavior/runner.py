@@ -6,7 +6,8 @@ from dataclasses import dataclass, replace
 from agent.mobilyze.behavior.binding import AcceptedContract
 from agent.mobilyze.behavior.cache import CacheKey, ClauseCache
 from agent.mobilyze.behavior.codec import canonical_hash
-from agent.mobilyze.behavior.executors import Observation, execute_clause
+from agent.mobilyze.behavior.executors import execute_clause
+from agent.mobilyze.behavior.observations import Observation, observation_wiring_blocker
 from agent.mobilyze.behavior.policy import require_sha256, require_text
 from agent.mobilyze.behavior.report import (
     REPORT_SCHEMA,
@@ -96,6 +97,12 @@ def run_contract(
         if observed is None:
             results.append(_blocked(clause_id))
             continue
+        if clause.probe is None:
+            raise AssertionError("in-scope clauses must carry an approved probe")
+        blocker = observation_wiring_blocker(clause.probe, observed)
+        if blocker is not None:
+            results.append(_blocked(clause_id, blocker=blocker))
+            continue
         anti_cheat_observed = anti_cheat_observations.get(clause_id)
         if clause.anti_cheat_probe is not None and anti_cheat_observed is None:
             results.append(
@@ -105,6 +112,11 @@ def run_contract(
                 )
             )
             continue
+        if clause.anti_cheat_probe is not None and anti_cheat_observed is not None:
+            blocker = observation_wiring_blocker(clause.anti_cheat_probe, anti_cheat_observed)
+            if blocker is not None:
+                results.append(_blocked(clause_id, blocker=f"anti-cheat {blocker}"))
+                continue
         key = CacheKey(
             target_artifact_hash=context.target_artifact_hash,
             clause_hash=canonical_hash(clause),

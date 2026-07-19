@@ -89,6 +89,8 @@ class JsonFieldExpectation:
                 object.__setattr__(self, "compare_value", expected_is_set)
             elif not isinstance(self.compare_value, bool):
                 raise ValueError("compare_value must be a boolean")
+            elif self.compare_value and not expected_is_set:
+                raise ValueError("compare_value requires an explicit expected value")
             if not expected_is_set:
                 object.__setattr__(self, "expected", None)
             elif not (self.expected is None or isinstance(self.expected, str | int | float | bool)):
@@ -204,25 +206,11 @@ Probe: TypeAlias = CliProbe | HttpProbe | ArtifactProbe | ProcessProbe
 def _validate_probe_collections(probe: Probe) -> None:
     try:
         require_name(probe.fixture, "probe fixture")
-        tuple_fields = {
-            "stdout_contains",
-            "stderr_contains",
-            "stdout_fields",
-            "filesystem_effects",
-            "response_fields",
-            "persistence_fields",
-            "contains",
-            "fields",
-            "public_log_contains",
-        }
-        for field_name in tuple_fields.intersection(probe.__dataclass_fields__):
-            value = getattr(probe, field_name)
-            _require_tuple(value, field_name)
-            if field_name.endswith("contains"):
-                for marker in value:
-                    require_text(marker, f"{field_name} marker")
     except ValueError as error:
         raise _translate_validation(error) from error
+    from agent.mobilyze.behavior.probe_validation import validate_probe_collections
+
+    validate_probe_collections(probe)
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +249,10 @@ class ContractClause:
                 raise ValueError("probes must be named approved probe types")
             if self.out_of_scope_reason is None and self.probe is None:
                 raise ValueError("in-scope clauses require an approved probe")
+            if self.probe is not None:
+                from agent.mobilyze.behavior.probe_validation import validate_evidence_types
+
+                validate_evidence_types(self.probe, self.evidence_types)
             if (
                 self.probe is not None
                 and self.anti_cheat_probe is not None

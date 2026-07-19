@@ -72,8 +72,11 @@ primary result. Reports contain compact summaries and `probe://` references rath
 ```
 
 The task stores `canonical_hash(contract)` with the approval event by calling
-`accept_contract`, then calls `start_implementation` before execution. `run_contract` accepts that
-bound record rather than a bare contract, so unapproved or silently changed content cannot execute.
+`accept_contract(..., persisted=<the task's current binding>)`, using `persisted=None` only for the
+initial acceptance, then calls `start_implementation` before execution. Re-accepting content routes
+through the persisted binding's mutation guard, so a changed contract after implementation start
+requires a higher version and a new approval. `run_contract` accepts that bound record rather than a
+bare contract, so unapproved or silently changed content cannot execute.
 
 ## Example report
 
@@ -118,9 +121,12 @@ bound record rather than a bare contract, so unapproved or silently changed cont
 
 Every selected clause has one explicit status: `pass`, `fail`, `blocked`, or `out_of_scope`.
 `run_contract` receives anti-cheat observations separately, and a required missing or mismatched
-anti-cheat observation blocks the clause. Generated-artifact probes declare `expected_exists`
-explicitly; absent artifacts cannot declare hash, content, or schema assertions. Clause-cache
-identity is the exact tuple of target or artifact hash, clause hash, executor version, and profile or
-image hash. Blocked wiring results are not cached. Targeted reruns select affected or previously
-failed/blocked clauses and only their declared adjacent probes, preserving contract order; an empty
-selection is a no-op.
+anti-cheat observation blocks the clause. Every observation names the fixture that produced it, and
+fixture/type/artifact-path wiring is checked before cache lookup. Generated-artifact probes declare
+`expected_exists` explicitly; absent artifacts cannot declare hash, content, or schema assertions.
+CLI absence checks require an explicit observation for the path rather than treating an omitted path
+as absent. Declared evidence types must correspond to assertions supported by the selected probe.
+Clause-cache identity is the exact tuple of target or artifact hash, clause hash, executor version,
+and profile or image hash. Blocked wiring results are not cached. Targeted reruns select affected or
+previously failed/blocked clauses and only their declared adjacent probes, preserving contract order;
+an empty selection is a no-op.

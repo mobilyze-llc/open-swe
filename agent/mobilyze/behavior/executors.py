@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
-from typing import TypeAlias
+from dataclasses import replace
 
 from agent.mobilyze.behavior.codec import content_sha256
 from agent.mobilyze.behavior.models import (
@@ -16,72 +15,15 @@ from agent.mobilyze.behavior.models import (
     JsonKind,
     ProcessProbe,
 )
-from agent.mobilyze.behavior.policy import require_safe_artifact_path, require_sha256
+from agent.mobilyze.behavior.observations import (
+    ArtifactObservation,
+    CliObservation,
+    HttpObservation,
+    Observation,
+    ProcessObservation,
+    observation_wiring_blocker,
+)
 from agent.mobilyze.behavior.report import ClauseResult, ClauseStatus, Evidence
-
-
-@dataclass(frozen=True, slots=True)
-class FileObservation:
-    path: str
-    exists: bool
-    sha256: str | None = None
-
-    def __post_init__(self) -> None:
-        require_safe_artifact_path(self.path)
-        if self.sha256 is not None:
-            require_sha256(self.sha256, "observed file hash")
-        if not self.exists and self.sha256 is not None:
-            raise ValueError("an absent observed file cannot carry a hash")
-
-
-@dataclass(frozen=True, slots=True)
-class CliObservation:
-    exit_code: int
-    stdout: str
-    stderr: str
-    filesystem: tuple[FileObservation, ...] = ()
-
-    def __post_init__(self) -> None:
-        if isinstance(self.exit_code, bool) or not isinstance(self.exit_code, int):
-            raise ValueError("observed CLI exit code must be an integer")
-        if not isinstance(self.filesystem, tuple):
-            raise ValueError("observed filesystem must be immutable")
-
-
-@dataclass(frozen=True, slots=True)
-class HttpObservation:
-    status_code: int
-    response: Mapping[str, object]
-    persisted_state: Mapping[str, object]
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.status_code, int) or not 100 <= self.status_code <= 599:
-            raise ValueError("observed HTTP status must be between 100 and 599")
-
-
-@dataclass(frozen=True, slots=True)
-class ArtifactObservation:
-    path: str
-    content: str
-    exists: bool = True
-
-    def __post_init__(self) -> None:
-        require_safe_artifact_path(self.path)
-        if not isinstance(self.exists, bool):
-            raise ValueError("observed artifact existence must be a boolean")
-        if not self.exists and self.content:
-            raise ValueError("an absent observed artifact cannot carry content")
-
-
-@dataclass(frozen=True, slots=True)
-class ProcessObservation:
-    launched: bool
-    terminated: bool
-    exit_code: int | None
-    public_log: str
-
-
-Observation: TypeAlias = CliObservation | HttpObservation | ArtifactObservation | ProcessObservation
 
 
 def _kind_matches(value: object, kind: JsonKind) -> bool:
@@ -181,7 +123,7 @@ def _execute_cli(clause: ContractClause, probe: CliProbe, observed: CliObservati
     files = {item.path: item for item in observed.filesystem}
     for effect in probe.filesystem_effects:
         actual = files.get(effect.path)
-        if actual is None and effect.state is FileState.EXISTS:
+        if actual is None:
             failures.append("filesystem effect was not observed")
         elif actual is not None and effect.state is FileState.EXISTS and not actual.exists:
             failures.append("expected generated file is absent")
@@ -216,8 +158,6 @@ def _execute_artifact(
     clause: ContractClause, probe: ArtifactProbe, observed: ArtifactObservation
 ) -> ClauseResult:
     failures: list[str] = []
-    if observed.path != probe.path:
-        failures.append("generated artifact path differs from the contract")
     if observed.exists is not probe.expected_exists:
         failures.append("generated artifact existence differs from the contract")
     digest = content_sha256(observed.content) if observed.exists else None
@@ -262,6 +202,16 @@ def _execute_with_probe(
     probe: CliProbe | HttpProbe | ArtifactProbe | ProcessProbe,
     observed: Observation,
 ) -> ClauseResult:
+    blocker = observation_wiring_blocker(probe, observed)
+    if blocker is not None:
+        return ClauseResult(
+            clause_id=clause.id,
+            status=ClauseStatus.BLOCKED,
+            evidence=(),
+            reproduction_reference=f"probe://{clause.id}/reproduce",
+            blocker=blocker,
+            anti_cheat_passed=None,
+        )
     if isinstance(probe, CliProbe) and isinstance(observed, CliObservation):
         return _execute_cli(clause, probe, observed)
     if isinstance(probe, HttpProbe) and isinstance(observed, HttpObservation):
@@ -270,14 +220,7 @@ def _execute_with_probe(
         return _execute_artifact(clause, probe, observed)
     if isinstance(probe, ProcessProbe) and isinstance(observed, ProcessObservation):
         return _execute_process(clause, probe, observed)
-    return ClauseResult(
-        clause_id=clause.id,
-        status=ClauseStatus.BLOCKED,
-        evidence=(),
-        reproduction_reference=f"probe://{clause.id}/reproduce",
-        blocker="observation type does not match the approved probe",
-        anti_cheat_passed=None,
-    )
+    raise AssertionError("validated observation wiring must select an executor")
 
 
 def execute_clause(

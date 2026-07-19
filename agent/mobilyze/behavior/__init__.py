@@ -13,14 +13,14 @@ from agent.mobilyze.behavior.codec import (
     canonical_json,
     contract_from_dict,
 )
-from agent.mobilyze.behavior.executors import (
+from agent.mobilyze.behavior.models import BehaviorContract, ContractValidationError
+from agent.mobilyze.behavior.observations import (
     ArtifactObservation,
     CliObservation,
     FileObservation,
     HttpObservation,
     ProcessObservation,
 )
-from agent.mobilyze.behavior.models import BehaviorContract, ContractValidationError
 from agent.mobilyze.behavior.report import BehaviorReport, ClauseResult, ClauseStatus
 from agent.mobilyze.behavior.rerun import targeted_clause_ids
 from agent.mobilyze.behavior.runner import ExecutionContext, run_contract

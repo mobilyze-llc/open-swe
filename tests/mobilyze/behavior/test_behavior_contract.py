@@ -13,13 +13,6 @@ from agent.mobilyze.behavior.binding import (
 )
 from agent.mobilyze.behavior.cache import ClauseCache
 from agent.mobilyze.behavior.codec import canonical_hash, content_sha256, contract_from_dict
-from agent.mobilyze.behavior.executors import (
-    ArtifactObservation,
-    CliObservation,
-    FileObservation,
-    HttpObservation,
-    ProcessObservation,
-)
 from agent.mobilyze.behavior.models import (
     ArtifactProbe,
     BehaviorContract,
@@ -37,6 +30,13 @@ from agent.mobilyze.behavior.models import (
     ProcessProbe,
     TargetRef,
     TargetType,
+)
+from agent.mobilyze.behavior.observations import (
+    ArtifactObservation,
+    CliObservation,
+    FileObservation,
+    HttpObservation,
+    ProcessObservation,
 )
 from agent.mobilyze.behavior.report import ClauseStatus
 from agent.mobilyze.behavior.rerun import targeted_clause_ids
@@ -111,7 +111,7 @@ def _binding(contract: BehaviorContract | None = None):
         contract_hash=canonical_hash(accepted_contract),
     )
     return start_implementation(
-        accept_contract(accepted_contract, approval),
+        accept_contract(accepted_contract, approval, persisted=None),
         event_id="linear-state:implementation-started",
     )
 
@@ -252,6 +252,16 @@ def test_mutation_after_start_requires_new_version_and_explicit_approval():
     with pytest.raises(ContractMutationError, match="increase contract_version"):
         amend_contract(binding, changed, None)
 
+    same_version_approval = ApprovalEvent(
+        event_id="linear-comment:replacement-approval",
+        approved_by="operator:eric",
+        owner=changed.owner,
+        contract_version=changed.contract_version,
+        contract_hash=canonical_hash(changed),
+    )
+    with pytest.raises(ContractMutationError, match="increase contract_version"):
+        accept_contract(changed, same_version_approval, persisted=binding)
+
     versioned = replace(changed, contract_version=2)
     with pytest.raises(ContractMutationError, match="approval event"):
         amend_contract(binding, versioned, None)
@@ -272,12 +282,15 @@ def test_cli_and_invalid_input_probes_finish_explicitly():
     binding = _binding()
     observations = {
         "cli-valid": CliObservation(
+            fixture="valid-cli",
             exit_code=0,
             stdout='{"ok": true, "message": "created"}',
             stderr="",
             filesystem=(FileObservation("outputs/result.json", exists=True, sha256="3" * 64),),
         ),
-        "cli-invalid": CliObservation(exit_code=2, stdout="", stderr="invalid"),
+        "cli-invalid": CliObservation(
+            fixture="invalid-cli", exit_code=2, stdout="", stderr="invalid"
+        ),
     }
 
     report = run_contract(
@@ -285,7 +298,9 @@ def test_cli_and_invalid_input_probes_finish_explicitly():
         observations,
         _context(),
         anti_cheat_observations={
-            "cli-valid": CliObservation(exit_code=2, stdout="", stderr="invalid")
+            "cli-valid": CliObservation(
+                fixture="invalid-cli", exit_code=2, stdout="", stderr="invalid"
+            )
         },
     )
 
@@ -336,6 +351,7 @@ def test_http_response_and_persistence_assertions_are_deterministic():
         _binding(contract),
         {
             clause.id: HttpObservation(
+                fixture="api-write",
                 status_code=201,
                 response={"item": {"id": "item-1"}},
                 persisted_state={"items": {"item-1": {"active": True}}},
@@ -344,6 +360,7 @@ def test_http_response_and_persistence_assertions_are_deterministic():
         _context(),
         anti_cheat_observations={
             clause.id: HttpObservation(
+                fixture="api-invalid",
                 status_code=400,
                 response={"error": "invalid"},
                 persisted_state={},
@@ -377,6 +394,7 @@ def test_json_expectations_support_public_keys_arrays_and_numeric_equivalence():
         _binding(contract),
         {
             clause.id: HttpObservation(
+                fixture="api-write",
                 status_code=200,
                 response={"userId": "user-1", "items": [{"score": 2.0}]},
                 persisted_state={},
@@ -386,6 +404,34 @@ def test_json_expectations_support_public_keys_arrays_and_numeric_equivalence():
     )
 
     assert report.results[0].status is ClauseStatus.PASS
+
+
+def test_exact_json_comparison_requires_an_explicit_expected_value():
+    with pytest.raises(ContractValidationError, match="explicit expected value"):
+        JsonFieldExpectation(("name",), JsonKind.STRING, compare_value=True)
+
+
+def test_probe_collections_reject_malformed_items_before_execution():
+    with pytest.raises(ContractValidationError, match="JsonFieldExpectation"):
+        CliProbe(
+            fixture="valid-cli",
+            expected_exit_code=0,
+            stdout_fields=("not-an-expectation",),  # type: ignore[arg-type]
+        )
+
+
+def test_declared_evidence_must_be_proven_by_the_probe():
+    clause_fields = {
+        "id": "evidence",
+        "task": "Run a bounded fixture.",
+        "expected_behavior": "The fixture proves its declared evidence.",
+        "failure_behavior": "Unsupported evidence declarations fail validation.",
+        "probe": CliProbe(fixture="valid-cli", expected_exit_code=0),
+    }
+    with pytest.raises(ContractValidationError, match="explicit evidence types"):
+        ContractClause(evidence_types=(), **clause_fields)
+    with pytest.raises(ContractValidationError, match="does not assert declared evidence"):
+        ContractClause(evidence_types=(EvidenceType.PERSISTENCE,), **clause_fields)
 
 
 def test_generated_artifact_hash_schema_and_content_are_checked():
@@ -409,7 +455,11 @@ def test_generated_artifact_hash_schema_and_content_are_checked():
 
     report = run_contract(
         _binding(contract),
-        {clause.id: ArtifactObservation("artifacts/result.json", content)},
+        {
+            clause.id: ArtifactObservation(
+                fixture="artifact", path="artifacts/result.json", content=content
+            )
+        },
         _context(),
     )
 
@@ -444,8 +494,15 @@ def test_artifact_existence_is_explicit_and_absence_cannot_claim_content():
     report = run_contract(
         _binding(contract),
         {
-            exists_clause.id: ArtifactObservation("artifacts/empty.txt", ""),
-            absent_clause.id: ArtifactObservation("artifacts/temporary.txt", "", exists=False),
+            exists_clause.id: ArtifactObservation(
+                fixture="artifact", path="artifacts/empty.txt", content=""
+            ),
+            absent_clause.id: ArtifactObservation(
+                fixture="artifact",
+                path="artifacts/temporary.txt",
+                content="",
+                exists=False,
+            ),
         },
         _context(),
     )
@@ -484,6 +541,7 @@ def test_process_launch_termination_and_public_log_are_checked_without_log_leaka
         _binding(contract),
         {
             clause.id: ProcessObservation(
+                fixture="process",
                 launched=True,
                 terminated=True,
                 exit_code=0,
@@ -497,10 +555,29 @@ def test_process_launch_termination_and_public_log_are_checked_without_log_leaka
     assert secret not in report.to_json()
     assert "token=" not in report.to_json()
 
+    with pytest.raises(ValueError, match="lifecycle states must be booleans"):
+        ProcessObservation(
+            fixture="process",
+            launched=1,  # type: ignore[arg-type]
+            terminated=1,  # type: ignore[arg-type]
+            exit_code=0,
+            public_log="ready",
+        )
+
 
 def test_path_escape_fails_closed_without_rejecting_legitimate_output_directories():
     with pytest.raises(ContractValidationError, match="safe relative artifact path"):
         ArtifactProbe(fixture="artifact", path="../../agent/server.py", expected_exists=True)
+    for path in (
+        "agent/server.py",
+        "tests/report.json",
+        ".git/HEAD",
+        "diffs/change.patch",
+        "history/log.json",
+        "traces/run.json",
+    ):
+        with pytest.raises(ContractValidationError, match="source, test, diff, history, or trace"):
+            ArtifactProbe(fixture="artifact", path=path, expected_exists=True)
 
     probe = ArtifactProbe(
         fixture="artifact",
@@ -509,6 +586,14 @@ def test_path_escape_fails_closed_without_rejecting_legitimate_output_directorie
     )
 
     assert probe.path == "agent/generated/manifest.json"
+    assert (
+        ArtifactProbe(
+            fixture="artifact",
+            path="outputs/tests/manifest.json",
+            expected_exists=True,
+        ).path
+        == "outputs/tests/manifest.json"
+    )
 
 
 def test_cli_absence_and_check_count_are_reported_from_declared_assertions():
@@ -533,9 +618,11 @@ def test_cli_absence_and_check_count_are_reported_from_declared_assertions():
         _binding(contract),
         {
             clause.id: CliObservation(
+                fixture="valid-cli",
                 exit_code=0,
                 stdout='{"state":"ready","message":"created"}',
                 stderr="warning",
+                filesystem=(FileObservation("outputs/temp.txt", exists=False),),
             )
         },
         _context(),
@@ -544,10 +631,25 @@ def test_cli_absence_and_check_count_are_reported_from_declared_assertions():
     assert report.results[0].status is ClauseStatus.PASS
     assert "checks=6" in report.results[0].evidence[0].summary
 
+    unobserved = run_contract(
+        _binding(contract),
+        {
+            clause.id: CliObservation(
+                fixture="valid-cli",
+                exit_code=0,
+                stdout='{"state":"ready","message":"created"}',
+                stderr="warning",
+            )
+        },
+        _context(),
+    )
+    assert unobserved.results[0].status is ClauseStatus.FAIL
+
 
 def test_anti_cheat_uses_an_independent_fixture_and_result():
     binding = _binding()
     primary = CliObservation(
+        fixture="valid-cli",
         exit_code=0,
         stdout='{"ok": true, "message": "created"}',
         stderr="",
@@ -560,12 +662,26 @@ def test_anti_cheat_uses_an_independent_fixture_and_result():
         _context(),
         clause_ids=("cli-valid",),
         anti_cheat_observations={
-            "cli-valid": CliObservation(exit_code=0, stdout="", stderr="accepted")
+            "cli-valid": CliObservation(
+                fixture="invalid-cli", exit_code=0, stdout="", stderr="accepted"
+            )
         },
     )
 
     assert report.results[0].status is ClauseStatus.FAIL
     assert report.results[0].anti_cheat_passed is False
+
+    echoed = run_contract(
+        binding,
+        {"cli-valid": primary},
+        _context(),
+        clause_ids=("cli-valid",),
+        anti_cheat_observations={"cli-valid": primary},
+    )
+    assert echoed.results[0].status is ClauseStatus.BLOCKED
+    assert echoed.results[0].blocker == (
+        "anti-cheat observation fixture does not match the approved probe"
+    )
     with pytest.raises(ContractValidationError, match="independent fixture"):
         replace(
             binding.contract.clauses[0],
@@ -576,7 +692,9 @@ def test_anti_cheat_uses_an_independent_fixture_and_result():
 def test_cache_identity_is_exact_across_all_four_components():
     binding = _binding()
     observations = {
-        "cli-invalid": CliObservation(exit_code=2, stdout="", stderr="invalid"),
+        "cli-invalid": CliObservation(
+            fixture="invalid-cli", exit_code=2, stdout="", stderr="invalid"
+        ),
     }
     cache = ClauseCache()
 
@@ -644,6 +762,7 @@ def test_blocked_observation_mismatch_does_not_poison_clause_cache():
         binding,
         {
             "cli-invalid": ProcessObservation(
+                fixture="invalid-cli",
                 launched=True,
                 terminated=True,
                 exit_code=0,
@@ -657,7 +776,11 @@ def test_blocked_observation_mismatch_does_not_poison_clause_cache():
     assert len(cache) == 0
     corrected = run_contract(
         binding,
-        {"cli-invalid": CliObservation(exit_code=2, stdout="", stderr="invalid")},
+        {
+            "cli-invalid": CliObservation(
+                fixture="invalid-cli", exit_code=2, stdout="", stderr="invalid"
+            )
+        },
         _context(),
         cache=cache,
         clause_ids=("cli-invalid",),
@@ -669,13 +792,105 @@ def test_blocked_observation_mismatch_does_not_poison_clause_cache():
     assert corrected.results[0].cache_hit is False
 
 
+def test_cached_pass_does_not_bypass_observation_wiring_checks():
+    binding = _binding()
+    cache = ClauseCache()
+    valid = {
+        "cli-invalid": CliObservation(
+            fixture="invalid-cli", exit_code=2, stdout="", stderr="invalid"
+        )
+    }
+    assert (
+        run_contract(
+            binding,
+            valid,
+            _context(),
+            cache=cache,
+            clause_ids=("cli-invalid",),
+        )
+        .results[0]
+        .status
+        is ClauseStatus.PASS
+    )
+
+    miswired = run_contract(
+        binding,
+        {
+            "cli-invalid": ProcessObservation(
+                fixture="invalid-cli",
+                launched=True,
+                terminated=True,
+                exit_code=0,
+                public_log="ready",
+            )
+        },
+        _context(),
+        cache=cache,
+        clause_ids=("cli-invalid",),
+    )
+
+    assert miswired.results[0].status is ClauseStatus.BLOCKED
+    assert miswired.results[0].cache_hit is False
+
+
+def test_wrong_artifact_wiring_is_blocked_and_never_cached():
+    clause = ContractClause(
+        id="artifact-wire",
+        task="Inspect the generated result.",
+        expected_behavior="The approved artifact path exists.",
+        failure_behavior="Wrong harness wiring blocks validation.",
+        evidence_types=(EvidenceType.ARTIFACT_CONTENT,),
+        probe=ArtifactProbe(
+            fixture="artifact",
+            path="artifacts/result.json",
+            expected_exists=True,
+        ),
+    )
+    binding = _binding(replace(_contract(), clauses=(clause,)))
+    cache = ClauseCache()
+
+    miswired = run_contract(
+        binding,
+        {
+            clause.id: ArtifactObservation(
+                fixture="artifact",
+                path="artifacts/wrong.json",
+                content="{}",
+            )
+        },
+        _context(),
+        cache=cache,
+    )
+    corrected = run_contract(
+        binding,
+        {
+            clause.id: ArtifactObservation(
+                fixture="artifact",
+                path="artifacts/result.json",
+                content="{}",
+            )
+        },
+        _context(),
+        cache=cache,
+    )
+
+    assert miswired.results[0].status is ClauseStatus.BLOCKED
+    assert len(cache) == 1
+    assert corrected.results[0].status is ClauseStatus.PASS
+    assert corrected.results[0].cache_hit is False
+
+
 def test_targeted_rerun_includes_only_affected_failed_and_declared_adjacent_clauses():
     contract = _contract()
     prior = run_contract(
         _binding(contract),
         {
-            "cli-valid": CliObservation(exit_code=1, stdout="", stderr="failed"),
-            "cli-invalid": CliObservation(exit_code=2, stdout="", stderr="invalid"),
+            "cli-valid": CliObservation(
+                fixture="valid-cli", exit_code=1, stdout="", stderr="failed"
+            ),
+            "cli-invalid": CliObservation(
+                fixture="invalid-cli", exit_code=2, stdout="", stderr="invalid"
+            ),
         },
         _context(),
     )

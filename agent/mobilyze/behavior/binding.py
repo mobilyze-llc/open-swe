@@ -54,7 +54,14 @@ def _validate_approval(contract: BehaviorContract, approval: ApprovalEvent) -> N
         raise ContractMutationError("approval hash does not match the contract content")
 
 
-def accept_contract(contract: BehaviorContract, approval: ApprovalEvent) -> AcceptedContract:
+def accept_contract(
+    contract: BehaviorContract,
+    approval: ApprovalEvent,
+    *,
+    persisted: AcceptedContract | None,
+) -> AcceptedContract:
+    if persisted is not None:
+        return amend_contract(persisted, contract, approval)
     _validate_approval(contract, approval)
     return AcceptedContract(
         contract=contract,
