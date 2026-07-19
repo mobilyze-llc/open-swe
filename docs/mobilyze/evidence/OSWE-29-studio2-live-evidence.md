@@ -1,18 +1,18 @@
 # OSWE-29 studio2 evidence
 
-Captured on `2026-07-19`, with the final runtime snapshot at `2026-07-19T21:32:43Z`.
+Captured on `2026-07-19`, with the final runtime snapshot at `2026-07-19T21:55:15Z`.
 Secret values, authorization headers, cookies, webhook signatures, and private-key material are
 omitted.
 
 ## Installed boundary
 
 - Baseline and merged PR #1: `4c9201093851f54aba60cf6ec0e814aebb828076`.
-- Live-tested tooling commit: `cb8d9f2449fb0f1eee03f5552e44e0f2db85ffc6`; the deployed
+- Live-tested tooling commit: `602af923ddcfba9d200a57254a2ca6c5ded2122f`; the deployed
   installer SHA-256 was
-  `9f4ad5702bcd8f81df700265016efa8f2d99a499e7feb1ca952a4c4ab7e8a37d`, matching
+  `3f2fc99d5c842d0283a7af9d9befb6ea0be9fb9ed1b81662f898ea4bddb9fee0`, matching
   the checked-in script at that commit.
 - The deployed manifest helper SHA-256 was
-  `3398b1ddd6d4349818b9757bb57af194d1602932fd168ee7674b262bab279ae1`, also
+  `4f0e406408770c8c6f42389843f960553bda915ccbf846d737915dd239ca3f0b`, also
   matching the checked-in script at that commit.
 - Pinned application release: `f4e2a6833e403184ee710b102ee9d31bd12a0387`.
 - Retained rollback release: `4c9201093851f54aba60cf6ec0e814aebb828076`.
@@ -89,12 +89,18 @@ operation replaced them with PIDs `49499` and `49507`; backend health and dashbo
 recovered. Queries for all three exact thread IDs returned the same creation timestamps,
 terminal statuses, and run IDs after restart.
 
-After the review hardening patch, the deployed status-only environment validator accepted every
-required name exactly once without printing names or values, and the managed restart replaced
-PIDs `60244` and `60252` with `62831` and `62838`. Backend health and dashboard HTTP 200 recovered,
-the current release remained `f4e2a6833e403184ee710b102ee9d31bd12a0387`, and all three exact
-threads remained visible. The Linear thread retained final run
-`019f7c3f-2be5-77f1-bbf7-841b4f0d7305` as terminal `error`.
+After the final review hardening patch, the deployed status-only validator sourced the environment
+as `_openswectl`, accepted every required evaluated value without printing names or values, and
+the managed restart replaced PIDs `62831` and `62838` with `68015` and `68022`. Backend health and
+dashboard HTTP 200 recovered, the current release remained
+`f4e2a6833e403184ee710b102ee9d31bd12a0387`, and all three exact threads remained visible. The
+Linear thread retained final run `019f7c3f-2be5-77f1-bbf7-841b4f0d7305` as terminal `error`.
+
+The review-tested deployment tooling was transferred through a unique `mktemp` remote directory
+owned by `ericlitman`, mode `0755`, with no group or other write bit. The installed `langgraph`
+entrypoint shebang resolves directly to the retained release path rather than a temporary build
+directory:
+`#!/opt/mobilyze/open-swe-control-plane/releases/f4e2a6833e403184ee710b102ee9d31bd12a0387/.venv/bin/python`.
 
 ## Rollback and restore
 
