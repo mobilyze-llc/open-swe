@@ -16,6 +16,7 @@ from agent.utils import gateway, model
 from agent.utils.model import OpenAIReasoning
 
 _GATEWAY_ENV_VARS = (
+    "OPENAI_BASE_URL",
     "LANGSMITH_API_KEY",
     "LANGSMITH_API_KEY_PROD",
     "LANGSMITH_GATEWAY_API_KEY",
@@ -339,6 +340,15 @@ def test_make_model_direct_openai_uses_responses_websocket() -> None:
     assert captured["store"] is False
     assert captured["include"] == ["reasoning.encrypted_content"]
     assert captured["output_version"] == "responses/v1"
+
+
+def test_make_model_direct_openai_honors_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://studio2.example:8317/v1/")
+    captured, fake = _capture_init_chat_model()
+    with patch.object(model, "init_chat_model", fake):
+        model.make_model("openai:gpt-5.6-sol", use_gateway=False)
+    assert captured["base_url"] == "http://studio2.example:8317/v1"
+    assert captured["use_responses_api"] is True
 
 
 def test_make_model_gateway_openai_replaces_websocket(
