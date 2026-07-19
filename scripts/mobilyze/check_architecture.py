@@ -22,6 +22,7 @@ class Change:
     base_exists: bool
     base_lines: int
     head_lines: int
+    base_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -39,17 +40,47 @@ def _matches(path: str, patterns: list[str]) -> bool:
 
 def _active_waiver(config: dict[str, Any], finding: Finding, today: date) -> dict[str, Any] | None:
     for waiver in config.get("waivers", []):
+        if not isinstance(waiver, dict):
+            continue
+        required_strings = ("path", "rule", "reason", "expires")
+        if any(
+            not isinstance(waiver.get(key), str) or not waiver[key].strip()
+            for key in required_strings
+        ):
+            continue
         if waiver.get("rule") != finding.rule:
             continue
-        if not fnmatch.fnmatch(finding.path, str(waiver.get("path", ""))):
+        if not fnmatch.fnmatch(finding.path, waiver["path"]):
             continue
         try:
-            expires = date.fromisoformat(str(waiver["expires"]))
-        except (KeyError, ValueError):
+            expires = date.fromisoformat(waiver["expires"])
+        except ValueError:
             continue
         if expires >= today:
             return waiver
     return None
+
+
+def _evaluate_upstream_path(path: str, added: int, config: dict[str, Any]) -> list[Finding]:
+    seams = {item["path"]: item for item in config.get("integration_seams", [])}
+    seam = seams.get(path)
+    if seam is None:
+        return [
+            Finding(
+                path,
+                "fork_delta.undeclared_upstream_change",
+                "upstream-owned path changed without a declared integration seam",
+            )
+        ]
+    if added > int(seam["max_added_lines_per_pr"]):
+        return [
+            Finding(
+                path,
+                "fork_delta.integration_budget",
+                f"added {added} lines; declared seam budget is {seam['max_added_lines_per_pr']}",
+            )
+        ]
+    return []
 
 
 def evaluate_change(
@@ -61,13 +92,21 @@ def evaluate_change(
     exempt_globs = list(config.get("exempt_path_globs", []))
     source_extensions = set(config["source_extensions"])
     path = change.path
+    base_path = change.base_path or path
 
     is_custom = _matches(path, custom_globs)
+    base_is_custom = _matches(base_path, custom_globs)
     is_exempt = _matches(path, exempt_globs)
     is_source = Path(path).suffix in source_extensions
+    crosses_boundary = base_path != path and base_is_custom != is_custom
+
+    if crosses_boundary and not base_is_custom:
+        findings.extend(_evaluate_upstream_path(base_path, 0, config))
 
     if is_custom and is_source and not is_exempt:
-        if not change.base_exists and change.head_lines > int(config["new_file_line_cap"]):
+        effective_base_exists = change.base_exists and not crosses_boundary
+        effective_base_lines = change.base_lines if effective_base_exists else 0
+        if not effective_base_exists and change.head_lines > int(config["new_file_line_cap"]):
             findings.append(
                 Finding(
                     path,
@@ -77,36 +116,20 @@ def evaluate_change(
             )
         threshold = int(config["no_growth_line_threshold"])
         if (
-            change.base_exists
-            and change.base_lines >= threshold
-            and change.head_lines > change.base_lines
+            effective_base_exists
+            and change.head_lines >= threshold
+            and change.head_lines > effective_base_lines
         ):
             findings.append(
                 Finding(
                     path,
                     "file_size.no_growth_over_threshold",
-                    f"custom source grew from {change.base_lines} to {change.head_lines} lines at/above {threshold}",
+                    f"custom source grew from {effective_base_lines} to {change.head_lines} lines at/above {threshold}",
                 )
             )
     elif not is_custom:
-        seams = {item["path"]: item for item in config.get("integration_seams", [])}
-        seam = seams.get(path)
-        if seam is None:
-            findings.append(
-                Finding(
-                    path,
-                    "fork_delta.undeclared_upstream_change",
-                    "upstream-owned path changed without a declared integration seam",
-                )
-            )
-        elif change.added > int(seam["max_added_lines_per_pr"]):
-            findings.append(
-                Finding(
-                    path,
-                    "fork_delta.integration_budget",
-                    f"added {change.added} lines; declared seam budget is {seam['max_added_lines_per_pr']}",
-                )
-            )
+        added = change.head_lines if crosses_boundary else change.added
+        findings.extend(_evaluate_upstream_path(path, added, config))
 
     resolved: list[Finding] = []
     for finding in findings:
@@ -179,6 +202,7 @@ def collect_changes(base_ref: str, head_ref: str) -> list[Change]:
                 base_exists=base_exists,
                 base_lines=base_lines,
                 head_lines=head_lines,
+                base_path=base_path,
             )
         )
     return changes

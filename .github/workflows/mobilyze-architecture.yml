@@ -22,12 +22,21 @@ jobs:
       - name: Resolve comparison base
         id: base
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: |
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            echo "ref=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            ref="$PR_BASE_SHA"
+          elif [[ ! "$PUSH_BEFORE_SHA" =~ ^0+$ ]] && git cat-file -e "$PUSH_BEFORE_SHA^{commit}" 2>/dev/null; then
+            ref="$PUSH_BEFORE_SHA"
+          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            ref="$(git rev-parse HEAD^)"
           else
-            echo "ref=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+            ref="$(git rev-parse HEAD)"
           fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
       - name: Run architecture guard tests
         run: python -m unittest tests/mobilyze/test_architecture_guard.py
       - name: Check fork boundaries and file growth
