@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import TypeAlias
 
 from agent.mobilyze.behavior.policy import (
@@ -12,59 +11,22 @@ from agent.mobilyze.behavior.policy import (
     require_target_reference,
     require_text,
 )
+from agent.mobilyze.behavior.schema import (
+    CONTRACT_SCHEMA,
+    EvidenceType,
+    FileState,
+    JsonKind,
+    JsonScalar,
+    OwnerType,
+    ProbeType,
+    TargetType,
+)
 
-CONTRACT_SCHEMA = "mobilyze.behavior-contract.v1"
-JsonScalar: TypeAlias = str | int | float | bool | None
+_EXPECTED_UNSET = object()
 
 
 class ContractValidationError(ValueError):
     pass
-
-
-class OwnerType(StrEnum):
-    ISSUE = "issue"
-    APPROVED_PLAN = "approved_plan"
-
-
-class TargetType(StrEnum):
-    CLI = "cli"
-    HTTP_API = "http_api"
-    ARTIFACT = "artifact"
-    PROCESS = "process"
-
-
-class ProbeType(StrEnum):
-    CLI = "cli"
-    HTTP_API = "http_api"
-    GENERATED_ARTIFACT = "generated_artifact"
-    PROCESS = "process"
-
-
-class EvidenceType(StrEnum):
-    EXIT_CODE = "exit_code"
-    PUBLIC_OUTPUT = "public_output"
-    FILESYSTEM_EFFECT = "filesystem_effect"
-    HTTP_RESPONSE = "http_response"
-    PERSISTENCE = "persistence"
-    ARTIFACT_HASH = "artifact_hash"
-    ARTIFACT_CONTENT = "artifact_content"
-    PROCESS_LIFECYCLE = "process_lifecycle"
-    PUBLIC_LOG = "public_log"
-
-
-class JsonKind(StrEnum):
-    STRING = "string"
-    NUMBER = "number"
-    INTEGER = "integer"
-    BOOLEAN = "boolean"
-    OBJECT = "object"
-    ARRAY = "array"
-    NULL = "null"
-
-
-class FileState(StrEnum):
-    EXISTS = "exists"
-    ABSENT = "absent"
 
 
 def _translate_validation(error: ValueError) -> ContractValidationError:
@@ -110,8 +72,8 @@ class TargetRef:
 class JsonFieldExpectation:
     path: tuple[str, ...]
     kind: JsonKind
-    expected: JsonScalar = None
-    compare_value: bool = True
+    expected: JsonScalar | object = _EXPECTED_UNSET
+    compare_value: bool | None = None
 
     def __post_init__(self) -> None:
         _require_tuple(self.path, "JSON field path")
@@ -121,7 +83,16 @@ class JsonFieldExpectation:
             if not isinstance(self.kind, JsonKind):
                 raise ValueError("JSON field kind must be an approved kind")
             for part in self.path:
-                require_name(part, "JSON field path component")
+                require_text(part, "JSON field path component")
+            expected_is_set = self.expected is not _EXPECTED_UNSET
+            if self.compare_value is None:
+                object.__setattr__(self, "compare_value", expected_is_set)
+            elif not isinstance(self.compare_value, bool):
+                raise ValueError("compare_value must be a boolean")
+            if not expected_is_set:
+                object.__setattr__(self, "expected", None)
+            elif not (self.expected is None or isinstance(self.expected, str | int | float | bool)):
+                raise ValueError("JSON expected value must be a scalar")
             if isinstance(self.expected, float) and (
                 self.expected != self.expected or self.expected in {float("inf"), float("-inf")}
             ):
@@ -185,6 +156,7 @@ class HttpProbe:
 class ArtifactProbe:
     fixture: str
     path: str
+    expected_exists: bool
     expected_sha256: str | None = None
     contains: tuple[str, ...] = ()
     fields: tuple[JsonFieldExpectation, ...] = ()
@@ -194,8 +166,12 @@ class ArtifactProbe:
         _validate_probe_collections(self)
         try:
             require_safe_artifact_path(self.path)
+            if not isinstance(self.expected_exists, bool):
+                raise ValueError("artifact existence expectation must be a boolean")
             if self.expected_sha256 is not None:
                 require_sha256(self.expected_sha256, "artifact hash")
+            if not self.expected_exists and (self.expected_sha256 or self.contains or self.fields):
+                raise ValueError("absent artifacts cannot declare content assertions")
         except ValueError as error:
             raise _translate_validation(error) from error
 
@@ -257,7 +233,7 @@ class ContractClause:
     failure_behavior: str
     evidence_types: tuple[EvidenceType, ...]
     probe: Probe | None = None
-    anti_cheat: bool = False
+    anti_cheat_probe: Probe | None = None
     out_of_scope_reason: str | None = None
     adjacent_clause_ids: tuple[str, ...] = ()
 
@@ -277,15 +253,27 @@ class ContractClause:
                 raise ValueError("adjacent clause ids must be unique")
             if not all(isinstance(item, EvidenceType) for item in self.evidence_types):
                 raise ValueError("evidence types must be approved evidence types")
-            if self.probe is not None and not isinstance(
-                self.probe, CliProbe | HttpProbe | ArtifactProbe | ProcessProbe
+            if any(
+                probe is not None
+                and not isinstance(probe, CliProbe | HttpProbe | ArtifactProbe | ProcessProbe)
+                for probe in (self.probe, self.anti_cheat_probe)
             ):
-                raise ValueError("probe must be a named approved probe type")
+                raise ValueError("probes must be named approved probe types")
             if self.out_of_scope_reason is None and self.probe is None:
                 raise ValueError("in-scope clauses require an approved probe")
+            if (
+                self.probe is not None
+                and self.anti_cheat_probe is not None
+                and self.probe.fixture == self.anti_cheat_probe.fixture
+            ):
+                raise ValueError("anti-cheat probes must use an independent fixture")
             if self.out_of_scope_reason is not None:
                 require_text(self.out_of_scope_reason, "out-of-scope reason")
-                if self.probe is not None or self.evidence_types or self.anti_cheat:
+                if (
+                    self.probe is not None
+                    or self.evidence_types
+                    or self.anti_cheat_probe is not None
+                ):
                     raise ValueError("out-of-scope clauses cannot declare probes or evidence")
         except ValueError as error:
             raise _translate_validation(error) from error
@@ -330,7 +318,8 @@ class BehaviorContract:
                 unknown = set(clause.adjacent_clause_ids).difference(known_ids)
                 if unknown:
                     raise ValueError(f"clause {clause.id} names unknown adjacent clauses")
-                if clause.probe and clause.probe.fixture not in self.approved_fixtures:
-                    raise ValueError(f"clause {clause.id} uses an unapproved fixture")
+                for probe in (clause.probe, clause.anti_cheat_probe):
+                    if probe and probe.fixture not in self.approved_fixtures:
+                        raise ValueError(f"clause {clause.id} uses an unapproved fixture")
         except ValueError as error:
             raise _translate_validation(error) from error

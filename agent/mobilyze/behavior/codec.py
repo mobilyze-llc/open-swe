@@ -199,12 +199,21 @@ def _probe(value: object) -> Probe:
     if probe_type is ProbeType.GENERATED_ARTIFACT:
         _exact(
             data,
-            {"type", "fixture", "path", "expected_sha256", "contains", "fields"},
+            {
+                "type",
+                "fixture",
+                "path",
+                "expected_exists",
+                "expected_sha256",
+                "contains",
+                "fields",
+            },
             "artifact probe",
         )
         return ArtifactProbe(
             fixture=_text(data["fixture"], "fixture"),
             path=_text(data["path"], "artifact path"),
+            expected_exists=_boolean(data["expected_exists"], "expected_exists"),
             expected_sha256=_optional_text(data["expected_sha256"], "artifact hash"),
             contains=tuple(
                 _text(item, "content marker") for item in _list(data["contains"], "contains")
@@ -246,7 +255,7 @@ def _clause(value: object) -> ContractClause:
             "expected_behavior",
             "failure_behavior",
             "evidence_types",
-            "anti_cheat",
+            "anti_cheat_probe",
             "out_of_scope_reason",
             "adjacent_clause_ids",
             "probe",
@@ -254,6 +263,7 @@ def _clause(value: object) -> ContractClause:
         "clause",
     )
     probe_value = data["probe"]
+    anti_cheat_probe_value = data["anti_cheat_probe"]
     return ContractClause(
         id=_text(data["id"], "clause id"),
         task=_text(data["task"], "clause task"),
@@ -264,7 +274,9 @@ def _clause(value: object) -> ContractClause:
             for item in _list(data["evidence_types"], "evidence_types")
         ),
         probe=None if probe_value is None else _probe(probe_value),
-        anti_cheat=_boolean(data["anti_cheat"], "anti_cheat"),
+        anti_cheat_probe=(
+            None if anti_cheat_probe_value is None else _probe(anti_cheat_probe_value)
+        ),
         out_of_scope_reason=_optional_text(data["out_of_scope_reason"], "out-of-scope reason"),
         adjacent_clause_ids=tuple(
             _text(item, "adjacent clause id")

@@ -53,7 +53,14 @@ def _contract(*, version: int = 1) -> BehaviorContract:
         owner=ContractOwner(OwnerType.ISSUE, "OSWE-34"),
         user_visible_goal="Operators can verify public behavior deterministically.",
         target=TargetRef(TargetType.CLI, "open-swe"),
-        approved_fixtures=("valid-cli", "invalid-cli", "api-write", "artifact", "process"),
+        approved_fixtures=(
+            "valid-cli",
+            "invalid-cli",
+            "api-write",
+            "api-invalid",
+            "artifact",
+            "process",
+        ),
         credential_references=("test-api-token",),
         clauses=(
             ContractClause(
@@ -71,6 +78,7 @@ def _contract(*, version: int = 1) -> BehaviorContract:
                         FileEffect("outputs/result.json", FileState.EXISTS, "3" * 64),
                     ),
                 ),
+                anti_cheat_probe=CliProbe(fixture="invalid-cli", expected_exit_code=2),
                 adjacent_clause_ids=("cli-invalid",),
             ),
             ContractClause(
@@ -80,7 +88,6 @@ def _contract(*, version: int = 1) -> BehaviorContract:
                 failure_behavior="Accepting invalid input fails validation.",
                 evidence_types=(EvidenceType.EXIT_CODE,),
                 probe=CliProbe(fixture="invalid-cli", expected_exit_code=2),
-                anti_cheat=True,
             ),
             ContractClause(
                 id="future-ui",
@@ -126,6 +133,7 @@ def test_contract_is_immutable_and_hashes_equivalent_content_identically():
                 "valid-cli",
                 "invalid-cli",
                 "api-write",
+                "api-invalid",
                 "artifact",
                 "process",
             ],
@@ -140,7 +148,15 @@ def test_contract_is_immutable_and_hashes_equivalent_content_identically():
                     "expected_behavior": "The invocation succeeds and writes the public result.",
                     "failure_behavior": "A non-zero exit or missing result fails validation.",
                     "evidence_types": ["exit_code", "public_output"],
-                    "anti_cheat": False,
+                    "anti_cheat_probe": {
+                        "type": "cli",
+                        "fixture": "invalid-cli",
+                        "expected_exit_code": 2,
+                        "stdout_contains": [],
+                        "stderr_contains": [],
+                        "stdout_fields": [],
+                        "filesystem_effects": [],
+                    },
                     "out_of_scope_reason": None,
                     "adjacent_clause_ids": ["cli-invalid"],
                     "probe": {
@@ -172,7 +188,7 @@ def test_contract_is_immutable_and_hashes_equivalent_content_identically():
                     "expected_behavior": "The invocation rejects invalid input.",
                     "failure_behavior": "Accepting invalid input fails validation.",
                     "evidence_types": ["exit_code"],
-                    "anti_cheat": True,
+                    "anti_cheat_probe": None,
                     "out_of_scope_reason": None,
                     "adjacent_clause_ids": [],
                     "probe": {
@@ -191,7 +207,7 @@ def test_contract_is_immutable_and_hashes_equivalent_content_identically():
                     "expected_behavior": "The browser surface is excluded from this version.",
                     "failure_behavior": "The excluded surface must not be treated as passing.",
                     "evidence_types": [],
-                    "anti_cheat": False,
+                    "anti_cheat_probe": None,
                     "out_of_scope_reason": "The v1 contract has no browser probe.",
                     "adjacent_clause_ids": [],
                     "probe": None,
@@ -264,14 +280,22 @@ def test_cli_and_invalid_input_probes_finish_explicitly():
         "cli-invalid": CliObservation(exit_code=2, stdout="", stderr="invalid"),
     }
 
-    report = run_contract(binding, observations, _context())
+    report = run_contract(
+        binding,
+        observations,
+        _context(),
+        anti_cheat_observations={
+            "cli-valid": CliObservation(exit_code=2, stdout="", stderr="invalid")
+        },
+    )
 
     assert [result.status for result in report.results] == [
         ClauseStatus.PASS,
         ClauseStatus.PASS,
         ClauseStatus.OUT_OF_SCOPE,
     ]
-    assert report.results[1].anti_cheat_passed is True
+    assert report.results[0].anti_cheat_passed is True
+    assert report.results[1].anti_cheat_passed is None
 
 
 def test_missing_observation_blocks_instead_of_passing():
@@ -279,6 +303,13 @@ def test_missing_observation_blocks_instead_of_passing():
 
     assert report.results[0].status is ClauseStatus.BLOCKED
     assert report.results[0].blocker == "required observation was not supplied"
+
+
+def test_explicit_empty_targeted_selection_is_a_no_op():
+    report = run_contract(_binding(), {}, _context(), clause_ids=())
+
+    assert report.selected_clause_ids == ()
+    assert report.results == ()
 
 
 def test_http_response_and_persistence_assertions_are_deterministic():
@@ -298,7 +329,7 @@ def test_http_response_and_persistence_assertions_are_deterministic():
                 JsonFieldExpectation(("items", "item-1", "active"), JsonKind.BOOLEAN, True),
             ),
         ),
-        anti_cheat=True,
+        anti_cheat_probe=HttpProbe(fixture="api-invalid", expected_status=400),
     )
     contract = replace(_contract(), clauses=(clause,))
     report = run_contract(
@@ -311,10 +342,50 @@ def test_http_response_and_persistence_assertions_are_deterministic():
             )
         },
         _context(),
+        anti_cheat_observations={
+            clause.id: HttpObservation(
+                status_code=400,
+                response={"error": "invalid"},
+                persisted_state={},
+            )
+        },
     )
 
     assert report.results[0].status is ClauseStatus.PASS
     assert report.results[0].anti_cheat_passed is True
+
+
+def test_json_expectations_support_public_keys_arrays_and_numeric_equivalence():
+    clause = ContractClause(
+        id="json-shape",
+        task="Inspect the documented response shape.",
+        expected_behavior="Public JSON keys, arrays, and numbers match the contract.",
+        failure_behavior="A missing or mismatched field fails validation.",
+        evidence_types=(EvidenceType.HTTP_RESPONSE,),
+        probe=HttpProbe(
+            fixture="api-write",
+            expected_status=200,
+            response_fields=(
+                JsonFieldExpectation(("userId",), JsonKind.STRING),
+                JsonFieldExpectation(("items", "0", "score"), JsonKind.NUMBER, expected=2),
+            ),
+        ),
+    )
+    contract = replace(_contract(), clauses=(clause,))
+
+    report = run_contract(
+        _binding(contract),
+        {
+            clause.id: HttpObservation(
+                status_code=200,
+                response={"userId": "user-1", "items": [{"score": 2.0}]},
+                persisted_state={},
+            )
+        },
+        _context(),
+    )
+
+    assert report.results[0].status is ClauseStatus.PASS
 
 
 def test_generated_artifact_hash_schema_and_content_are_checked():
@@ -328,6 +399,7 @@ def test_generated_artifact_hash_schema_and_content_are_checked():
         probe=ArtifactProbe(
             fixture="artifact",
             path="artifacts/result.json",
+            expected_exists=True,
             expected_sha256=content_sha256(content),
             contains=('"schema":"result.v1"',),
             fields=(JsonFieldExpectation(("ok",), JsonKind.BOOLEAN, True),),
@@ -342,6 +414,53 @@ def test_generated_artifact_hash_schema_and_content_are_checked():
     )
 
     assert report.results[0].status is ClauseStatus.PASS
+
+
+def test_artifact_existence_is_explicit_and_absence_cannot_claim_content():
+    exists_clause = ContractClause(
+        id="artifact-exists",
+        task="Observe the documented artifact path.",
+        expected_behavior="The artifact exists, even when it is empty.",
+        failure_behavior="A missing artifact fails validation.",
+        evidence_types=(EvidenceType.ARTIFACT_CONTENT,),
+        probe=ArtifactProbe(
+            fixture="artifact",
+            path="artifacts/empty.txt",
+            expected_exists=True,
+        ),
+    )
+    absent_clause = replace(
+        exists_clause,
+        id="artifact-absent",
+        expected_behavior="The temporary artifact is absent.",
+        probe=ArtifactProbe(
+            fixture="artifact",
+            path="artifacts/temporary.txt",
+            expected_exists=False,
+        ),
+    )
+    contract = replace(_contract(), clauses=(exists_clause, absent_clause))
+
+    report = run_contract(
+        _binding(contract),
+        {
+            exists_clause.id: ArtifactObservation("artifacts/empty.txt", ""),
+            absent_clause.id: ArtifactObservation("artifacts/temporary.txt", "", exists=False),
+        },
+        _context(),
+    )
+
+    assert [result.status for result in report.results] == [
+        ClauseStatus.PASS,
+        ClauseStatus.PASS,
+    ]
+    with pytest.raises(ContractValidationError, match="absent artifacts"):
+        ArtifactProbe(
+            fixture="artifact",
+            path="artifacts/temporary.txt",
+            expected_exists=False,
+            contains=("content",),
+        )
 
 
 def test_process_launch_termination_and_public_log_are_checked_without_log_leakage():
@@ -379,11 +498,79 @@ def test_process_launch_termination_and_public_log_are_checked_without_log_leaka
     assert "token=" not in report.to_json()
 
 
-def test_path_escape_and_source_inputs_fail_closed():
+def test_path_escape_fails_closed_without_rejecting_legitimate_output_directories():
     with pytest.raises(ContractValidationError, match="safe relative artifact path"):
-        ArtifactProbe(fixture="artifact", path="../../agent/server.py")
-    with pytest.raises(ContractValidationError, match="source, test, diff, history, or trace"):
-        ArtifactProbe(fixture="artifact", path="agent/server.py")
+        ArtifactProbe(fixture="artifact", path="../../agent/server.py", expected_exists=True)
+
+    probe = ArtifactProbe(
+        fixture="artifact",
+        path="agent/generated/manifest.json",
+        expected_exists=True,
+    )
+
+    assert probe.path == "agent/generated/manifest.json"
+
+
+def test_cli_absence_and_check_count_are_reported_from_declared_assertions():
+    clause = ContractClause(
+        id="cli-cleanup",
+        task="Run the cleanup fixture.",
+        expected_behavior="The CLI succeeds without leaving a temporary file.",
+        failure_behavior="A failed check or remaining file fails validation.",
+        evidence_types=(EvidenceType.EXIT_CODE,),
+        probe=CliProbe(
+            fixture="valid-cli",
+            expected_exit_code=0,
+            stdout_contains=("created", "ready"),
+            stderr_contains=("warning",),
+            stdout_fields=(JsonFieldExpectation(("state",), JsonKind.STRING),),
+            filesystem_effects=(FileEffect("outputs/temp.txt", FileState.ABSENT),),
+        ),
+    )
+    contract = replace(_contract(), clauses=(clause,))
+
+    report = run_contract(
+        _binding(contract),
+        {
+            clause.id: CliObservation(
+                exit_code=0,
+                stdout='{"state":"ready","message":"created"}',
+                stderr="warning",
+            )
+        },
+        _context(),
+    )
+
+    assert report.results[0].status is ClauseStatus.PASS
+    assert "checks=6" in report.results[0].evidence[0].summary
+
+
+def test_anti_cheat_uses_an_independent_fixture_and_result():
+    binding = _binding()
+    primary = CliObservation(
+        exit_code=0,
+        stdout='{"ok": true, "message": "created"}',
+        stderr="",
+        filesystem=(FileObservation("outputs/result.json", exists=True, sha256="3" * 64),),
+    )
+
+    report = run_contract(
+        binding,
+        {"cli-valid": primary},
+        _context(),
+        clause_ids=("cli-valid",),
+        anti_cheat_observations={
+            "cli-valid": CliObservation(exit_code=0, stdout="", stderr="accepted")
+        },
+    )
+
+    assert report.results[0].status is ClauseStatus.FAIL
+    assert report.results[0].anti_cheat_passed is False
+    with pytest.raises(ContractValidationError, match="independent fixture"):
+        replace(
+            binding.contract.clauses[0],
+            anti_cheat_probe=CliProbe(fixture="valid-cli", expected_exit_code=0),
+        )
 
 
 def test_cache_identity_is_exact_across_all_four_components():
@@ -447,6 +634,39 @@ def test_cache_identity_is_exact_across_all_four_components():
     assert changed_profile.results[0].cache_hit is False
     assert changed_executor.results[0].cache_hit is False
     assert changed_clause_report.results[0].cache_hit is False
+
+
+def test_blocked_observation_mismatch_does_not_poison_clause_cache():
+    binding = _binding()
+    cache = ClauseCache()
+
+    blocked = run_contract(
+        binding,
+        {
+            "cli-invalid": ProcessObservation(
+                launched=True,
+                terminated=True,
+                exit_code=0,
+                public_log="ready",
+            )
+        },
+        _context(),
+        cache=cache,
+        clause_ids=("cli-invalid",),
+    )
+    assert len(cache) == 0
+    corrected = run_contract(
+        binding,
+        {"cli-invalid": CliObservation(exit_code=2, stdout="", stderr="invalid")},
+        _context(),
+        cache=cache,
+        clause_ids=("cli-invalid",),
+    )
+
+    assert blocked.results[0].status is ClauseStatus.BLOCKED
+    assert len(cache) == 1
+    assert corrected.results[0].status is ClauseStatus.PASS
+    assert corrected.results[0].cache_hit is False
 
 
 def test_targeted_rerun_includes_only_affected_failed_and_declared_adjacent_clauses():

@@ -12,21 +12,6 @@ _SENSITIVE = (
     re.compile(r"\b(?:gh[pousr]_|sk-|lin_api_)[A-Za-z0-9_-]{8,}"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
 )
-_FORBIDDEN_INPUT_PARTS = frozenset(
-    {
-        ".git",
-        "agent",
-        "diff",
-        "diffs",
-        "history",
-        "source",
-        "sources",
-        "test",
-        "tests",
-        "trace",
-        "traces",
-    }
-)
 
 
 def require_text(value: str, field: str) -> None:
@@ -60,8 +45,6 @@ def require_safe_artifact_path(value: str) -> None:
     path = PurePosixPath(value)
     if path.is_absolute() or value != path.as_posix() or ".." in path.parts or "." in path.parts:
         raise ValueError("artifact path must be a safe relative artifact path")
-    if any(part.lower() in _FORBIDDEN_INPUT_PARTS for part in path.parts):
-        raise ValueError("artifact path cannot name source, test, diff, history, or trace inputs")
 
 
 def require_target_reference(target_type: str, reference: str) -> None:

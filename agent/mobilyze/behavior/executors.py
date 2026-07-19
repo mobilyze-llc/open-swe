@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TypeAlias
 
 from agent.mobilyze.behavior.codec import content_sha256
@@ -63,9 +63,14 @@ class HttpObservation:
 class ArtifactObservation:
     path: str
     content: str
+    exists: bool = True
 
     def __post_init__(self) -> None:
         require_safe_artifact_path(self.path)
+        if not isinstance(self.exists, bool):
+            raise ValueError("observed artifact existence must be a boolean")
+        if not self.exists and self.content:
+            raise ValueError("an absent observed artifact cannot carry content")
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,19 +106,28 @@ def _field_failures(value: object, expectations: tuple[JsonFieldExpectation, ...
         current = value
         missing = False
         for part in expectation.path:
-            if not isinstance(current, Mapping) or part not in current:
+            if isinstance(current, Mapping) and part in current:
+                current = current[part]
+            elif isinstance(current, list) and part.isdecimal() and int(part) < len(current):
+                current = current[int(part)]
+            else:
                 missing = True
                 break
-            current = current[part]
         label = ".".join(expectation.path)
         if missing:
             failures.append(f"missing JSON field {label}")
         elif not _kind_matches(current, expectation.kind):
             failures.append(f"JSON field {label} has the wrong type")
-        elif expectation.compare_value and (
-            type(current) is not type(expectation.expected) or current != expectation.expected
-        ):
-            failures.append(f"JSON field {label} has the wrong value")
+        elif expectation.compare_value:
+            expected = expectation.expected
+            number_match = (
+                expectation.kind is JsonKind.NUMBER
+                and isinstance(expected, int | float)
+                and not isinstance(expected, bool)
+                and current == expected
+            )
+            if not number_match and (type(current) is not type(expected) or current != expected):
+                failures.append(f"JSON field {label} has the wrong value")
     return failures
 
 
@@ -145,7 +159,7 @@ def _completed(clause: ContractClause, failures: list[str], summary: str) -> Cla
         evidence=_evidence(clause, summary),
         reproduction_reference=f"probe://{clause.id}/reproduce",
         blocker=None,
-        anti_cheat_passed=(not failures) if clause.anti_cheat else None,
+        anti_cheat_passed=None,
     )
 
 
@@ -167,15 +181,22 @@ def _execute_cli(clause: ContractClause, probe: CliProbe, observed: CliObservati
     files = {item.path: item for item in observed.filesystem}
     for effect in probe.filesystem_effects:
         actual = files.get(effect.path)
-        if actual is None:
+        if actual is None and effect.state is FileState.EXISTS:
             failures.append("filesystem effect was not observed")
-        elif effect.state is FileState.EXISTS and not actual.exists:
+        elif actual is not None and effect.state is FileState.EXISTS and not actual.exists:
             failures.append("expected generated file is absent")
-        elif effect.state is FileState.ABSENT and actual.exists:
+        elif actual is not None and effect.state is FileState.ABSENT and actual.exists:
             failures.append("expected absent file exists")
-        elif effect.sha256 is not None and actual.sha256 != effect.sha256:
+        elif actual is not None and effect.sha256 is not None and actual.sha256 != effect.sha256:
             failures.append("generated file hash differs from the contract")
-    summary = f"exit={observed.exit_code}; checks={len(failures) + 1}; failures={len(failures)}"
+    checks = (
+        1
+        + len(probe.stdout_contains)
+        + len(probe.stderr_contains)
+        + len(probe.stdout_fields)
+        + len(probe.filesystem_effects)
+    )
+    summary = f"exit={observed.exit_code}; checks={checks}; failures={len(failures)}"
     return _completed(clause, failures, summary)
 
 
@@ -197,16 +218,21 @@ def _execute_artifact(
     failures: list[str] = []
     if observed.path != probe.path:
         failures.append("generated artifact path differs from the contract")
-    digest = content_sha256(observed.content)
-    if probe.expected_sha256 is not None and digest != probe.expected_sha256:
-        failures.append("generated artifact hash differs from the contract")
-    failures.extend(
-        "generated artifact is missing required public content"
-        for marker in probe.contains
-        if marker not in observed.content
+    if observed.exists is not probe.expected_exists:
+        failures.append("generated artifact existence differs from the contract")
+    digest = content_sha256(observed.content) if observed.exists else None
+    if observed.exists:
+        if probe.expected_sha256 is not None and digest != probe.expected_sha256:
+            failures.append("generated artifact hash differs from the contract")
+        failures.extend(
+            "generated artifact is missing required public content"
+            for marker in probe.contains
+            if marker not in observed.content
+        )
+        failures.extend(_json_failures(observed.content, probe.fields))
+    summary = (
+        f"artifact_exists={observed.exists}; artifact_sha256={digest}; failures={len(failures)}"
     )
-    failures.extend(_json_failures(observed.content, probe.fields))
-    summary = f"artifact_sha256={digest}; failures={len(failures)}"
     return _completed(clause, failures, summary)
 
 
@@ -231,8 +257,11 @@ def _execute_process(
     return _completed(clause, failures, summary)
 
 
-def execute_clause(clause: ContractClause, observed: Observation) -> ClauseResult:
-    probe = clause.probe
+def _execute_with_probe(
+    clause: ContractClause,
+    probe: CliProbe | HttpProbe | ArtifactProbe | ProcessProbe,
+    observed: Observation,
+) -> ClauseResult:
     if isinstance(probe, CliProbe) and isinstance(observed, CliObservation):
         return _execute_cli(clause, probe, observed)
     if isinstance(probe, HttpProbe) and isinstance(observed, HttpObservation):
@@ -247,5 +276,51 @@ def execute_clause(clause: ContractClause, observed: Observation) -> ClauseResul
         evidence=(),
         reproduction_reference=f"probe://{clause.id}/reproduce",
         blocker="observation type does not match the approved probe",
-        anti_cheat_passed=False if clause.anti_cheat else None,
+        anti_cheat_passed=None,
+    )
+
+
+def execute_clause(
+    clause: ContractClause,
+    observed: Observation,
+    anti_cheat_observed: Observation | None = None,
+) -> ClauseResult:
+    probe = clause.probe
+    if probe is None:
+        raise ValueError("in-scope clauses require an approved probe")
+    primary = _execute_with_probe(clause, probe, observed)
+    if primary.status is ClauseStatus.BLOCKED or clause.anti_cheat_probe is None:
+        return primary
+    if anti_cheat_observed is None:
+        return replace(
+            primary,
+            status=ClauseStatus.BLOCKED,
+            evidence=(),
+            blocker="required anti-cheat observation was not supplied",
+            anti_cheat_passed=None,
+        )
+    anti_cheat = _execute_with_probe(clause, clause.anti_cheat_probe, anti_cheat_observed)
+    if anti_cheat.status is ClauseStatus.BLOCKED:
+        return replace(
+            anti_cheat,
+            blocker="anti-cheat observation type does not match the approved probe",
+            anti_cheat_passed=None,
+        )
+    anti_cheat_passed = anti_cheat.status is ClauseStatus.PASS
+    evidence = tuple(
+        replace(
+            item,
+            summary=f"{item.summary}; anti_cheat={'pass' if anti_cheat_passed else 'fail'}",
+        )
+        for item in primary.evidence
+    )
+    return replace(
+        primary,
+        status=(
+            ClauseStatus.PASS
+            if primary.status is ClauseStatus.PASS and anti_cheat_passed
+            else ClauseStatus.FAIL
+        ),
+        evidence=evidence,
+        anti_cheat_passed=anti_cheat_passed,
     )

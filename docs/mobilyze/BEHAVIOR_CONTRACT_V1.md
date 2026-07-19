@@ -7,8 +7,9 @@ higher `contract_version` and a new approval event whose subject hash matches th
 
 The runtime has four fixed probe types: `cli`, `http_api`, `generated_artifact`, and `process`.
 Probes consume named repository-approved fixtures and bounded public observations; they cannot carry
-commands, code, templates, credential values, source files, diffs, history, tests, or traces. Reports
-contain compact summaries and `probe://` references rather than raw output.
+commands, code, templates, credential values, source files, diffs, history, tests, or traces. An
+anti-cheat result comes from a separately named fixture and observation, never from copying the
+primary result. Reports contain compact summaries and `probe://` references rather than raw output.
 
 ## Example contract
 
@@ -25,7 +26,7 @@ contain compact summaries and `probe://` references rather than raw output.
     "type": "cli",
     "reference": "open-swe"
   },
-  "approved_fixtures": ["invalid-cli"],
+  "approved_fixtures": ["invalid-cli", "empty-cli"],
   "credential_references": [],
   "clauses": [
     {
@@ -43,7 +44,15 @@ contain compact summaries and `probe://` references rather than raw output.
         "stdout_fields": [],
         "filesystem_effects": []
       },
-      "anti_cheat": true,
+      "anti_cheat_probe": {
+        "type": "cli",
+        "fixture": "empty-cli",
+        "expected_exit_code": 2,
+        "stdout_contains": [],
+        "stderr_contains": [],
+        "stdout_fields": [],
+        "filesystem_effects": []
+      },
       "out_of_scope_reason": null,
       "adjacent_clause_ids": []
     },
@@ -54,7 +63,7 @@ contain compact summaries and `probe://` references rather than raw output.
       "failure_behavior": "The excluded flow must never be reported as passing.",
       "evidence_types": [],
       "probe": null,
-      "anti_cheat": false,
+      "anti_cheat_probe": null,
       "out_of_scope_reason": "Behavior Contract v1 has no browser probe.",
       "adjacent_clause_ids": []
     }
@@ -86,7 +95,7 @@ bound record rather than a bare contract, so unapproved or silently changed cont
         {
           "type": "exit_code",
           "reference": "probe://reject-invalid-input/exit_code",
-          "summary": "exit=2; checks=1; failures=0"
+          "summary": "exit=2; checks=1; failures=0; anti_cheat=pass"
         }
       ],
       "reproduction_reference": "probe://reject-invalid-input/reproduce",
@@ -108,6 +117,10 @@ bound record rather than a bare contract, so unapproved or silently changed cont
 ```
 
 Every selected clause has one explicit status: `pass`, `fail`, `blocked`, or `out_of_scope`.
-Clause-cache identity is the exact tuple of target or artifact hash, clause hash, executor version,
-and profile or image hash. Targeted reruns select affected or previously failed/blocked clauses and
-only their declared adjacent probes, preserving contract order.
+`run_contract` receives anti-cheat observations separately, and a required missing or mismatched
+anti-cheat observation blocks the clause. Generated-artifact probes declare `expected_exists`
+explicitly; absent artifacts cannot declare hash, content, or schema assertions. Clause-cache
+identity is the exact tuple of target or artifact hash, clause hash, executor version, and profile or
+image hash. Blocked wiring results are not cached. Targeted reruns select affected or previously
+failed/blocked clauses and only their declared adjacent probes, preserving contract order; an empty
+selection is a no-op.

@@ -30,14 +30,18 @@ class ExecutionContext:
         require_text(self.executor_version, "executor version")
 
 
-def _blocked(clause_id: str, *, anti_cheat: bool) -> ClauseResult:
+def _blocked(
+    clause_id: str,
+    *,
+    blocker: str = "required observation was not supplied",
+) -> ClauseResult:
     return ClauseResult(
         clause_id=clause_id,
         status=ClauseStatus.BLOCKED,
         evidence=(),
         reproduction_reference=f"probe://{clause_id}/reproduce",
-        blocker="required observation was not supplied",
-        anti_cheat_passed=False if anti_cheat else None,
+        blocker=blocker,
+        anti_cheat_passed=None,
     )
 
 
@@ -59,13 +63,14 @@ def run_contract(
     *,
     cache: ClauseCache | None = None,
     clause_ids: tuple[str, ...] | None = None,
+    anti_cheat_observations: Mapping[str, Observation] | None = None,
 ) -> BehaviorReport:
     if binding.implementation_started_event is None:
         raise ValueError("contract must be accepted and bound before implementation starts")
     if canonical_hash(binding.contract) != binding.contract_hash:
         raise ValueError("bound contract hash does not match immutable contract content")
     clauses = {clause.id: clause for clause in binding.contract.clauses}
-    selected = clause_ids or tuple(clauses)
+    selected = tuple(clauses) if clause_ids is None else clause_ids
     if not isinstance(selected, tuple):
         raise ValueError("selected clause ids must be immutable")
     unknown = set(selected).difference(clauses)
@@ -76,6 +81,10 @@ def run_contract(
     unexpected_observations = set(observations).difference(clauses)
     if unexpected_observations:
         raise ValueError("observations may only name contract clauses")
+    anti_cheat_observations = anti_cheat_observations or {}
+    unexpected_anti_cheat = set(anti_cheat_observations).difference(clauses)
+    if unexpected_anti_cheat:
+        raise ValueError("anti-cheat observations may only name contract clauses")
 
     results: list[ClauseResult] = []
     for clause_id in selected:
@@ -85,7 +94,16 @@ def run_contract(
             continue
         observed = observations.get(clause_id)
         if observed is None:
-            results.append(_blocked(clause_id, anti_cheat=clause.anti_cheat))
+            results.append(_blocked(clause_id))
+            continue
+        anti_cheat_observed = anti_cheat_observations.get(clause_id)
+        if clause.anti_cheat_probe is not None and anti_cheat_observed is None:
+            results.append(
+                _blocked(
+                    clause_id,
+                    blocker="required anti-cheat observation was not supplied",
+                )
+            )
             continue
         key = CacheKey(
             target_artifact_hash=context.target_artifact_hash,
@@ -97,8 +115,8 @@ def run_contract(
         if cached is not None:
             results.append(replace(cached, cache_hit=True))
             continue
-        result = execute_clause(clause, observed)
-        if cache is not None:
+        result = execute_clause(clause, observed, anti_cheat_observed)
+        if cache is not None and result.status in {ClauseStatus.PASS, ClauseStatus.FAIL}:
             cache.put(key, result)
         results.append(result)
 
