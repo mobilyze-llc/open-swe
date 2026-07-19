@@ -121,9 +121,23 @@ install_services() {
     chown root:"$IDENTITY" "$ENV_FILE"
     chmod 0640 "$ENV_FILE"
   fi
+  if grep -Eq '^[A-Z][A-Z0-9_]*=$' "$ENV_FILE"; then
+    launchctl disable "system/$BACKEND_LABEL"
+    launchctl disable "system/$DASHBOARD_LABEL"
+  fi
+}
+
+validate_environment() {
+  missing=$(grep -E '^[A-Z][A-Z0-9_]*=$' "$ENV_FILE" | cut -d= -f1 || true)
+  if [ -n "$missing" ]; then
+    echo "environment values are missing:" >&2
+    echo "$missing" >&2
+    exit 78
+  fi
 }
 
 start_services() {
+  validate_environment
   for label in "$BACKEND_LABEL" "$DASHBOARD_LABEL"; do
     plist=$(service_plist "$label")
     launchctl print "system/$label" >/dev/null 2>&1 || launchctl bootstrap system "$plist"
@@ -134,6 +148,7 @@ start_services() {
 
 stop_services() {
   for label in "$DASHBOARD_LABEL" "$BACKEND_LABEL"; do
+    launchctl disable "system/$label"
     launchctl bootout "system/$label" >/dev/null 2>&1 || true
   done
 }
@@ -155,9 +170,7 @@ case "$COMMAND" in
     stop_services
     ;;
   restart)
-    for label in "$BACKEND_LABEL" "$DASHBOARD_LABEL"; do
-      launchctl kickstart -k "system/$label"
-    done
+    start_services
     ;;
   status)
     for label in "$BACKEND_LABEL" "$DASHBOARD_LABEL"; do

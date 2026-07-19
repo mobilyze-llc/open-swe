@@ -118,8 +118,11 @@ def test_installer_is_pinned_and_uses_the_dedicated_service_boundary() -> None:
     assert "IDENTITY=_openswectl" in installer
     assert "--frozen --no-dev" in installer
     assert "pnpm install --frozen-lockfile" in installer
+    assert "environment values are missing:" in installer
+    assert 'launchctl disable "system/$label"' in installer
     assert "open-swe-orchard" not in installer
     assert "crucible" not in installer.lower()
     assert 'set -a\n. "$ENV_FILE"\nset +a' in runner
     assert "--host 127.0.0.1 --port 2029" in runner
     assert "--host 127.0.0.1 --port 3029" in runner
+    assert "exec /opt/homebrew/bin/node node_modules/vite/bin/vite.js preview" in runner

@@ -27,7 +27,7 @@ case "$ROLE" in
     ;;
   dashboard)
     cd "$DEPLOYMENT_ROOT/current/ui"
-    exec /opt/homebrew/bin/pnpm exec vite preview \
+    exec /opt/homebrew/bin/node node_modules/vite/bin/vite.js preview \
       --host 127.0.0.1 --port 3029 --strictPort
     ;;
   *)

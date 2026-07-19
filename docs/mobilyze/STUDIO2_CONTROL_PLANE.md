@@ -70,6 +70,10 @@ LOCAL_SANDBOX_ROOT_DIR=/var/db/mobilyze-open-swe-control-plane/sandboxes
 SANDBOX_TYPE=local
 ```
 
+`start` fails closed and prints missing names only while any template entry remains empty. An
+install with empty entries disables both launchd labels, so a reboot cannot start a partially
+configured service.
+
 ## Network and service operations
 
 Configure private same-origin access and the signed webhook-only public listener as root:
