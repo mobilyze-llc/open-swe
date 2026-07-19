@@ -38,9 +38,6 @@ if TYPE_CHECKING:
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
-_MAX_AGENT_DEFINITIONS = 16
-_MAX_ADMIN_SKILL_REFS = 32
-_MAX_VALIDATIONS = 32
 
 
 def _validate_request(request: ReviewSubjectRequest) -> None:
@@ -63,18 +60,6 @@ def _validate_request(request: ReviewSubjectRequest) -> None:
         raise ReviewSubjectBlocked(
             ReviewSubjectBlockerCode.INVALID_INPUT,
             "artifact root and review policy version are required",
-        )
-    if len(request.agent_definitions) > _MAX_AGENT_DEFINITIONS:
-        raise ReviewSubjectBlocked(
-            ReviewSubjectBlockerCode.INVALID_INPUT, "too many Agent Definitions"
-        )
-    if len(request.administrator_skill_refs) > _MAX_ADMIN_SKILL_REFS:
-        raise ReviewSubjectBlocked(
-            ReviewSubjectBlockerCode.INVALID_INPUT, "too many administrator skill references"
-        )
-    if len(request.validations) > _MAX_VALIDATIONS:
-        raise ReviewSubjectBlocked(
-            ReviewSubjectBlockerCode.INVALID_INPUT, "too many validation references"
         )
     if any(ref.trust != "trusted" for ref in request.administrator_skill_refs):
         raise ReviewSubjectBlocked(

@@ -43,8 +43,8 @@ class ArtifactRef:
     trust: TrustLevel
 
     def __post_init__(self) -> None:
-        if not self.path or len(self.path) > 1024:
-            raise ValueError("artifact path must contain 1..1024 characters")
+        if not self.path:
+            raise ValueError("artifact path is required")
         if not _SHA256_RE.fullmatch(self.sha256):
             raise ValueError("artifact sha256 must be 64 lowercase hexadecimal characters")
         if self.bytes < 0:
@@ -65,8 +65,8 @@ class AgentDefinition:
     sha256: str
 
     def __post_init__(self) -> None:
-        if not self.id or len(self.id) > 200:
-            raise ValueError("agent definition id must contain 1..200 characters")
+        if not self.id:
+            raise ValueError("agent definition id is required")
         if not _SHA256_RE.fullmatch(self.sha256):
             raise ValueError("agent definition sha256 is invalid")
 
@@ -106,8 +106,8 @@ class ValidationReference:
     result: ArtifactRef
 
     def __post_init__(self) -> None:
-        if not self.command or len(self.command) > 1000:
-            raise ValueError("validation command must contain 1..1000 characters")
+        if not self.command:
+            raise ValueError("validation command is required")
 
     def to_dict(self) -> dict[str, object]:
         return {"command": self.command, "result": self.result.to_dict()}
