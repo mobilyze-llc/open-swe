@@ -62,7 +62,9 @@ def test_operator_is_fixed_surface_and_validates_manifest() -> None:
     assert "ghcr.io/cirruslabs/ubuntu@sha256:" in source
     assert "observed_free_disk_gib" in source
     assert 'TAILSCALE_BIN="/usr/local/bin/tailscale"' in source
-    assert "DHCPLeaseTimeSecs -int 600" in source
+    assert "-dict-add DHCPLeaseTimeSecs -int 600" in source
+    assert 'DHCP_LEASE_BACKUP="${CONFIG_ROOT}/dhcp-lease.before"' in source
+    assert "Delete :bootpd:DHCPLeaseTimeSecs" in source
     assert "vm-exec" in source
     assert "vm-stop" in source
     assert "vm-delete" in source
@@ -70,7 +72,13 @@ def test_operator_is_fixed_surface_and_validates_manifest() -> None:
     assert "if dscl . -list /Users UniqueID" in source
     assert "trap start_all EXIT" in source
     assert 'nc -z "$CONTROLLER_ADDRESS" 6120' in source
-    assert 'orchard delete vm "$1" >/dev/null 2>&1 || true' in source
+    assert 'trap "orchard delete vm $1 >/dev/null 2>&1 || true" EXIT' in source
+    assert "worker-bootstrap.XXXXXX" in source
+    assert 'mv -f "$worker_bootstrap" "${SECRETS_ROOT}/worker-bootstrap"' in source
+    assert 'launchctl print "system/${CONTROLLER_LABEL}" 2>/dev/null' in source
+    assert 'controller_state="${controller_state:-absent}"' in source
+    assert 'orchard list workers 2>/dev/null || echo "Orchard workers unavailable"' in source
+    assert 'sysadminctl -deleteUser "$SERVICE_USER"' in source
     assert "rollback TART_RELEASE ORCHARD_VERSION" in source
     assert "installed rollback pair not found" in source
     assert '"$BACKUP_ROOT" "$SERVICE_USER"' in source

@@ -34,7 +34,7 @@ ssh studio2 'sudo /usr/local/sbin/studio2-orchard manifest'
 ssh studio2 'sudo /usr/local/sbin/studio2-orchard unauthenticated-probe'
 ```
 
-`install` refuses any host except `studio2`, verifies Tailscale address `100.107.128.12`, downloads exact upstream releases, verifies their SHA-256 values and executable signatures, creates the identity and roots, sets Tart's recommended 600-second DHCP lease, bootstraps least-privilege operator and worker service accounts, and loads both launch daemons. It exits before account creation if UID or GID 450 belongs to another identity. The controller launch wrapper re-enables the host's existing enrolled Tailscale node and waits for its exact address before Orchard binds; it neither creates a Tailscale identity nor stores a Tailscale credential. The bootstrap administrator secret is retained only for Orchard credential recovery. Operator credentials have `compute:read`, `compute:write`, `compute:connect`, and `admin:read`; worker credentials have only `compute:read` and `compute:write`.
+`install` refuses any host except `studio2`, verifies Tailscale address `100.107.128.12`, downloads exact upstream releases, verifies their SHA-256 values and executable signatures, creates the identity and roots, and sets Tart's recommended 600-second DHCP lease without replacing other `bootpd` settings. It records the prior lease value before the first change so confirmed uninstall can restore that key. Worker bootstrap credentials replace the active file only after retrieval, non-empty validation, ownership, and mode checks succeed. The installer then bootstraps least-privilege operator and worker service accounts and loads both launch daemons. It exits before account creation if UID or GID 450 belongs to another identity. The controller launch wrapper re-enables the host's existing enrolled Tailscale node and waits for its exact address before Orchard binds; it neither creates a Tailscale identity nor stores a Tailscale credential. The bootstrap administrator secret is retained only for Orchard credential recovery. Operator credentials have `compute:read`, `compute:write`, `compute:connect`, and `admin:read`; worker credentials have only `compute:read` and `compute:write`.
 
 ## VM lifecycle
 
@@ -70,7 +70,7 @@ ssh studio2 'sudo tail -200 /var/log/mobilyze-open-swe-orchard/worker-launchd.lo
 ssh studio2 'sudo -u _opensweorchard env HOME=/var/db/mobilyze-open-swe-orchard /opt/mobilyze/open-swe-orchard/current/tart list'
 ```
 
-The expected listener is exactly `100.107.128.12:6120`. A wildcard listener, a missing worker heartbeat, or any credential text in logs blocks operation. `status` prints current free capacity for operator decisions without turning an unvalidated value into an admission rule.
+The expected listener is exactly `100.107.128.12:6120`. A wildcard listener, a missing worker heartbeat, or any credential text in logs blocks operation. `status` and `manifest` still return diagnostic output when either launchd job is absent, and `status` prints current free capacity for operator decisions without turning an unvalidated value into an admission rule.
 
 ## Authentication rotation
 
@@ -118,4 +118,4 @@ Preview exact deletion targets first:
 ssh studio2 'sudo /usr/local/sbin/studio2-orchard uninstall'
 ```
 
-After copying any retained controller backup off the host, execute the complete removal with `uninstall --confirm`. It stops both daemons and removes only the two plists, installed wrappers, dedicated software/state/config/log/backup roots, and `_opensweorchard` user/group.
+After copying any retained controller backup off the host, execute the complete removal with `uninstall --confirm`. It stops both daemons, restores the pre-install DHCP lease value (or removes only that key when it was previously absent), removes the two plists, installed wrappers, dedicated software/state/config/log/backup roots, and deletes the macOS role account through `sysadminctl` before removing its dedicated group.

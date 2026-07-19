@@ -91,13 +91,14 @@ def evaluate_change(
     custom_globs = list(config["custom_path_globs"])
     exempt_globs = list(config.get("exempt_path_globs", []))
     source_extensions = set(config["source_extensions"])
+    source_path_globs = list(config.get("source_path_globs", []))
     path = change.path
     base_path = change.base_path or path
 
     is_custom = _matches(path, custom_globs)
     base_is_custom = _matches(base_path, custom_globs)
     is_exempt = _matches(path, exempt_globs)
-    is_source = Path(path).suffix in source_extensions
+    is_source = Path(path).suffix in source_extensions or _matches(path, source_path_globs)
     crosses_boundary = base_path != path and base_is_custom != is_custom
 
     if crosses_boundary and not base_is_custom:
@@ -223,6 +224,7 @@ def load_config(path: Path) -> dict[str, Any]:
     required = {
         "custom_path_globs",
         "source_extensions",
+        "source_path_globs",
         "new_file_line_cap",
         "no_growth_line_threshold",
     }

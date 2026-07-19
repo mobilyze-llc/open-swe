@@ -22,8 +22,13 @@ SPEC.loader.exec_module(GUARD)
 
 def config() -> dict:
     return {
-        "custom_path_globs": ["agent/mobilyze/**", "tests/mobilyze/**"],
+        "custom_path_globs": [
+            "agent/mobilyze/**",
+            "scripts/mobilyze/**",
+            "tests/mobilyze/**",
+        ],
         "source_extensions": [".py"],
+        "source_path_globs": ["scripts/mobilyze/studio2-orchard"],
         "exempt_path_globs": ["tests/**"],
         "new_file_line_cap": 350,
         "no_growth_line_threshold": 600,
@@ -253,6 +258,19 @@ class ArchitectureGuardTests(unittest.TestCase):
             config(),
         )
         self.assertEqual(findings, [])
+
+    def test_rejects_declared_extensionless_custom_source_over_cap(self):
+        findings = GUARD.evaluate_change(
+            change(
+                "scripts/mobilyze/studio2-orchard",
+                added=351,
+                base_exists=False,
+                base_lines=0,
+                head_lines=351,
+            ),
+            config(),
+        )
+        self.assertEqual(rules(findings), {"file_size.new_file_line_cap"})
 
     def test_rejects_growth_once_custom_source_reaches_threshold(self):
         findings = GUARD.evaluate_change(

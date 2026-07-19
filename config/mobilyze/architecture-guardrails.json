@@ -19,6 +19,9 @@
     ".swift",
     ".sh"
   ],
+  "source_path_globs": [
+    "scripts/mobilyze/studio2-orchard"
+  ],
   "exempt_path_globs": [
     "tests/**",
     "docs/**",
