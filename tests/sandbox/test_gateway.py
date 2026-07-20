@@ -354,6 +354,7 @@ def test_make_model_direct_openai_honors_base_url(monkeypatch: pytest.MonkeyPatc
 def test_make_model_gateway_openai_replaces_websocket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://studio2.example:8317/v1")
     monkeypatch.setenv("LANGSMITH_API_KEY", "ls-key")
     captured, fake = _capture_init_chat_model()
     with patch.object(model, "init_chat_model", fake):

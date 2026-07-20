@@ -148,10 +148,11 @@ If `LLM_MODEL_ID` is not set, the default model (`openai:gpt-5.6-sol`) is used.
 
 Set `OPENAI_BASE_URL` to route direct OpenAI models through a Responses-compatible
 endpoint. Keep the `/v1` suffix. Supply `OPENAI_API_KEY` through the deployment's
-secret mechanism rather than a shared shell environment.
+secret mechanism rather than a shared shell environment. Use HTTPS unless the
+endpoint is on loopback or an encrypted private overlay such as Tailscale.
 
 ```bash
-OPENAI_BASE_URL="http://studio2.example:8317/v1"
+OPENAI_BASE_URL="https://openai-proxy.internal.example/v1"
 ```
 
 `max_tokens` is a maximum completion/output token budget, not the model's total context window. For OpenAI reasoning models, this budget can include both internal reasoning tokens and final response tokens.
