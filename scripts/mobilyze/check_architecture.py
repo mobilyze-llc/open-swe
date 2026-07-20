@@ -97,7 +97,9 @@ def evaluate_change(
     is_custom = _matches(path, custom_globs)
     base_is_custom = _matches(base_path, custom_globs)
     is_exempt = _matches(path, exempt_globs)
-    is_source = Path(path).suffix in source_extensions
+    is_source = Path(path).suffix in source_extensions or (
+        base_path != path and Path(base_path).suffix in source_extensions
+    )
     crosses_boundary = base_path != path and base_is_custom != is_custom
 
     if crosses_boundary and not base_is_custom:

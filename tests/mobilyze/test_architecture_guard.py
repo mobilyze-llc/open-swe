@@ -178,6 +178,21 @@ class ArchitectureGuardTests(unittest.TestCase):
             },
         )
 
+    def test_extensionless_rename_preserves_source_line_enforcement(self):
+        renamed = GUARD.Change(
+            path="agent/mobilyze/large_source",
+            added=1,
+            deleted=0,
+            base_exists=True,
+            base_lines=600,
+            head_lines=601,
+            base_path="agent/mobilyze/large_source.py",
+        )
+
+        findings = GUARD.evaluate_change(renamed, config())
+
+        self.assertEqual(rules(findings), {"file_size.no_growth_over_threshold"})
+
     def test_custom_to_upstream_renames_check_destination_and_full_file_budget(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             repo = Path(temp_dir)

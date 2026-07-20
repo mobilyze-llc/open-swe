@@ -1,0 +1,79 @@
+{
+  "schema": "mobilyze.studio2-orchard-baseline.v1",
+  "evidence": {
+    "observed_at_utc": "2026-07-20T07:04:31Z",
+    "mode": "read-only",
+    "host": "studio2"
+  },
+  "identity": {
+    "name": "_opensweorchard",
+    "uid": 450,
+    "gid": 450,
+    "home": "/var/db/mobilyze-open-swe-orchard",
+    "shell": "/usr/bin/false"
+  },
+  "releases": {
+    "orchard": {
+      "version": "0.55.0",
+      "sha256": "35a6ca9f1770a6da9ccc508cee46df21f962d4c5fb437161e4fe8daa34bb14fe",
+      "path": "/opt/mobilyze/open-swe-orchard/releases/orchard/0.55.0/orchard"
+    },
+    "tart": {
+      "version": "2.32.1",
+      "release_directory": "2.32.1-r1",
+      "sha256": "05b65d5c14e8b41e8e44b6d9fd1278de4bedbc8b735d9b99f3c748f76f75862d",
+      "path": "/opt/mobilyze/open-swe-orchard/releases/tart/2.32.1-r1/tart.app/Contents/MacOS/tart"
+    }
+  },
+  "services": {
+    "controller": {
+      "label": "com.mobilyze.open-swe.orchard.controller",
+      "plist": "/Library/LaunchDaemons/com.mobilyze.open-swe.orchard.controller.plist",
+      "program": "/usr/local/libexec/open-swe-orchard-controller",
+      "state": "running"
+    },
+    "worker": {
+      "label": "com.mobilyze.open-swe.orchard.worker",
+      "plist": "/Library/LaunchDaemons/com.mobilyze.open-swe.orchard.worker.plist",
+      "program": "/usr/local/libexec/open-swe-orchard-worker",
+      "state": "running"
+    }
+  },
+  "network": {
+    "listener": "100.107.128.12:6120",
+    "tls": true,
+    "unauthenticated_probe": {
+      "path": "/v1/controller/info",
+      "status": 401
+    }
+  },
+  "worker": {
+    "name": "studio2-open-swe",
+    "labels": [
+      "oswe.pool=apple"
+    ],
+    "resources": {
+      "oswe.vm-slots": 2
+    }
+  },
+  "vm_defaults": {
+    "cpu": 4,
+    "memory_mib": 8192,
+    "disk_gib": 40,
+    "disk_scope": "caller-request"
+  },
+  "disk": {
+    "policy": "report-only",
+    "observed_capacity_gib": 3721,
+    "observed_available_gib": 1577,
+    "minimum_gib": null
+  },
+  "secrets": {
+    "values": "<redacted>",
+    "paths": [
+      "/var/db/mobilyze-open-swe-orchard/secrets/bootstrap-admin.token",
+      "/var/db/mobilyze-open-swe-orchard/secrets/worker-bootstrap.token"
+    ],
+    "mode": "0400"
+  }
+}
