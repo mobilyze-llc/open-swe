@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import posixpath
 import shlex
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
+from agent.utils.agents_md import applicable_agents_md_paths
 from agent.utils.repo_prep import DEFAULT_SKILL_DIRS, materialize_trusted_skills
 
 from .contracts import ReviewSubjectBlocked, ReviewSubjectBlockerCode
@@ -61,6 +64,70 @@ async def root_instruction_path(
         ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
         "trusted root instruction source is absent at the base SHA",
     )
+
+
+async def expected_scoped_instruction_paths(
+    backend: SandboxBackendProtocol,
+    repo_dir: str,
+    base_sha: str,
+    changed_files: Iterable[str],
+) -> set[str]:
+    """Return applicable scoped instruction files that exist at the base SHA."""
+    agents_paths = applicable_agents_md_paths(changed_files)
+    if not agents_paths:
+        return set()
+    candidates: list[str] = []
+    for agents_path in agents_paths:
+        directory = posixpath.dirname(agents_path)
+        candidates.extend((agents_path, posixpath.join(directory, "CLAUDE.md")))
+    marker = "__mobilyze_instruction_status__="
+    paths = " ".join(shlex.quote(path) for path in candidates)
+    command = (
+        f"git ls-tree --name-only {shlex.quote(base_sha)} -- {paths}; "
+        f"status=$?; echo {marker}$status"
+    )
+    try:
+        result = await asyncio.to_thread(
+            backend.execute, f"cd {shlex.quote(repo_dir)} && {command}"
+        )
+    except Exception as exc:
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
+            "failed to inspect trusted scoped instructions at the base SHA",
+        ) from exc
+    lines = _result_output(result).splitlines()
+    status_lines = [line for line in lines if line.startswith(marker)]
+    if _result_exit_code(result) not in (0, None) or len(status_lines) != 1:
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
+            "failed to inspect trusted scoped instructions at the base SHA",
+        )
+    try:
+        status = int(status_lines[0].removeprefix(marker))
+    except ValueError as exc:
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
+            "failed to inspect trusted scoped instructions at the base SHA",
+        ) from exc
+    if status != 0:
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
+            "failed to inspect trusted scoped instructions at the base SHA",
+        )
+    present = {line for line in lines if not line.startswith(marker)}
+    if not present.issubset(candidates):
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
+            "trusted scoped instruction inspection returned an unexpected path",
+        )
+    expected: set[str] = set()
+    for agents_path in agents_paths:
+        claude_path = posixpath.join(posixpath.dirname(agents_path), "CLAUDE.md")
+        if agents_path in present:
+            expected.add(agents_path)
+        elif claude_path in present:
+            expected.add(claude_path)
+    return expected
 
 
 async def _trusted_skill_dirs_at_ref(

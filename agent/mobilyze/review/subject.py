@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 from agent.review.diff import (
     changed_files,
+    compute_diff_in_sandbox,
     compute_diff_line_set,
     fetch_pr_metadata,
     materialize_review_diff,
@@ -30,7 +31,12 @@ from .contracts import (
     ReviewSubjectRequest,
     ValidationReference,
 )
-from .trusted_sources import git_value, root_instruction_path, trusted_skill_records
+from .trusted_sources import (
+    expected_scoped_instruction_paths,
+    git_value,
+    root_instruction_path,
+    trusted_skill_records,
+)
 
 if TYPE_CHECKING:
     from deepagents.backends.protocol import SandboxBackendProtocol
@@ -168,13 +174,20 @@ async def materialize_review_subject(
         re_review=re_review,
     )
     try:
+        diff_text = await compute_diff_in_sandbox(
+            backend,
+            repo_dir,
+            diff_base,
+            diff_head,
+            merge_base=use_merge_base,
+        )
         diff = await materialize_review_diff(
             backend,
             work_dir=repo_dir,
             base_ref=diff_base,
             head_ref=diff_head,
             merge_base=use_merge_base,
-            diff_text=None,
+            diff_text=diff_text,
         )
     except (RuntimeError, ValueError) as exc:
         raise ReviewSubjectBlocked(
@@ -217,9 +230,31 @@ async def materialize_review_subject(
         if root_instructions is not None
         else None
     )
-    scoped_instructions = await fetch_scoped_agents_md(
-        request.owner, request.repo, base_sha, files, token=github_token
+    expected_scoped_paths = await expected_scoped_instruction_paths(
+        backend, repo_dir, base_sha, files
     )
+    try:
+        scoped_instructions = await fetch_scoped_agents_md(
+            request.owner, request.repo, base_sha, files, token=github_token
+        )
+    except Exception as exc:
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
+            "failed to fetch trusted scoped instructions at the base SHA",
+        ) from exc
+    materialized_scoped_paths = set(scoped_instructions)
+    if materialized_scoped_paths != expected_scoped_paths:
+        missing = sorted(expected_scoped_paths.difference(materialized_scoped_paths))
+        unexpected = sorted(materialized_scoped_paths.difference(expected_scoped_paths))
+        details = []
+        if missing:
+            details.append(f"missing: {', '.join(missing)}")
+        if unexpected:
+            details.append(f"unexpected: {', '.join(unexpected)}")
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
+            f"trusted scoped instruction materialization mismatch ({'; '.join(details)})",
+        )
     skill_records = await trusted_skill_records(backend, repo_dir, base_sha)
     await _assert_live_pr_identity(
         owner=request.owner,

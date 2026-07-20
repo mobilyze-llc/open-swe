@@ -22,7 +22,14 @@ from agent.mobilyze.review import (
     materialize_review_subject,
 )
 from agent.mobilyze.review.artifacts import canonical_json
-from agent.review.diff import MaterializedReviewDiff, compute_diff_line_set
+from agent.review.diff import (
+    MaterializedReviewDiff,
+    compute_diff_line_set,
+    review_diff_path,
+)
+from agent.review.diff import (
+    materialize_review_diff as open_swe_materialize_review_diff,
+)
 
 BASE_SHA = "a" * 40
 HEAD_SHA = "b" * 40
@@ -40,12 +47,21 @@ index 1111111..2222222 100644
 
 
 class FakeBackend:
-    def __init__(self, *, trusted_skill_dirs: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        trusted_skill_dirs: set[str] | None = None,
+        scoped_instruction_paths: set[str] | None = None,
+    ) -> None:
         self.files: dict[str, bytes] = {}
         self.commands: list[str] = []
+        self.downloaded_paths: list[str] = []
         self.fail_commit = False
         self.upload_error: str | None = None
         self.trusted_skill_dirs = trusted_skill_dirs or set()
+        self.scoped_instruction_paths = (
+            {"src/AGENTS.md"} if scoped_instruction_paths is None else scoped_instruction_paths
+        )
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         del timeout
@@ -54,6 +70,10 @@ class FakeBackend:
             return ExecuteResponse(output="missing", exit_code=1, truncated=False)
         if "git ls-tree -d --name-only" in command:
             output = "\n".join([*sorted(self.trusted_skill_dirs), "__mobilyze_git_status__=0"])
+        elif "__mobilyze_instruction_status__=" in command:
+            output = "\n".join(
+                [*sorted(self.scoped_instruction_paths), "__mobilyze_instruction_status__=0"]
+            )
         elif "git rev-parse HEAD" in command:
             output = HEAD_SHA
         elif "git merge-base" in command:
@@ -66,6 +86,10 @@ class FakeBackend:
         else:
             output = ""
         return ExecuteResponse(output=output, exit_code=0, truncated=False)
+
+    async def adownload_files(self, paths: list[str]) -> list[dict[str, object]]:
+        self.downloaded_paths.extend(paths)
+        return [{"content": self.files.get(path)} for path in paths]
 
     async def aupload_files(self, files: list[tuple[str, bytes]]) -> list[dict[str, object]]:
         for path, content in files:
@@ -121,8 +145,19 @@ def install_sources(
     prep_ok: bool = True,
     diff_error: bool = False,
     skill_sources: list[str] | None = None,
+    scoped_instructions: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    calls: dict[str, Any] = {"diff": [], "instruction_refs": [], "pr": 0}
+    calls: dict[str, Any] = {
+        "computed_diff": [],
+        "diff": [],
+        "instruction_refs": [],
+        "pr": 0,
+    }
+    configured_scoped_instructions = (
+        {"src/AGENTS.md": "# safe scoped instructions"}
+        if scoped_instructions is None
+        else scoped_instructions
+    )
 
     async def fetch_pr(**_: object) -> dict[str, object]:
         calls["pr"] += 1
@@ -137,13 +172,17 @@ def install_sources(
     async def prepare_review_repo(*_: object, **__: object) -> bool:
         return prep_ok
 
-    async def materialize_review_diff(*_: object, **kwargs: object) -> MaterializedReviewDiff:
-        calls["diff"].append(kwargs)
+    async def compute_diff_in_sandbox(*args: object, **kwargs: object) -> str:
+        calls["computed_diff"].append((args, kwargs))
         if diff_error:
             raise RuntimeError("git diff failed")
+        return diff_text
+
+    async def materialize_review_diff(*_: object, **kwargs: object) -> MaterializedReviewDiff:
+        calls["diff"].append(kwargs)
         return MaterializedReviewDiff(
             path="/work/widget/review.patch",
-            diff_text=diff_text,
+            diff_text=cast(str, kwargs["diff_text"]),
             base_ref=cast(str, kwargs["base_ref"]),
             head_ref=cast(str, kwargs["head_ref"]),
             merge_base=cast(bool, kwargs["merge_base"]),
@@ -167,13 +206,14 @@ def install_sources(
         del owner, repo
         calls["instruction_refs"].append(ref)
         assert files == ["src/app.py"] or len(files) > 1
-        return {"src/AGENTS.md": "# safe scoped instructions"}
+        return dict(configured_scoped_instructions) if files == ["src/app.py"] else {}
 
     async def materialize_trusted_skills(*_: object, **__: object) -> list[str]:
         return skill_sources or []
 
     monkeypatch.setattr(subject_module, "fetch_pr", fetch_pr)
     monkeypatch.setattr(subject_module, "prepare_review_repo", prepare_review_repo)
+    monkeypatch.setattr(subject_module, "compute_diff_in_sandbox", compute_diff_in_sandbox)
     monkeypatch.setattr(subject_module, "materialize_review_diff", materialize_review_diff)
     monkeypatch.setattr(subject_module, "fetch_pr_metadata", fetch_pr_metadata)
     monkeypatch.setattr(subject_module, "fetch_pr_review_threads", fetch_pr_review_threads)
@@ -216,7 +256,7 @@ async def test_first_review_is_deterministic_and_reuses_open_swe_diff_utilities(
     assert diff_call["base_ref"] == BASE_SHA
     assert diff_call["head_ref"] == HEAD_SHA
     assert diff_call["merge_base"] is True
-    assert diff_call["diff_text"] is None
+    assert diff_call["diff_text"] == DIFF
     assert set(calls["instruction_refs"]) == {BASE_SHA}
 
     line_ref = manifest_artifact(first, "changed_lines")
@@ -238,6 +278,29 @@ async def test_first_review_is_deterministic_and_reuses_open_swe_diff_utilities(
 
 
 @pytest.mark.asyncio
+async def test_poisoned_cached_diff_cannot_change_subject(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    poisoned = DIFF.replace("src/app.py", "poisoned.py").replace("new = True", "poisoned = True")
+    install_sources(monkeypatch)
+    monkeypatch.setattr(subject_module, "materialize_review_diff", open_swe_materialize_review_diff)
+    backend = FakeBackend()
+    cache_path = review_diff_path("/work/widget", BASE_SHA, HEAD_SHA, True)
+    backend.files[cache_path] = poisoned.encode()
+
+    result = await materialize_review_subject(
+        cast(Any, backend), github_token="token", work_dir="/work", request=request()
+    )
+
+    assert backend.downloaded_paths == []
+    assert backend.files[cache_path].decode() == DIFF
+    diff_ref = manifest_artifact(result, "diff")
+    assert backend.files[cast(str, diff_ref["path"])].decode() == DIFF
+    files_ref = manifest_artifact(result, "changed_files")
+    assert uploaded_json(backend, files_ref) == ["src/app.py"]
+
+
+@pytest.mark.asyncio
 async def test_rereview_uses_exact_previous_head_range(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = install_sources(monkeypatch)
     result = await materialize_review_subject(
@@ -251,7 +314,7 @@ async def test_rereview_uses_exact_previous_head_range(monkeypatch: pytest.Monke
     assert diff_call["base_ref"] == LAST_REVIEWED_SHA
     assert diff_call["head_ref"] == HEAD_SHA
     assert diff_call["merge_base"] is False
-    assert diff_call["diff_text"] is None
+    assert diff_call["diff_text"] == DIFF
     revisions = cast(dict[str, Any], result.manifest["revisions"])
     assert revisions["diff_mode"] == "re_review_range"
     assert revisions["merge_base_sha"] == BASE_SHA
@@ -294,6 +357,39 @@ async def test_trusted_instructions_are_base_sourced_with_exact_scoped_paths(
     assert instructions["root_path"] == "AGENTS.md"
     assert instructions["scoped"] == {"src/AGENTS.md": "# safe scoped instructions"}
     assert HEAD_SHA not in json.dumps(instructions)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expected_path", ["src/AGENTS.md", "src/CLAUDE.md"])
+async def test_existing_scoped_instruction_that_fails_fetch_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+    expected_path: str,
+) -> None:
+    install_sources(monkeypatch, scoped_instructions={})
+    backend = FakeBackend(scoped_instruction_paths={expected_path})
+
+    with pytest.raises(ReviewSubjectBlocked) as blocked:
+        await materialize_review_subject(
+            cast(Any, backend), github_token="token", work_dir="/work", request=request()
+        )
+
+    assert blocked.value.code == ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_absent_scoped_instructions_remain_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_sources(monkeypatch, scoped_instructions={})
+    backend = FakeBackend(scoped_instruction_paths=set())
+
+    result = await materialize_review_subject(
+        cast(Any, backend), github_token="token", work_dir="/work", request=request()
+    )
+    context = uploaded_json(backend, manifest_artifact(result, "trusted_context"))
+    instructions = uploaded_json(backend, cast(dict[str, Any], context["instructions"]))
+
+    assert instructions["scoped"] == {}
 
 
 @pytest.mark.asyncio
