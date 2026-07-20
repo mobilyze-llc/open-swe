@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import plistlib
 import stat
 import subprocess
 import tarfile
@@ -20,10 +21,30 @@ from agent.mobilyze.orchard_baseline import (
     uninstall,
 )
 from agent.mobilyze.orchard_baseline.constants import (
+    ACCOUNT_GID,
+    ACCOUNT_HOME,
+    ACCOUNT_NAME,
+    ACCOUNT_SHELL,
+    ACCOUNT_UID,
+    ADMIN_TOKEN,
+    CURRENT_ORCHARD,
+    CURRENT_ORCHARD_BINARY,
+    CURRENT_TART,
+    CURRENT_TART_APP,
+    CURRENT_TART_BINARY,
+    DATA_ROOT,
     DEFAULT_CPU,
     DEFAULT_DISK_GIB,
     DEFAULT_MEMORY_MIB,
+    LISTENER_HOST,
+    ORCHARD_HOME,
+    SECRETS_ROOT,
+    SUPPORT_ROOT,
+    TAILSCALE_BINARY,
+    TART_APP,
+    TART_EXECUTABLE_RELATIVE,
     VM_SLOTS,
+    WORKER_TOKEN,
 )
 from agent.mobilyze.orchard_baseline.service_files import (
     controller_plist,
@@ -259,11 +280,199 @@ def test_service_files_are_redacted_and_pin_static_limits() -> None:
     worker = worker_wrapper()
     rendered = controller + worker + controller_plist().decode() + worker_plist().decode()
 
-    assert "bootstrap-admin.token" in controller
-    assert "worker-bootstrap.token" in worker
+    assert str(ADMIN_TOKEN) in controller
+    assert str(WORKER_TOKEN) in worker
     assert "--bootstrap-token-stdin" in worker
     assert f"--resources oswe.vm-slots={VM_SLOTS}" in worker
     assert f"--default-cpu {DEFAULT_CPU}" in worker
     assert f"--default-memory {DEFAULT_MEMORY_MIB}" in worker
     assert DEFAULT_DISK_GIB == 40
     assert "secret value" not in rendered
+
+
+def test_live_secret_paths_and_protected_root_are_exact() -> None:
+    assert SUPPORT_ROOT == Path("/Library/Application Support/Mobilyze/OpenSWEOrchard")
+    assert ORCHARD_HOME == SUPPORT_ROOT
+    assert SECRETS_ROOT == SUPPORT_ROOT / "secrets"
+    assert ADMIN_TOKEN == SECRETS_ROOT / "bootstrap-admin"
+    assert WORKER_TOKEN == SECRETS_ROOT / "worker-bootstrap"
+
+
+def test_installed_secret_reuse_normalizes_mode_and_owner_without_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = tmp_path / "bootstrap-admin"
+    secret.write_bytes(b"protected")
+    secret.chmod(0o600)
+    ownership: list[tuple[Path, int, int]] = []
+
+    def unexpected_write(path: Path, content: str | bytes, mode: int) -> None:
+        del path, content, mode
+        raise AssertionError("installed secret must not be rewritten onto itself")
+
+    monkeypatch.setattr(install, "atomic_write", unexpected_write)
+    monkeypatch.setattr(install, "chown", lambda path, uid, gid: ownership.append((path, uid, gid)))
+
+    install._install_secret(secret, secret)
+
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o400
+    assert ownership == [(secret, ACCOUNT_UID, ACCOUNT_GID)]
+
+
+def test_protected_directory_reuse_rejects_symlinks(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    managed = tmp_path / "managed"
+    managed.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(RuntimeError, match="must not be a symlink"):
+        install._prepare_directory(managed, 0o700, owned=True)
+
+
+def test_wrappers_preserve_environment_and_quote_spaced_orchard_home() -> None:
+    controller = controller_wrapper()
+    worker = worker_wrapper()
+    expected_home = f"HOME={ACCOUNT_HOME}"
+    expected_orchard_home = f"ORCHARD_HOME='{ORCHARD_HOME}'"
+
+    for wrapper in (controller, worker):
+        assert expected_home in wrapper
+        assert expected_orchard_home in wrapper
+        assert "export HOME ORCHARD_HOME" in wrapper
+    assert f"'{ADMIN_TOKEN}'" in controller
+    assert f"'{WORKER_TOKEN}'" in worker
+
+
+def test_controller_wrapper_uses_direct_tailscale_activation_and_readiness() -> None:
+    wrapper = controller_wrapper()
+    activation = f"{TAILSCALE_BINARY} up"
+    readiness = f'test "$({TAILSCALE_BINARY} ip -4)" = {LISTENER_HOST}'
+
+    assert activation in wrapper
+    assert readiness in wrapper
+    assert wrapper.index(activation) < wrapper.index(" controller run ")
+    assert "while " not in wrapper
+    assert "sleep " not in wrapper
+    assert plistlib.loads(controller_plist())["KeepAlive"] is True
+
+
+def test_current_artifact_links_include_tart_app_compatibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    linked: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(
+        install, "atomic_symlink", lambda target, link: linked.append((target, link))
+    )
+
+    install._link_current_artifacts()
+
+    assert linked == [
+        (CURRENT_ORCHARD / "orchard", CURRENT_ORCHARD_BINARY),
+        (CURRENT_TART / TART_EXECUTABLE_RELATIVE, CURRENT_TART_BINARY),
+        (CURRENT_TART / TART_APP.name, CURRENT_TART_APP),
+    ]
+
+
+def test_status_proves_secret_metadata_without_reading_contents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = tmp_path / "worker-bootstrap"
+    secret.write_bytes(b"must not be read")
+    secret.chmod(0o400)
+    metadata = secret.lstat()
+
+    monkeypatch.setattr(status, "ACCOUNT_UID", metadata.st_uid)
+    monkeypatch.setattr(status, "ACCOUNT_GID", metadata.st_gid)
+    monkeypatch.setattr(
+        status.pwd, "getpwuid", lambda uid: type("Owner", (), {"pw_name": ACCOUNT_NAME})()
+    )
+    monkeypatch.setattr(
+        status.grp, "getgrgid", lambda gid: type("Group", (), {"gr_name": ACCOUNT_NAME})()
+    )
+
+    def unexpected_read(path: Path) -> bytes:
+        del path
+        raise AssertionError("status must not read secret contents")
+
+    monkeypatch.setattr(Path, "read_bytes", unexpected_read)
+
+    detail = status._protected_path(secret, 0o400, directory=False)
+
+    assert f"path={secret}" in detail
+    assert "mode=0400" in detail
+    assert f"owner={ACCOUNT_NAME}" in detail
+    assert f"group={ACCOUNT_NAME}" in detail
+
+
+def test_status_identity_requires_live_home_and_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = type(
+        "User",
+        (),
+        {
+            "pw_uid": ACCOUNT_UID,
+            "pw_gid": ACCOUNT_GID,
+            "pw_dir": str(ACCOUNT_HOME),
+            "pw_shell": ACCOUNT_SHELL,
+        },
+    )()
+    group = type("Group", (), {"gr_gid": ACCOUNT_GID})()
+    monkeypatch.setattr(status.pwd, "getpwnam", lambda name: user)
+    monkeypatch.setattr(status.grp, "getgrnam", lambda name: group)
+
+    detail = status._identity()
+
+    assert f"home={ACCOUNT_HOME}" in detail
+    assert f"shell={ACCOUNT_SHELL}" in detail
+
+
+def test_uninstall_manages_only_the_exact_protected_support_root() -> None:
+    assert SUPPORT_ROOT in uninstall.MANAGED_PATHS
+    assert SUPPORT_ROOT.parent not in uninstall.MANAGED_PATHS
+    assert SUPPORT_ROOT.parent.parent not in uninstall.MANAGED_PATHS
+
+
+def test_manifest_and_runbook_describe_live_paths_and_state_only_backups() -> None:
+    project_root = Path(__file__).parents[2]
+    manifest = json.loads(
+        (project_root / "config/mobilyze/studio2-orchard-baseline.json").read_text()
+    )
+    runbook = (project_root / "docs/mobilyze/STUDIO2_ORCHARD_BASELINE.md").read_text()
+
+    assert manifest["environment"] == {
+        "HOME": str(DATA_ROOT),
+        "ORCHARD_HOME": str(SUPPORT_ROOT),
+    }
+    assert manifest["secrets"]["paths"] == [str(ADMIN_TOKEN), str(WORKER_TOKEN)]
+    assert manifest["secrets"]["mode"] == "0400"
+    assert manifest["secrets"]["owner"] == ACCOUNT_NAME
+    assert manifest["secrets"]["group"] == ACCOUNT_NAME
+    assert manifest["releases"]["tart"]["compatibility_path"] == str(CURRENT_TART_APP)
+    assert str(SUPPORT_ROOT) in runbook
+    assert "deliberately exclude the protected support root and bootstrap secrets" in runbook
+    assert "does not remove either parent directory" in runbook
+
+
+def test_state_backup_excludes_protected_bootstrap_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_root = tmp_path / "var" / "db" / "mobilyze-open-swe-orchard"
+    data_root.mkdir(parents=True)
+    (data_root / "controller-state").write_text("state")
+    support_root = tmp_path / "Library" / "Application Support" / "Mobilyze" / "OpenSWEOrchard"
+    secrets_root = support_root / "secrets"
+    secrets_root.mkdir(parents=True)
+    (secrets_root / "bootstrap-admin").write_text("secret")
+    destination = tmp_path / "state.tar"
+    monkeypatch.setattr(backup, "DATA_ROOT", data_root)
+
+    backup.create_archive(destination)
+
+    with tarfile.open(destination, "r") as archive:
+        names = archive.getnames()
+    assert any(name.endswith("controller-state") for name in names)
+    assert all("bootstrap-admin" not in name for name in names)
+    assert all(str(support_root.relative_to("/")) not in name for name in names)

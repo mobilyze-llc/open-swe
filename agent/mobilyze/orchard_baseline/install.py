@@ -9,7 +9,9 @@ from pathlib import Path
 
 from agent.mobilyze.orchard_baseline.constants import (
     ACCOUNT_GID,
+    ACCOUNT_HOME,
     ACCOUNT_NAME,
+    ACCOUNT_SHELL,
     ACCOUNT_UID,
     ADMIN_TOKEN,
     CONTROLLER_PLIST,
@@ -18,6 +20,7 @@ from agent.mobilyze.orchard_baseline.constants import (
     CURRENT_ORCHARD,
     CURRENT_ORCHARD_BINARY,
     CURRENT_TART,
+    CURRENT_TART_APP,
     CURRENT_TART_BINARY,
     DATA_ROOT,
     INSTALL_ROOT,
@@ -30,6 +33,7 @@ from agent.mobilyze.orchard_baseline.constants import (
     RELEASES_ROOT,
     SECRETS_ROOT,
     SERVICE_LABELS,
+    SUPPORT_ROOT,
     TART_APP,
     TART_APP_EXECUTABLE_RELATIVE,
     TART_EXECUTABLE_RELATIVE,
@@ -100,31 +104,46 @@ def _ensure_identity() -> None:
         for key, value in (
             ("UniqueID", str(ACCOUNT_UID)),
             ("PrimaryGroupID", str(ACCOUNT_GID)),
-            ("NFSHomeDirectory", str(DATA_ROOT)),
-            ("UserShell", "/usr/bin/false"),
+            ("NFSHomeDirectory", str(ACCOUNT_HOME)),
+            ("UserShell", ACCOUNT_SHELL),
         ):
             run(["/usr/bin/dscl", ".", "-create", f"/Users/{ACCOUNT_NAME}", key, value])
         user = pwd.getpwnam(ACCOUNT_NAME)
     if user.pw_uid != ACCOUNT_UID or user.pw_gid != ACCOUNT_GID:
         raise RuntimeError(f"{ACCOUNT_NAME} must use UID/GID {ACCOUNT_UID}")
+    if user.pw_dir != str(ACCOUNT_HOME) or user.pw_shell != ACCOUNT_SHELL:
+        raise RuntimeError(f"{ACCOUNT_NAME} must use home {ACCOUNT_HOME} and shell {ACCOUNT_SHELL}")
 
 
-def _prepare_directories() -> None:
-    for path, mode in (
-        (INSTALL_ROOT, 0o755),
-        (RELEASES_ROOT, 0o755),
-        (CURRENT_BIN, 0o755),
-        (DATA_ROOT, 0o700),
-        (SECRETS_ROOT, 0o700),
-        (LOG_ROOT, 0o700),
-    ):
-        path.mkdir(parents=True, exist_ok=True)
-        os.chmod(path, mode)
-    for path in (DATA_ROOT, SECRETS_ROOT, LOG_ROOT):
+def _prepare_directory(path: Path, mode: int, *, owned: bool) -> None:
+    if path.is_symlink():
+        raise RuntimeError(f"managed directory must not be a symlink: {path}")
+    path.mkdir(parents=True, exist_ok=True)
+    if not path.is_dir():
+        raise RuntimeError(f"managed directory is not a directory: {path}")
+    os.chmod(path, mode)
+    if owned:
         chown(path, ACCOUNT_UID, ACCOUNT_GID)
 
 
+def _prepare_directories() -> None:
+    for path, mode, owned in (
+        (INSTALL_ROOT, 0o755, False),
+        (RELEASES_ROOT, 0o755, False),
+        (CURRENT_BIN, 0o755, False),
+        (DATA_ROOT, 0o700, True),
+        (SUPPORT_ROOT, 0o700, True),
+        (SECRETS_ROOT, 0o700, True),
+        (LOG_ROOT, 0o700, True),
+    ):
+        _prepare_directory(path, mode, owned=owned)
+
+
 def _install_secret(source: Path | None, destination: Path) -> None:
+    if destination.is_symlink():
+        raise RuntimeError(f"managed secret must not be a symlink: {destination}")
+    if destination.exists() and not destination.is_file():
+        raise RuntimeError(f"managed secret is not a file: {destination}")
     if source is None:
         if not destination.is_file():
             raise FileNotFoundError(f"missing required secret {destination}")
@@ -178,6 +197,12 @@ def _switch_release(current: Path, previous: Path, target: Path) -> None:
     atomic_symlink(target, current)
 
 
+def _link_current_artifacts() -> None:
+    atomic_symlink(CURRENT_ORCHARD / "orchard", CURRENT_ORCHARD_BINARY)
+    atomic_symlink(CURRENT_TART / TART_EXECUTABLE_RELATIVE, CURRENT_TART_BINARY)
+    atomic_symlink(CURRENT_TART / TART_APP.name, CURRENT_TART_APP)
+
+
 def install(
     orchard_source: Path,
     tart_app_source: Path,
@@ -207,6 +232,7 @@ def install(
         PREVIOUS_TART,
         CURRENT_ORCHARD_BINARY,
         CURRENT_TART_BINARY,
+        CURRENT_TART_APP,
     )
     link_snapshot = {link: _link_target(link) for link in links}
     loaded = loaded_labels(SERVICE_LABELS)
@@ -222,8 +248,7 @@ def install(
         stop_services(loaded)
         _switch_release(CURRENT_ORCHARD, PREVIOUS_ORCHARD, ORCHARD_RELEASE)
         _switch_release(CURRENT_TART, PREVIOUS_TART, TART_RELEASE)
-        atomic_symlink(CURRENT_ORCHARD / "orchard", CURRENT_ORCHARD_BINARY)
-        atomic_symlink(CURRENT_TART / TART_EXECUTABLE_RELATIVE, CURRENT_TART_BINARY)
+        _link_current_artifacts()
         start_services(SERVICE_LABELS)
     except BaseException as primary:
         try:

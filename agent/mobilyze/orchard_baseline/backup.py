@@ -68,7 +68,9 @@ def backup(destination: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Back up Orchard state")
+    parser = argparse.ArgumentParser(
+        description="Back up Orchard state without protected bootstrap secrets"
+    )
     parser.add_argument("archive", type=Path)
     args = parser.parse_args(argv)
     backup(args.archive)

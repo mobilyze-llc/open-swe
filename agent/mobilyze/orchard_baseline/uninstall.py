@@ -15,6 +15,7 @@ from agent.mobilyze.orchard_baseline.constants import (
     INSTALL_ROOT,
     LOG_ROOT,
     SERVICE_LABELS,
+    SUPPORT_ROOT,
     WORKER_PLIST,
     WORKER_WRAPPER,
 )
@@ -26,6 +27,7 @@ MANAGED_PATHS = (
     WORKER_PLIST,
     CONTROLLER_WRAPPER,
     WORKER_WRAPPER,
+    SUPPORT_ROOT,
     DATA_ROOT,
     LOG_ROOT,
     INSTALL_ROOT,

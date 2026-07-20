@@ -65,7 +65,9 @@ def restore(source: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Restore Orchard state from a trusted backup")
+    parser = argparse.ArgumentParser(
+        description="Restore Orchard state from a trusted state-only backup"
+    )
     parser.add_argument("archive", type=Path)
     args = parser.parse_args(argv)
     restore(args.archive)

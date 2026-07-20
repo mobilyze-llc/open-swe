@@ -9,14 +9,18 @@ import shlex
 import shutil
 import socket
 import ssl
+import stat
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from agent.mobilyze.orchard_baseline.constants import (
     ACCOUNT_GID,
+    ACCOUNT_HOME,
     ACCOUNT_NAME,
+    ACCOUNT_SHELL,
     ACCOUNT_UID,
+    ADMIN_TOKEN,
     CONTROLLER_LABEL,
     CURRENT_ORCHARD_BINARY,
     CURRENT_TART_BINARY,
@@ -26,10 +30,13 @@ from agent.mobilyze.orchard_baseline.constants import (
     LISTENER_HOST,
     LISTENER_PORT,
     ORCHARD_SHA256,
+    SECRETS_ROOT,
+    SUPPORT_ROOT,
     TART_SHA256,
     VM_SLOTS,
     WORKER_LABEL,
     WORKER_SLOT_RESOURCE,
+    WORKER_TOKEN,
 )
 from agent.mobilyze.orchard_baseline.host import command_error, run, sha256
 
@@ -54,7 +61,34 @@ def _identity() -> str:
     group = grp.getgrnam(ACCOUNT_NAME)
     if user.pw_uid != ACCOUNT_UID or user.pw_gid != ACCOUNT_GID or group.gr_gid != ACCOUNT_GID:
         raise RuntimeError(f"expected UID/GID {ACCOUNT_UID}")
-    return f"uid={user.pw_uid} gid={user.pw_gid}"
+    if user.pw_dir != str(ACCOUNT_HOME) or user.pw_shell != ACCOUNT_SHELL:
+        raise RuntimeError(f"expected home {ACCOUNT_HOME} and shell {ACCOUNT_SHELL}")
+    return f"uid={user.pw_uid} gid={user.pw_gid} home={user.pw_dir} shell={user.pw_shell}"
+
+
+def _protected_path(path: Path, expected_mode: int, *, directory: bool) -> str:
+    metadata = path.lstat()
+    if directory:
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise RuntimeError(f"protected path is not a directory: {path}")
+    elif not stat.S_ISREG(metadata.st_mode):
+        raise RuntimeError(f"protected path is not a regular file: {path}")
+    mode = stat.S_IMODE(metadata.st_mode)
+    if mode != expected_mode:
+        raise RuntimeError(f"{path} mode is {mode:04o}, expected {expected_mode:04o}")
+    owner = pwd.getpwuid(metadata.st_uid).pw_name
+    group = grp.getgrgid(metadata.st_gid).gr_name
+    if (
+        metadata.st_uid != ACCOUNT_UID
+        or metadata.st_gid != ACCOUNT_GID
+        or owner != ACCOUNT_NAME
+        or group != ACCOUNT_NAME
+    ):
+        raise RuntimeError(
+            f"{path} owner/group is {owner}:{group} "
+            f"({metadata.st_uid}:{metadata.st_gid}), expected {ACCOUNT_NAME}:{ACCOUNT_NAME}"
+        )
+    return f"path={path} mode={mode:04o} owner={owner} group={group}"
 
 
 def _hash(path: Path, expected: str) -> str:
@@ -141,6 +175,16 @@ def _disk_report() -> str:
 def collect_diagnostics() -> list[Diagnostic]:
     return [
         _capture("identity", _identity),
+        _capture("support_root", lambda: _protected_path(SUPPORT_ROOT, 0o700, directory=True)),
+        _capture("secrets_root", lambda: _protected_path(SECRETS_ROOT, 0o700, directory=True)),
+        _capture(
+            "bootstrap_admin_secret",
+            lambda: _protected_path(ADMIN_TOKEN, 0o400, directory=False),
+        ),
+        _capture(
+            "worker_bootstrap_secret",
+            lambda: _protected_path(WORKER_TOKEN, 0o400, directory=False),
+        ),
         _capture("orchard_sha256", lambda: _hash(CURRENT_ORCHARD_BINARY, ORCHARD_SHA256)),
         _capture("tart_sha256", lambda: _hash(CURRENT_TART_BINARY, TART_SHA256)),
         _capture("controller_service", lambda: _service(CONTROLLER_LABEL)),

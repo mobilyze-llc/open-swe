@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import plistlib
+import shlex
+from pathlib import Path
 
 from agent.mobilyze.orchard_baseline.constants import (
+    ACCOUNT_HOME,
     ACCOUNT_NAME,
     ADMIN_TOKEN,
     CONTROLLER_DATA,
@@ -17,6 +20,8 @@ from agent.mobilyze.orchard_baseline.constants import (
     DEFAULT_MEMORY_MIB,
     LISTENER_HOST,
     LISTENER_PORT,
+    ORCHARD_HOME,
+    TAILSCALE_BINARY,
     WORKER_LABEL,
     WORKER_LABEL_VALUE,
     WORKER_LOG,
@@ -28,20 +33,33 @@ from agent.mobilyze.orchard_baseline.constants import (
 )
 
 
+def _shell(value: str | Path) -> str:
+    return shlex.quote(str(value))
+
+
+def _environment() -> str:
+    return f"HOME={_shell(ACCOUNT_HOME)}\nORCHARD_HOME={_shell(ORCHARD_HOME)}\nexport HOME ORCHARD_HOME"
+
+
 def controller_wrapper() -> str:
+    tailscale = _shell(TAILSCALE_BINARY)
     return f"""#!/bin/sh
 set -eu
-ORCHARD_BOOTSTRAP_ADMIN_TOKEN="$(/bin/cat {ADMIN_TOKEN})"
+{_environment()}
+{tailscale} up
+test "$({tailscale} ip -4)" = {_shell(LISTENER_HOST)}
+ORCHARD_BOOTSTRAP_ADMIN_TOKEN="$(/bin/cat {_shell(ADMIN_TOKEN)})"
 export ORCHARD_BOOTSTRAP_ADMIN_TOKEN
-exec {CURRENT_ORCHARD_BINARY} controller run --data-dir {CONTROLLER_DATA} --listen {LISTENER_HOST}:{LISTENER_PORT}
+exec {_shell(CURRENT_ORCHARD_BINARY)} controller run --data-dir {_shell(CONTROLLER_DATA)} --listen {_shell(f"{LISTENER_HOST}:{LISTENER_PORT}")}
 """
 
 
 def worker_wrapper() -> str:
     return f"""#!/bin/sh
 set -eu
-export PATH={CURRENT_BIN}:/usr/bin:/bin:/usr/sbin:/sbin
-exec {CURRENT_ORCHARD_BINARY} worker run --bootstrap-token-stdin --no-pki --user {ACCOUNT_NAME} --name {WORKER_NAME} --labels {WORKER_LABEL_VALUE} --resources {WORKER_SLOT_RESOURCE} --default-cpu {DEFAULT_CPU} --default-memory {DEFAULT_MEMORY_MIB} {CONTROLLER_URL} < {WORKER_TOKEN}
+{_environment()}
+export PATH={_shell(f"{CURRENT_BIN}:/usr/bin:/bin:/usr/sbin:/sbin")}
+exec {_shell(CURRENT_ORCHARD_BINARY)} worker run --bootstrap-token-stdin --no-pki --user {_shell(ACCOUNT_NAME)} --name {_shell(WORKER_NAME)} --labels {_shell(WORKER_LABEL_VALUE)} --resources {_shell(WORKER_SLOT_RESOURCE)} --default-cpu {DEFAULT_CPU} --default-memory {DEFAULT_MEMORY_MIB} {_shell(CONTROLLER_URL)} < {_shell(WORKER_TOKEN)}
 """
 
 

@@ -6,16 +6,18 @@ This surface maintains only the dedicated Orchard substrate on `studio2`. It doe
 
 - Orchard `0.55.0`, installed executable SHA-256 `35a6ca9f1770a6da9ccc508cee46df21f962d4c5fb437161e4fe8daa34bb14fe`.
 - Tart `2.32.1`, installed executable SHA-256 `05b65d5c14e8b41e8e44b6d9fd1278de4bedbc8b735d9b99f3c748f76f75862d`.
-- Dedicated `_opensweorchard` UID/GID `450`, controller and worker launchd labels from `config/mobilyze/studio2-orchard-baseline.json`.
-- TLS listener `100.107.128.12:6120`; unauthenticated `GET /v1/controller/info` must return `401`.
+- Dedicated `_opensweorchard` UID/GID `450`, home `/var/db/mobilyze-open-swe-orchard`, shell `/usr/bin/false`, and controller and worker launchd labels from `config/mobilyze/studio2-orchard-baseline.json`.
+- Generated wrappers export `HOME=/var/db/mobilyze-open-swe-orchard` and `ORCHARD_HOME='/Library/Application Support/Mobilyze/OpenSWEOrchard'`.
+- Bootstrap secrets remain at `/Library/Application Support/Mobilyze/OpenSWEOrchard/secrets/bootstrap-admin` and `worker-bootstrap`. Both are regular files owned by `_opensweorchard:_opensweorchard` with mode `0400`; status checks metadata without reading their contents.
+- TLS listener `100.107.128.12:6120`; unauthenticated `GET /v1/controller/info` must return `401`. The controller wrapper directly activates Tailscale and checks the expected IPv4 address once before starting Orchard. A failed activation or readiness check exits for the existing launchd `KeepAlive` contract; there is no internal retry manager.
 - Worker capacity is two slots. Orchard 0.55.0 enforces the 4 CPU and 8192 MiB worker defaults; VM callers use 40 GiB as the disk request default because this Orchard release has no worker disk-default flag. Host disk capacity is diagnostic-only and has no enforced floor.
 
 ## Operations
 
-Run from the repository root with root privileges on the target macOS host. Stage an Orchard executable and a `tart.app` whose executable hashes match the pins. On first install, also stage the existing bootstrap-admin and worker bootstrap tokens in protected files. Reinstallation may use the installed release paths; the installer verifies and reuses identical destinations instead of copying a file onto itself.
+Run from the repository root with root privileges on the target macOS host. Stage an Orchard executable and a `tart.app` whose executable hashes match the pins. On first install, also stage the existing bootstrap-admin and worker bootstrap tokens in protected files. Reinstallation may use the installed release and protected secret paths; the installer reuses identical destinations, normalizes executable and secret modes, and restores the required owner without copying a path onto itself.
 
 ```bash
-python -m agent.mobilyze.orchard_baseline.install   --orchard-source /trusted/orchard   --tart-app-source /trusted/tart.app   --admin-token-source /protected/bootstrap-admin.token   --worker-token-source /protected/worker-bootstrap.token
+python -m agent.mobilyze.orchard_baseline.install   --orchard-source /trusted/orchard   --tart-app-source /trusted/tart.app   --admin-token-source '/Library/Application Support/Mobilyze/OpenSWEOrchard/secrets/bootstrap-admin'   --worker-token-source '/Library/Application Support/Mobilyze/OpenSWEOrchard/secrets/worker-bootstrap'
 python -m agent.mobilyze.orchard_baseline.status
 python -m agent.mobilyze.orchard_baseline.backup /protected/orchard-state.tar
 python -m agent.mobilyze.orchard_baseline.restore /protected/orchard-state.tar
@@ -24,8 +26,10 @@ python -m agent.mobilyze.orchard_baseline.uninstall
 python -m agent.mobilyze.orchard_baseline.uninstall --confirm
 ```
 
-`status` emits all diagnostics and exits non-zero when any required check is degraded. Backup archives are private from creation; backup and restore stop only the two dedicated launchd jobs, attempt service restoration once, and preserve the primary failure if restoration also fails. Failed install/update and rollback activation attempts restore the prior release links and loaded-job set while preserving the original error. Rollback accepts only the recorded checksum-verified previous release pair. Uninstall previews or removes only the dedicated account, labels, wrappers, logs, state, and `/opt/mobilyze/open-swe-orchard` root.
+Fresh install and update preserve the executable links under `/opt/mobilyze/open-swe-orchard/current`, including the compatibility link `current/tart.app`. `status` emits all diagnostics and exits non-zero when any required check is degraded. Backup archives are private from creation and contain only `/var/db/mobilyze-open-swe-orchard`; they deliberately exclude the protected support root and bootstrap secrets. Restore replaces only that data root and leaves the protected secrets unchanged. Backup and restore stop only the two dedicated launchd jobs, attempt service restoration once, and preserve the primary failure if restoration also fails.
+
+Failed install/update and rollback activation attempts restore the prior release links and loaded-job set while preserving the original error. Rollback accepts only the recorded checksum-verified previous release pair. Uninstall previews or removes only the dedicated account, labels, wrappers, logs, state, `/opt/mobilyze/open-swe-orchard`, and the exact protected support root `/Library/Application Support/Mobilyze/OpenSWEOrchard`; it does not remove either parent directory.
 
 ## Validation and live proof
 
-Render the generated wrappers and run `/bin/sh -n` against each, then run the focused tests and repository-required validation. During repository-only replacement work, limit live proof to status, hashes, labels, process arguments, listener/authentication checks, ownership/permissions, and observed disk reporting. Do not reinstall, restart, roll back, restore, or uninstall the preserved services.
+Render the generated wrappers and run `/bin/sh -n` against each, then parse both generated plists and run the focused tests and repository-required validation. Repository changes must not reinstall, restart, roll back, restore, uninstall, or otherwise mutate the preserved live services.
