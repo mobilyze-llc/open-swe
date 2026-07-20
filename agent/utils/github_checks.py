@@ -12,6 +12,7 @@ break review dispatch or publish.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -153,18 +154,17 @@ async def post_autofix_status_check(
     return True
 
 
-def review_check_conclusion(surfaced_count: int) -> tuple[CheckConclusion, str, str]:
-    """Map a publish result to (conclusion, title, summary).
+def _review_check_blocking_enabled() -> bool:
+    """Return whether surfaced review findings should fail the check."""
+    return os.getenv("REVIEW_CHECK_BLOCKING", "").lower() in {"1", "true", "yes"}
 
-    Always ``success`` so the check is informational and non-blocking, and so
-    GitHub groups it under "successful checks" rather than a confusing
-    "neutral check". The finding count is surfaced in the title; the findings
-    themselves are posted as PR comments.
-    """
+
+def review_check_conclusion(surfaced_count: int) -> tuple[CheckConclusion, str, str]:
+    """Map a publish result to (conclusion, title, summary)."""
     if surfaced_count > 0:
         issue_word = "issue" if surfaced_count == 1 else "issues"
         return (
-            "success",
+            "failure" if _review_check_blocking_enabled() else "success",
             f"Found {surfaced_count} potential {issue_word}",
             f"Open SWE surfaced {surfaced_count} potential {issue_word} on this pull request.",
         )

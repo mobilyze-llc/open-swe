@@ -3,8 +3,8 @@
 ``publish_review`` normally completes the ``Open SWE Review`` check run and
 clears ``review_check_run_id`` from reviewer thread metadata. If the run ends
 without ever publishing (crash, model-call limit, sandbox failure), the check
-would hang "in progress" on the PR forever. This hook closes it as neutral —
-the review not completing is reviewer infrastructure failing, not the PR.
+would hang "in progress" on the PR forever. This hook closes it as neutral by
+default, or as failure when blocking review checks are enabled.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from langgraph.runtime import Runtime
 
 from ..review.findings import get_thread_metadata
 from ..review.publish import settle_review_check_run
+from ..utils.github_checks import _review_check_blocking_enabled
 from ..utils.github_token import get_github_token
 
 logger = logging.getLogger(__name__)
@@ -63,9 +64,7 @@ async def settle_review_check_on_exit(
             title = str(pending.get("title") or "Review completed")
             summary = str(pending.get("summary") or "")
         else:
-            # Neutral, not failure: an incomplete review is a reviewer-infra
-            # problem, and a red X on the PR misreads as a code problem.
-            conclusion = "neutral"
+            conclusion = "failure" if _review_check_blocking_enabled() else "neutral"
             title = "Review did not complete"
             summary = (
                 "The Open SWE review run ended without publishing a review. "
