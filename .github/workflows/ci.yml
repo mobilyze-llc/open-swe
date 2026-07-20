@@ -16,7 +16,7 @@ concurrency:
 jobs:
   lint:
     name: Agent lint
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
@@ -27,7 +27,7 @@ jobs:
 
   format:
     name: Agent format check
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
@@ -38,18 +38,20 @@ jobs:
 
   unit-tests:
     name: Agent unit tests
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
       - name: Install dependencies
         run: uv sync --locked --extra dev
       - name: Run unit tests
+        env:
+          PYTEST_ADDOPTS: --junitxml=pytest-results.xml
         run: make test
 
   e2e:
     name: Playwright E2E
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -57,6 +59,8 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
       - uses: oven-sh/setup-bun@v2
       - name: Install Python deps (langgraph dev runtime)
         run: uv sync --locked
@@ -70,7 +74,9 @@ jobs:
       # ui/ SPA. The fake LLM/GitHub/Slack boundaries need no secrets.
       - name: Run E2E
         working-directory: tests/e2e
-        run: npx playwright test
+        env:
+          PLAYWRIGHT_JUNIT_OUTPUT_NAME: playwright-results.xml
+        run: npx playwright test --reporter=list,html,junit
       - name: Upload Playwright report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7

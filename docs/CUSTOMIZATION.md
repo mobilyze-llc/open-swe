@@ -146,6 +146,15 @@ LLM_MODEL_ID="anthropic:claude-sonnet-5"
 
 If `LLM_MODEL_ID` is not set, the default model (`openai:gpt-5.6-sol`) is used.
 
+Set `OPENAI_BASE_URL` to route direct OpenAI models through a Responses-compatible
+endpoint. Keep the `/v1` suffix. Supply `OPENAI_API_KEY` through the deployment's
+secret mechanism rather than a shared shell environment. Use HTTPS unless the
+endpoint is on loopback or an encrypted private overlay such as Tailscale.
+
+```bash
+OPENAI_BASE_URL="https://openai-proxy.internal.example/v1"
+```
+
 `max_tokens` is a maximum completion/output token budget, not the model's total context window. For OpenAI reasoning models, this budget can include both internal reasoning tokens and final response tokens.
 
 ### Switching models
@@ -211,7 +220,7 @@ The admin panel (**Admin → LLM Gateway**) exposes a per-workspace toggle store
 
 Routing is applied centrally in `make_model` (`agent/utils/model.py`), which resolves the effective on/off and delegates URL/key wiring to `agent/utils/gateway.py`. **OpenAI, Anthropic, Fireworks, and Google Gemini** are routed (their LangChain integrations accept `base_url` + `api_key`); Google Vertex (service-account auth) and any other provider call the provider directly with a logged warning.
 
-**Caveat — OpenAI endpoint:** open-swe uses the OpenAI Responses API by default because OpenAI reasoning models with function tools reject `reasoning_effort` on Chat Completions. Direct OpenAI calls use a `wss://` base URL; gateway-routed OpenAI uses the HTTPS gateway base URL with Responses enabled. Set `LANGSMITH_GATEWAY_OPENAI_USE_RESPONSES=false` only if you need to force Chat Completions. Anthropic and Fireworks are unaffected.
+**Caveat — OpenAI endpoint:** open-swe uses the OpenAI Responses API by default because OpenAI reasoning models with function tools reject `reasoning_effort` on Chat Completions. Direct OpenAI calls use a `wss://` base URL unless `OPENAI_BASE_URL` selects an HTTP(S) Responses-compatible proxy; gateway-routed OpenAI uses the HTTPS gateway base URL with Responses enabled. Set `LANGSMITH_GATEWAY_OPENAI_USE_RESPONSES=false` only if you need to force Chat Completions. Anthropic and Fireworks are unaffected.
 
 ---
 
