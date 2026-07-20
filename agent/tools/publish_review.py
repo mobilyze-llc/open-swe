@@ -10,6 +10,7 @@ from langgraph.config import get_config, get_store
 from langgraph.prebuilt import InjectedState
 from langgraph.store.base import BaseStore
 
+from ..dashboard.agent_overrides import load_profile
 from ..dashboard.autofix_state import AUTOFIX_PR_STATE_NAMESPACE, is_pr_autofix_disabled
 from ..dashboard.enabled_repos import is_review_repo_enabled
 from ..dashboard.team_settings import (
@@ -658,6 +659,34 @@ def _review_autofix_finding_detail(finding: Finding) -> str:
     return detail
 
 
+async def _resolve_review_autofix_thread(client: Any, branch_name: str) -> tuple[str, object]:
+    threads = await client.threads.search(
+        metadata={"branch_name": branch_name},
+        limit=10,
+    )
+    for thread in threads or []:
+        thread_dict = thread if isinstance(thread, dict) else {}
+        metadata = thread_dict.get("metadata")
+        if not isinstance(metadata, dict) or metadata.get("branch_name") != branch_name:
+            continue
+        thread_id = thread_dict.get("thread_id") or thread_dict.get("id")
+        if isinstance(thread_id, str) and thread_id:
+            return thread_id, thread
+
+    thread_id = get_thread_id_from_branch(branch_name)
+    if not thread_id:
+        raise RuntimeError(f"could not resolve implementation thread from branch {branch_name!r}")
+    return thread_id, await client.threads.get(thread_id)
+
+
+def _review_autofix_profile_login(thread: object) -> str | None:
+    thread_dict = thread if isinstance(thread, dict) else {}
+    metadata = thread_dict.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    github_login = metadata.get("github_login")
+    return github_login if isinstance(github_login, str) and github_login else None
+
+
 def _review_autofix_dispatch_config(
     thread: object,
     *,
@@ -756,14 +785,13 @@ async def _maybe_dispatch_review_autofix(
             return
         if await is_pr_autofix_disabled(owner, repo, pr_number):
             return
-        implementation_thread_id = get_thread_id_from_branch(branch_name)
-        if not implementation_thread_id:
-            raise RuntimeError(
-                f"could not resolve implementation thread from branch {branch_name!r}"
-            )
-
         client = dispatch_client()
-        thread = await client.threads.get(implementation_thread_id)
+        implementation_thread_id, thread = await _resolve_review_autofix_thread(client, branch_name)
+        profile_login = _review_autofix_profile_login(thread)
+        if profile_login:
+            profile = await load_profile(profile_login)
+            if isinstance(profile, dict) and profile.get("auto_fix_ci") is False:
+                return
         configurable = _review_autofix_dispatch_config(
             thread,
             thread_id=implementation_thread_id,
@@ -800,17 +828,17 @@ async def _maybe_dispatch_review_autofix(
             {"reason": "Open SWE Review surfaced findings for auto-fix.", "details": details},
         )
         next_cycle = cycle_count + 1
-        await store.aput(
-            tuple(AUTOFIX_PR_STATE_NAMESPACE),
-            _review_autofix_cycle_key(owner, repo, pr_number),
-            {"cycle_count": next_cycle},
-        )
         await dispatch_agent_run(
             implementation_thread_id,
             _AUTOFIX_NUDGE,
             configurable,
             source="review_autofix",
             client=client,
+        )
+        await store.aput(
+            tuple(AUTOFIX_PR_STATE_NAMESPACE),
+            _review_autofix_cycle_key(owner, repo, pr_number),
+            {"cycle_count": next_cycle},
         )
         await _post_review_autofix_status(
             owner=owner,

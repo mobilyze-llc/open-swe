@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,6 +13,7 @@ from agent.review.publish import render_inline_comment_body
 
 _THREAD_ID = "123e4567-e89b-12d3-a456-426614174000"
 _BRANCH = f"open-swe/{_THREAD_ID}-fix-review"
+_SLUG_BRANCH = "open-swe/fix-review"
 _TEAM_SETTINGS_KEY = (("team_settings",), "default")
 _CYCLE_KEY = (("autofix_pr_state",), "o/r#7:review_autofix_cycles")
 _PENDING_KEY = (("autofix", _THREAD_ID), "pending_event")
@@ -60,24 +62,35 @@ def _finding(*, severity: Severity = "high") -> Finding:
     )
 
 
-def _client() -> MagicMock:
+def _client(*, branch_name: str = _BRANCH, search_result: bool = True) -> MagicMock:
     client = MagicMock()
-    client.threads.get = AsyncMock(
-        return_value={
-            "metadata": {
-                "source": "linear",
-                "github_login": "octocat",
-                "triggering_user_email": "octocat@example.com",
-                "source_context": {
-                    "linear_issue": {
-                        "linear_project_id": "OSWE",
-                        "linear_issue_number": "56",
-                    }
-                },
-            }
-        }
-    )
+    thread = {
+        "thread_id": _THREAD_ID,
+        "metadata": {
+            "branch_name": branch_name,
+            "source": "linear",
+            "github_login": "octocat",
+            "triggering_user_email": "octocat@example.com",
+            "source_context": {
+                "linear_issue": {
+                    "linear_project_id": "OSWE",
+                    "linear_issue_number": "56",
+                }
+            },
+        },
+    }
+    client.threads.search = AsyncMock(return_value=[thread] if search_result else [])
+    client.threads.get = AsyncMock(return_value=thread)
     return client
+
+
+@pytest.fixture(autouse=True)
+def _autofix_profile_enabled() -> Iterator[None]:
+    with patch(
+        "agent.tools.publish_review.load_profile",
+        AsyncMock(return_value={"auto_fix_ci": True}),
+    ):
+        yield
 
 
 @pytest.mark.parametrize(
@@ -136,11 +149,48 @@ async def test_review_autofix_trigger_truth_table_false_cases(
     status.assert_not_awaited()
 
 
-async def test_review_autofix_enqueues_exact_event_and_dispatches_minimal_nudge() -> None:
+async def test_review_autofix_profile_disabled_skips_dispatch() -> None:
     from agent.tools.publish_review import _maybe_dispatch_review_autofix
 
     store = _Store()
     client = _client()
+    dispatch = AsyncMock()
+    load_profile = AsyncMock(return_value={"auto_fix_ci": False})
+    with (
+        patch("agent.tools.publish_review.get_store", return_value=store),
+        patch(
+            "agent.tools.publish_review.is_review_repo_enabled",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "agent.tools.publish_review.is_pr_autofix_disabled",
+            AsyncMock(return_value=False),
+        ),
+        patch("agent.tools.publish_review.dispatch_client", return_value=client),
+        patch("agent.tools.publish_review.load_profile", load_profile),
+        patch("agent.tools.publish_review.dispatch_agent_run", dispatch),
+    ):
+        await _maybe_dispatch_review_autofix(
+            owner="o",
+            repo="r",
+            pr_number=7,
+            head_sha="head-sha",
+            branch_name=_BRANCH,
+            token="token",
+            surfaced_findings=[_finding()],
+        )
+
+    load_profile.assert_awaited_once_with("octocat")
+    assert _PENDING_KEY not in store.items
+    assert _CYCLE_KEY not in store.items
+    dispatch.assert_not_awaited()
+
+
+async def test_review_autofix_slug_branch_enqueues_event_and_dispatches_minimal_nudge() -> None:
+    from agent.tools.publish_review import _maybe_dispatch_review_autofix
+
+    store = _Store()
+    client = _client(branch_name=_SLUG_BRANCH)
     dispatch = AsyncMock(return_value={"run_id": "run-1"})
     status = AsyncMock(return_value=True)
     with (
@@ -162,11 +212,16 @@ async def test_review_autofix_enqueues_exact_event_and_dispatches_minimal_nudge(
             repo="r",
             pr_number=7,
             head_sha="head-sha",
-            branch_name=_BRANCH,
+            branch_name=_SLUG_BRANCH,
             token="token",
             surfaced_findings=[_finding()],
         )
 
+    client.threads.search.assert_awaited_once_with(
+        metadata={"branch_name": _SLUG_BRANCH},
+        limit=10,
+    )
+    client.threads.get.assert_not_awaited()
     assert store.items[_PENDING_KEY] == {
         "reason": "Open SWE Review surfaced findings for auto-fix.",
         "details": [
@@ -250,10 +305,13 @@ async def test_review_autofix_producer_errors_are_neutral_and_do_not_raise(failu
     store = _Store()
     if failure == "store-write":
         store.fail_put_namespace = ("autofix", _THREAD_ID)
+    if failure == "dispatch":
+        store.items[_CYCLE_KEY] = {"cycle_count": 1}
     dispatch = AsyncMock(
         side_effect=RuntimeError("dispatch unavailable") if failure == "dispatch" else None
     )
     status = AsyncMock(return_value=True)
+    client = _client(search_result=failure != "thread-resolution")
     with (
         patch("agent.tools.publish_review.get_store", return_value=store),
         patch(
@@ -264,7 +322,7 @@ async def test_review_autofix_producer_errors_are_neutral_and_do_not_raise(failu
             "agent.tools.publish_review.is_pr_autofix_disabled",
             AsyncMock(return_value=False),
         ),
-        patch("agent.tools.publish_review.dispatch_client", return_value=_client()),
+        patch("agent.tools.publish_review.dispatch_client", return_value=client),
         patch("agent.tools.publish_review.dispatch_agent_run", dispatch),
         patch("agent.tools.publish_review.post_autofix_status_check", status),
     ):
@@ -282,6 +340,8 @@ async def test_review_autofix_producer_errors_are_neutral_and_do_not_raise(failu
     status_args = status.await_args
     assert status_args is not None
     assert status_args.kwargs["title"] == "Auto-fix dispatch failed"
+    if failure == "dispatch":
+        assert store.items[_CYCLE_KEY] == {"cycle_count": 1}
 
 
 async def test_publish_review_config_off_preserves_literal_outcome() -> None:
