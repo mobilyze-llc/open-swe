@@ -50,15 +50,79 @@ async def git_value(
     return value[0].strip()
 
 
-async def root_instruction_path(
-    backend: SandboxBackendProtocol, repo_dir: str, base_sha: str
-) -> str:
-    for path in ("AGENTS.md", "CLAUDE.md"):
-        command = f"git cat-file -e {shlex.quote(f'{base_sha}:{path}')}"
+_POLICY_STATUS_MARKER = "__mobilyze_instruction_status__="
+_POLICY_BLOB_MODES = {"100644", "100755"}
+
+
+async def _policy_blobs_at_ref(
+    backend: SandboxBackendProtocol,
+    repo_dir: str,
+    base_sha: str,
+    candidates: Iterable[str],
+) -> set[str]:
+    paths = list(dict.fromkeys(candidates))
+    if not paths:
+        return set()
+    path_args = " ".join(shlex.quote(path) for path in paths)
+    command = (
+        f"git ls-tree -z {shlex.quote(base_sha)} -- {path_args}; "
+        f"status=$?; printf '{_POLICY_STATUS_MARKER}%s\\0' \"$status\""
+    )
+    try:
         result = await asyncio.to_thread(
             backend.execute, f"cd {shlex.quote(repo_dir)} && {command}"
         )
-        if _result_exit_code(result) in (0, None):
+    except Exception as exc:
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
+            "failed to inspect trusted instruction sources at the base SHA",
+        ) from exc
+    records = [record for record in _result_output(result).split("\0") if record]
+    status_records = [record for record in records if record.startswith(_POLICY_STATUS_MARKER)]
+    if _result_exit_code(result) not in (0, None) or len(status_records) != 1:
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
+            "failed to inspect trusted instruction sources at the base SHA",
+        )
+    try:
+        status = int(status_records[0].removeprefix(_POLICY_STATUS_MARKER))
+    except ValueError as exc:
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
+            "failed to inspect trusted instruction sources at the base SHA",
+        ) from exc
+    if status != 0:
+        raise ReviewSubjectBlocked(
+            ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
+            "failed to inspect trusted instruction sources at the base SHA",
+        )
+    entries: dict[str, tuple[str, str]] = {}
+    for record in records:
+        if record.startswith(_POLICY_STATUS_MARKER):
+            continue
+        metadata, separator, entry_path = record.partition("\t")
+        fields = metadata.split()
+        if not separator or len(fields) != 3 or entry_path not in paths or entry_path in entries:
+            raise ReviewSubjectBlocked(
+                ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
+                "trusted instruction inspection returned an invalid entry",
+            )
+        mode, object_type, _ = fields
+        entries[entry_path] = (mode, object_type)
+    return {
+        entry_path
+        for entry_path, (mode, object_type) in entries.items()
+        if object_type == "blob" and mode in _POLICY_BLOB_MODES
+    }
+
+
+async def root_instruction_path(
+    backend: SandboxBackendProtocol, repo_dir: str, base_sha: str
+) -> str:
+    candidates = ("AGENTS.md", "CLAUDE.md")
+    readable = await _policy_blobs_at_ref(backend, repo_dir, base_sha, candidates)
+    for path in candidates:
+        if path in readable:
             return path
     raise ReviewSubjectBlocked(
         ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
@@ -74,58 +138,17 @@ async def expected_scoped_instruction_paths(
 ) -> set[str]:
     """Return applicable scoped instruction files that exist at the base SHA."""
     agents_paths = applicable_agents_md_paths(changed_files)
-    if not agents_paths:
-        return set()
     candidates: list[str] = []
     for agents_path in agents_paths:
         directory = posixpath.dirname(agents_path)
         candidates.extend((agents_path, posixpath.join(directory, "CLAUDE.md")))
-    marker = "__mobilyze_instruction_status__="
-    paths = " ".join(shlex.quote(path) for path in candidates)
-    command = (
-        f"git ls-tree --name-only {shlex.quote(base_sha)} -- {paths}; "
-        f"status=$?; echo {marker}$status"
-    )
-    try:
-        result = await asyncio.to_thread(
-            backend.execute, f"cd {shlex.quote(repo_dir)} && {command}"
-        )
-    except Exception as exc:
-        raise ReviewSubjectBlocked(
-            ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
-            "failed to inspect trusted scoped instructions at the base SHA",
-        ) from exc
-    lines = _result_output(result).splitlines()
-    status_lines = [line for line in lines if line.startswith(marker)]
-    if _result_exit_code(result) not in (0, None) or len(status_lines) != 1:
-        raise ReviewSubjectBlocked(
-            ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
-            "failed to inspect trusted scoped instructions at the base SHA",
-        )
-    try:
-        status = int(status_lines[0].removeprefix(marker))
-    except ValueError as exc:
-        raise ReviewSubjectBlocked(
-            ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
-            "failed to inspect trusted scoped instructions at the base SHA",
-        ) from exc
-    if status != 0:
-        raise ReviewSubjectBlocked(
-            ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
-            "failed to inspect trusted scoped instructions at the base SHA",
-        )
-    present = {line for line in lines if not line.startswith(marker)}
-    if not present.issubset(candidates):
-        raise ReviewSubjectBlocked(
-            ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE,
-            "trusted scoped instruction inspection returned an unexpected path",
-        )
+    readable = await _policy_blobs_at_ref(backend, repo_dir, base_sha, candidates)
     expected: set[str] = set()
     for agents_path in agents_paths:
         claude_path = posixpath.join(posixpath.dirname(agents_path), "CLAUDE.md")
-        if agents_path in present:
+        if agents_path in readable:
             expected.add(agents_path)
-        elif claude_path in present:
+        elif claude_path in readable:
             expected.add(claude_path)
     return expected
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 from dataclasses import replace
 from typing import Any, cast
 
@@ -52,6 +53,8 @@ class FakeBackend:
         *,
         trusted_skill_dirs: set[str] | None = None,
         scoped_instruction_paths: set[str] | None = None,
+        scoped_instruction_entries: dict[str, tuple[str, str]] | None = None,
+        root_instruction_entries: dict[str, tuple[str, str]] | None = None,
     ) -> None:
         self.files: dict[str, bytes] = {}
         self.commands: list[str] = []
@@ -59,9 +62,21 @@ class FakeBackend:
         self.fail_commit = False
         self.upload_error: str | None = None
         self.trusted_skill_dirs = trusted_skill_dirs or set()
-        self.scoped_instruction_paths = (
+        scoped_paths = (
             {"src/AGENTS.md"} if scoped_instruction_paths is None else scoped_instruction_paths
         )
+        self.instruction_entries = {
+            **(
+                {"AGENTS.md": ("100644", "blob")}
+                if root_instruction_entries is None
+                else root_instruction_entries
+            ),
+            **(
+                dict.fromkeys(scoped_paths, ("100644", "blob"))
+                if scoped_instruction_entries is None
+                else scoped_instruction_entries
+            ),
+        }
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
         del timeout
@@ -71,9 +86,13 @@ class FakeBackend:
         if "git ls-tree -d --name-only" in command:
             output = "\n".join([*sorted(self.trusted_skill_dirs), "__mobilyze_git_status__=0"])
         elif "__mobilyze_instruction_status__=" in command:
-            output = "\n".join(
-                [*sorted(self.scoped_instruction_paths), "__mobilyze_instruction_status__=0"]
-            )
+            requested_paths = set(shlex.split(command.split(" -- ", 1)[1].split("; status=", 1)[0]))
+            records = [
+                f"{mode} {object_type} {'1' * 40}\t{path}"
+                for path, (mode, object_type) in sorted(self.instruction_entries.items())
+                if path in requested_paths
+            ]
+            output = "\0".join([*records, "__mobilyze_instruction_status__=0", ""])
         elif "git rev-parse HEAD" in command:
             output = HEAD_SHA
         elif "git merge-base" in command:
@@ -205,8 +224,8 @@ def install_sources(
     ) -> dict[str, str]:
         del owner, repo
         calls["instruction_refs"].append(ref)
-        assert files == ["src/app.py"] or len(files) > 1
-        return dict(configured_scoped_instructions) if files == ["src/app.py"] else {}
+        assert files
+        return dict(configured_scoped_instructions) if len(files) == 1 else {}
 
     async def materialize_trusted_skills(*_: object, **__: object) -> list[str]:
         return skill_sources or []
@@ -357,6 +376,81 @@ async def test_trusted_instructions_are_base_sourced_with_exact_scoped_paths(
     assert instructions["root_path"] == "AGENTS.md"
     assert instructions["scoped"] == {"src/AGENTS.md": "# safe scoped instructions"}
     assert HEAD_SHA not in json.dumps(instructions)
+
+
+@pytest.mark.asyncio
+async def test_non_ascii_scoped_instruction_path_uses_machine_safe_git_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    diff = DIFF.replace("src/app.py", "café/app.py")
+    install_sources(
+        monkeypatch,
+        diff_text=diff,
+        scoped_instructions={"café/AGENTS.md": "# café policy"},
+    )
+    backend = FakeBackend(scoped_instruction_entries={"café/AGENTS.md": ("100644", "blob")})
+
+    result = await materialize_review_subject(
+        cast(Any, backend), github_token="token", work_dir="/work", request=request()
+    )
+    context = uploaded_json(backend, manifest_artifact(result, "trusted_context"))
+    instructions = uploaded_json(backend, cast(dict[str, Any], context["instructions"]))
+
+    assert instructions["scoped"] == {"café/AGENTS.md": "# café policy"}
+
+
+@pytest.mark.asyncio
+async def test_non_blob_scoped_agents_falls_back_to_blob_claude(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_sources(
+        monkeypatch,
+        scoped_instructions={"src/CLAUDE.md": "# readable fallback"},
+    )
+    backend = FakeBackend(
+        scoped_instruction_entries={
+            "src/AGENTS.md": ("040000", "tree"),
+            "src/CLAUDE.md": ("100644", "blob"),
+        }
+    )
+
+    result = await materialize_review_subject(
+        cast(Any, backend), github_token="token", work_dir="/work", request=request()
+    )
+    context = uploaded_json(backend, manifest_artifact(result, "trusted_context"))
+    instructions = uploaded_json(backend, cast(dict[str, Any], context["instructions"]))
+
+    assert instructions["scoped"] == {"src/CLAUDE.md": "# readable fallback"}
+
+
+@pytest.mark.asyncio
+async def test_root_instruction_requires_readable_blob_and_falls_back_or_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_sources(monkeypatch)
+    fallback_backend = FakeBackend(
+        root_instruction_entries={
+            "AGENTS.md": ("040000", "tree"),
+            "CLAUDE.md": ("100644", "blob"),
+        }
+    )
+
+    result = await materialize_review_subject(
+        cast(Any, fallback_backend), github_token="token", work_dir="/work", request=request()
+    )
+    context = uploaded_json(fallback_backend, manifest_artifact(result, "trusted_context"))
+    instructions = uploaded_json(fallback_backend, cast(dict[str, Any], context["instructions"]))
+    assert instructions["root_path"] == "CLAUDE.md"
+
+    blocked_backend = FakeBackend(root_instruction_entries={"AGENTS.md": ("160000", "commit")})
+    with pytest.raises(ReviewSubjectBlocked) as blocked:
+        await materialize_review_subject(
+            cast(Any, blocked_backend),
+            github_token="token",
+            work_dir="/work",
+            request=request(),
+        )
+    assert blocked.value.code == ReviewSubjectBlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE
 
 
 @pytest.mark.asyncio
