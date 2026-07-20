@@ -34,6 +34,8 @@ from agent.mobilyze.orchard_baseline.constants import (
     SECRETS_ROOT,
     SERVICE_LABELS,
     SUPPORT_ROOT,
+    SUPPORT_ROOT_MODE,
+    SUPPORT_ROOT_UID,
     TART_APP,
     TART_APP_EXECUTABLE_RELATIVE,
     TART_EXECUTABLE_RELATIVE,
@@ -115,28 +117,29 @@ def _ensure_identity() -> None:
         raise RuntimeError(f"{ACCOUNT_NAME} must use home {ACCOUNT_HOME} and shell {ACCOUNT_SHELL}")
 
 
-def _prepare_directory(path: Path, mode: int, *, owned: bool) -> None:
+def _prepare_directory(path: Path, mode: int, *, owner: tuple[int, int] | None) -> None:
     if path.is_symlink():
         raise RuntimeError(f"managed directory must not be a symlink: {path}")
     path.mkdir(parents=True, exist_ok=True)
     if not path.is_dir():
         raise RuntimeError(f"managed directory is not a directory: {path}")
     os.chmod(path, mode)
-    if owned:
-        chown(path, ACCOUNT_UID, ACCOUNT_GID)
+    if owner is not None:
+        chown(path, *owner)
 
 
 def _prepare_directories() -> None:
-    for path, mode, owned in (
-        (INSTALL_ROOT, 0o755, False),
-        (RELEASES_ROOT, 0o755, False),
-        (CURRENT_BIN, 0o755, False),
-        (DATA_ROOT, 0o700, True),
-        (SUPPORT_ROOT, 0o700, True),
-        (SECRETS_ROOT, 0o700, True),
-        (LOG_ROOT, 0o700, True),
+    account_owner = (ACCOUNT_UID, ACCOUNT_GID)
+    for path, mode, owner in (
+        (INSTALL_ROOT, 0o755, None),
+        (RELEASES_ROOT, 0o755, None),
+        (CURRENT_BIN, 0o755, None),
+        (DATA_ROOT, 0o700, account_owner),
+        (SUPPORT_ROOT, SUPPORT_ROOT_MODE, (SUPPORT_ROOT_UID, ACCOUNT_GID)),
+        (SECRETS_ROOT, 0o700, account_owner),
+        (LOG_ROOT, 0o700, account_owner),
     ):
-        _prepare_directory(path, mode, owned=owned)
+        _prepare_directory(path, mode, owner=owner)
 
 
 def _install_secret(source: Path | None, destination: Path) -> None:

@@ -40,6 +40,9 @@ from agent.mobilyze.orchard_baseline.constants import (
     ORCHARD_HOME,
     SECRETS_ROOT,
     SUPPORT_ROOT,
+    SUPPORT_ROOT_MODE,
+    SUPPORT_ROOT_OWNER,
+    SUPPORT_ROOT_UID,
     TAILSCALE_BINARY,
     TART_APP,
     TART_EXECUTABLE_RELATIVE,
@@ -292,6 +295,9 @@ def test_service_files_are_redacted_and_pin_static_limits() -> None:
 
 def test_live_secret_paths_and_protected_root_are_exact() -> None:
     assert SUPPORT_ROOT == Path("/Library/Application Support/Mobilyze/OpenSWEOrchard")
+    assert SUPPORT_ROOT_OWNER == "root"
+    assert SUPPORT_ROOT_UID == 0
+    assert SUPPORT_ROOT_MODE == 0o750
     assert ORCHARD_HOME == SUPPORT_ROOT
     assert SECRETS_ROOT == SUPPORT_ROOT / "secrets"
     assert ADMIN_TOKEN == SECRETS_ROOT / "bootstrap-admin"
@@ -328,7 +334,23 @@ def test_protected_directory_reuse_rejects_symlinks(
     managed.symlink_to(target, target_is_directory=True)
 
     with pytest.raises(RuntimeError, match="must not be a symlink"):
-        install._prepare_directory(managed, 0o700, owned=True)
+        install._prepare_directory(managed, 0o700, owner=(ACCOUNT_UID, ACCOUNT_GID))
+
+
+def test_install_preserves_root_owned_traversable_support_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared: list[tuple[Path, int, tuple[int, int] | None]] = []
+    monkeypatch.setattr(
+        install,
+        "_prepare_directory",
+        lambda path, mode, *, owner: prepared.append((path, mode, owner)),
+    )
+
+    install._prepare_directories()
+
+    assert (SUPPORT_ROOT, 0o750, (0, ACCOUNT_GID)) in prepared
+    assert (SECRETS_ROOT, 0o700, (ACCOUNT_UID, ACCOUNT_GID)) in prepared
 
 
 def test_wrappers_preserve_environment_and_quote_spaced_orchard_home() -> None:
@@ -406,6 +428,53 @@ def test_status_proves_secret_metadata_without_reading_contents(
     assert f"group={ACCOUNT_NAME}" in detail
 
 
+def test_status_accepts_root_owned_support_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = type(
+        "Metadata",
+        (),
+        {
+            "st_mode": stat.S_IFDIR | 0o750,
+            "st_uid": 0,
+            "st_gid": ACCOUNT_GID,
+        },
+    )()
+    monkeypatch.setattr(Path, "lstat", lambda path: metadata)
+    monkeypatch.setattr(
+        status.pwd, "getpwuid", lambda uid: type("Owner", (), {"pw_name": "root"})()
+    )
+    monkeypatch.setattr(
+        status.grp, "getgrgid", lambda gid: type("Group", (), {"gr_name": ACCOUNT_NAME})()
+    )
+
+    detail = status._protected_path(
+        SUPPORT_ROOT,
+        SUPPORT_ROOT_MODE,
+        directory=True,
+        owner_name=SUPPORT_ROOT_OWNER,
+        owner_uid=SUPPORT_ROOT_UID,
+    )
+
+    assert "mode=0750" in detail
+    assert "owner=root" in detail
+    assert f"group={ACCOUNT_NAME}" in detail
+
+
+def test_status_main_requires_root(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    def checked_root() -> None:
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(status, "require_root", checked_root)
+    monkeypatch.setattr(status, "collect_diagnostics", lambda: [])
+
+    assert status.main() == 0
+    assert calls == 1
+
+
 def test_status_identity_requires_live_home_and_shell(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -447,11 +516,16 @@ def test_manifest_and_runbook_describe_live_paths_and_state_only_backups() -> No
         "ORCHARD_HOME": str(SUPPORT_ROOT),
     }
     assert manifest["secrets"]["paths"] == [str(ADMIN_TOKEN), str(WORKER_TOKEN)]
+    assert manifest["secrets"]["support_root_mode"] == "0750"
+    assert manifest["secrets"]["support_root_owner"] == "root"
+    assert manifest["secrets"]["support_root_group"] == ACCOUNT_NAME
     assert manifest["secrets"]["mode"] == "0400"
     assert manifest["secrets"]["owner"] == ACCOUNT_NAME
     assert manifest["secrets"]["group"] == ACCOUNT_NAME
     assert manifest["releases"]["tart"]["compatibility_path"] == str(CURRENT_TART_APP)
     assert str(SUPPORT_ROOT) in runbook
+    assert "`root:_opensweorchard` mode `0750`" in runbook
+    assert "status is intentionally root-only" in runbook
     assert "deliberately exclude the protected support root and bootstrap secrets" in runbook
     assert "does not remove either parent directory" in runbook
 

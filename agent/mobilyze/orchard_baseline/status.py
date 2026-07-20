@@ -32,13 +32,16 @@ from agent.mobilyze.orchard_baseline.constants import (
     ORCHARD_SHA256,
     SECRETS_ROOT,
     SUPPORT_ROOT,
+    SUPPORT_ROOT_MODE,
+    SUPPORT_ROOT_OWNER,
+    SUPPORT_ROOT_UID,
     TART_SHA256,
     VM_SLOTS,
     WORKER_LABEL,
     WORKER_SLOT_RESOURCE,
     WORKER_TOKEN,
 )
-from agent.mobilyze.orchard_baseline.host import command_error, run, sha256
+from agent.mobilyze.orchard_baseline.host import command_error, require_root, run, sha256
 
 
 @dataclass(frozen=True)
@@ -66,7 +69,14 @@ def _identity() -> str:
     return f"uid={user.pw_uid} gid={user.pw_gid} home={user.pw_dir} shell={user.pw_shell}"
 
 
-def _protected_path(path: Path, expected_mode: int, *, directory: bool) -> str:
+def _protected_path(
+    path: Path,
+    expected_mode: int,
+    *,
+    directory: bool,
+    owner_name: str = ACCOUNT_NAME,
+    owner_uid: int | None = None,
+) -> str:
     metadata = path.lstat()
     if directory:
         if not stat.S_ISDIR(metadata.st_mode):
@@ -76,17 +86,18 @@ def _protected_path(path: Path, expected_mode: int, *, directory: bool) -> str:
     mode = stat.S_IMODE(metadata.st_mode)
     if mode != expected_mode:
         raise RuntimeError(f"{path} mode is {mode:04o}, expected {expected_mode:04o}")
+    expected_uid = ACCOUNT_UID if owner_uid is None else owner_uid
     owner = pwd.getpwuid(metadata.st_uid).pw_name
     group = grp.getgrgid(metadata.st_gid).gr_name
     if (
-        metadata.st_uid != ACCOUNT_UID
+        metadata.st_uid != expected_uid
         or metadata.st_gid != ACCOUNT_GID
-        or owner != ACCOUNT_NAME
+        or owner != owner_name
         or group != ACCOUNT_NAME
     ):
         raise RuntimeError(
             f"{path} owner/group is {owner}:{group} "
-            f"({metadata.st_uid}:{metadata.st_gid}), expected {ACCOUNT_NAME}:{ACCOUNT_NAME}"
+            f"({metadata.st_uid}:{metadata.st_gid}), expected {owner_name}:{ACCOUNT_NAME}"
         )
     return f"path={path} mode={mode:04o} owner={owner} group={group}"
 
@@ -175,7 +186,16 @@ def _disk_report() -> str:
 def collect_diagnostics() -> list[Diagnostic]:
     return [
         _capture("identity", _identity),
-        _capture("support_root", lambda: _protected_path(SUPPORT_ROOT, 0o700, directory=True)),
+        _capture(
+            "support_root",
+            lambda: _protected_path(
+                SUPPORT_ROOT,
+                SUPPORT_ROOT_MODE,
+                directory=True,
+                owner_name=SUPPORT_ROOT_OWNER,
+                owner_uid=SUPPORT_ROOT_UID,
+            ),
+        ),
         _capture("secrets_root", lambda: _protected_path(SECRETS_ROOT, 0o700, directory=True)),
         _capture(
             "bootstrap_admin_secret",
@@ -212,6 +232,7 @@ def render_status(diagnostics: list[Diagnostic]) -> tuple[str, int]:
 
 
 def main() -> int:
+    require_root()
     output, exit_code = render_status(collect_diagnostics())
     print(output)
     return exit_code

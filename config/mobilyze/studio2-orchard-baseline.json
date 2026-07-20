@@ -77,7 +77,9 @@
   "secrets": {
     "values": "<redacted>",
     "support_root": "/Library/Application Support/Mobilyze/OpenSWEOrchard",
-    "support_root_mode": "0700",
+    "support_root_mode": "0750",
+    "support_root_owner": "root",
+    "support_root_group": "_opensweorchard",
     "paths": [
       "/Library/Application Support/Mobilyze/OpenSWEOrchard/secrets/bootstrap-admin",
       "/Library/Application Support/Mobilyze/OpenSWEOrchard/secrets/worker-bootstrap"
