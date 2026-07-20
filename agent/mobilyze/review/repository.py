@@ -60,9 +60,15 @@ def _succeeded(result: object) -> bool:
 
 
 async def _git(sandbox_backend: SandboxBackendProtocol, repo_dir: str, command: str) -> object:
+    environment = (
+        "unset GIT_CONFIG GIT_CONFIG_COUNT GIT_CONFIG_PARAMETERS GIT_EXTERNAL_DIFF "
+        "GIT_DIFF_OPTS GIT_ATTR_SOURCE; "
+        "export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null "
+        "GIT_ATTR_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1"
+    )
     return await asyncio.to_thread(
         sandbox_backend.execute,
-        f"cd {shlex.quote(repo_dir)} && {command}",
+        f"cd {shlex.quote(repo_dir)} && {environment} && {command}",
     )
 
 
@@ -83,9 +89,23 @@ def _download_bytes(response: object) -> bytes | None:
 async def checkout_matches_head(
     sandbox_backend: SandboxBackendProtocol, repo_dir: str, head_sha: str
 ) -> bool:
-    """Return whether the prepared checkout still points at the exact head."""
-    result = await _git(sandbox_backend, repo_dir, "git rev-parse HEAD")
-    return _succeeded(result) and _output(result).strip() == head_sha
+    """Return whether the checkout is a clean materialization of the exact head."""
+    try:
+        head_result = await _git(sandbox_backend, repo_dir, "git rev-parse HEAD")
+        status_result = await _git(
+            sandbox_backend, repo_dir, "git status --porcelain --untracked-files=all"
+        )
+        ignored_result = await _git(sandbox_backend, repo_dir, "git clean -ndx")
+    except Exception:
+        return False
+    return (
+        _succeeded(head_result)
+        and _output(head_result).strip() == head_sha
+        and _succeeded(status_result)
+        and not _output(status_result).strip()
+        and _succeeded(ignored_result)
+        and not _output(ignored_result).strip()
+    )
 
 
 async def prepare_exact_review(
@@ -101,6 +121,7 @@ async def prepare_exact_review(
     re_review: bool,
     work_dir: str,
     max_trusted_context_bytes: int,
+    allow_missing_root_instructions: bool,
 ) -> PreparedReview:
     """Prepare and verify the exact checkout, diff, paths, and base context."""
     diff_base, diff_head, merge_base_diff = review_diff_range(
@@ -123,38 +144,43 @@ async def prepare_exact_review(
             BlockerCode.REPOSITORY_PREP_FAILED, "exact review checkout failed"
         )
     repo_dir = posixpath.join(work_dir, repo)
-    clean_result = await _git(sandbox_backend, repo_dir, "git clean -ffd")
-    status_result = await _git(
-        sandbox_backend, repo_dir, "git status --porcelain --untracked-files=all"
-    )
-    if (
-        not _succeeded(clean_result)
-        or not _succeeded(status_result)
-        or _output(status_result).strip()
+    try:
+        clean_result = await _git(sandbox_backend, repo_dir, "git clean -ffdx")
+    except Exception as exc:
+        raise ReviewPreparationError(
+            BlockerCode.CHECKOUT_MISMATCH, "failed to clean the exact review checkout"
+        ) from exc
+    if not _succeeded(clean_result) or not await checkout_matches_head(
+        sandbox_backend, repo_dir, head_sha
     ):
         raise ReviewPreparationError(
             BlockerCode.CHECKOUT_MISMATCH, "checkout contains content outside the exact head"
         )
-    head_result = await _git(sandbox_backend, repo_dir, "git rev-parse HEAD")
-    if not _succeeded(head_result) or _output(head_result).strip() != head_sha:
-        raise ReviewPreparationError(
-            BlockerCode.CHECKOUT_MISMATCH, "checkout is not at the exact PR head"
-        )
     for sha in dict.fromkeys((base_sha, head_sha, diff_base)):
-        result = await _git(
-            sandbox_backend,
-            repo_dir,
-            f"git cat-file -e {shlex.quote(sha + '^{commit}')}",
-        )
+        try:
+            result = await _git(
+                sandbox_backend,
+                repo_dir,
+                f"git cat-file -e {shlex.quote(sha + '^{commit}')}",
+            )
+        except Exception as exc:
+            raise ReviewPreparationError(
+                BlockerCode.COMMIT_UNAVAILABLE, f"failed to verify commit {sha}"
+            ) from exc
         if not _succeeded(result):
             raise ReviewPreparationError(
                 BlockerCode.COMMIT_UNAVAILABLE, f"commit {sha} is unavailable"
             )
-    merge_result = await _git(
-        sandbox_backend,
-        repo_dir,
-        f"git merge-base {shlex.quote(base_sha)} {shlex.quote(head_sha)}",
-    )
+    try:
+        merge_result = await _git(
+            sandbox_backend,
+            repo_dir,
+            f"git merge-base {shlex.quote(base_sha)} {shlex.quote(head_sha)}",
+        )
+    except Exception as exc:
+        raise ReviewPreparationError(
+            BlockerCode.COMMIT_UNAVAILABLE, "failed to compute the merge base"
+        ) from exc
     merge_base = _output(merge_result).strip()
     if not _succeeded(merge_result) or not merge_base:
         raise ReviewPreparationError(BlockerCode.COMMIT_UNAVAILABLE, "merge base is unavailable")
@@ -169,18 +195,40 @@ async def prepare_exact_review(
     materialization_dir = posixpath.join(repo_dir, ".git", "mobilyze-review-subject")
     diff_path = posixpath.join(materialization_dir, f"{range_digest}.patch")
     names_path = posixpath.join(materialization_dir, f"{range_digest}.names")
-    diff_result = await _git(
-        sandbox_backend,
-        repo_dir,
-        f"mkdir -p {shlex.quote(materialization_dir)} && "
-        f"git -c core.quotePath=false diff --no-color {diff_range} -- "
-        f"> {shlex.quote(diff_path)} && "
-        f"git -c core.quotePath=false diff --name-only -z {diff_range} -- "
-        f"> {shlex.quote(names_path)}",
+    diff_options = (
+        "--no-color --no-ext-diff --no-textconv --no-renames --no-indent-heuristic "
+        "--full-index --unified=3 --src-prefix=a/ --dst-prefix=b/ --submodule=short"
     )
-    if not _succeeded(diff_result):
-        raise ReviewPreparationError(BlockerCode.DIFF_UNAVAILABLE, "fresh exact-SHA diff failed")
-    downloaded = await sandbox_backend.adownload_files([diff_path, names_path])
+    sanitize_command = (
+        "rm -f .git/info/attributes .git/info/grafts && "
+        "git config --local --name-only --get-regexp '^include' | "
+        'while IFS= read -r key; do git config --local --unset-all "$key" || true; done && '
+        "git config --local core.quotePath false && "
+        "git config --local core.attributesFile /dev/null && "
+        "git config --local core.useReplaceRefs false && "
+        "git config --local --name-only --get-regexp '^diff[.]' | "
+        'while IFS= read -r key; do git config --local --unset-all "$key" || true; done'
+    )
+    try:
+        sanitize_result = await _git(sandbox_backend, repo_dir, sanitize_command)
+        if not _succeeded(sanitize_result):
+            raise RuntimeError("failed to sanitize exact-SHA Git metadata")
+        diff_result = await _git(
+            sandbox_backend,
+            repo_dir,
+            f"mkdir -p {shlex.quote(materialization_dir)} && "
+            f"git -c core.quotePath=false -c diff.algorithm=myers diff {diff_options} "
+            f"{diff_range} -- > {shlex.quote(diff_path)} && "
+            f"git -c core.quotePath=false -c diff.algorithm=myers diff {diff_options} "
+            f"--name-only -z {diff_range} -- > {shlex.quote(names_path)}",
+        )
+        if not _succeeded(diff_result):
+            raise RuntimeError("fresh exact-SHA diff failed")
+        downloaded = await sandbox_backend.adownload_files([diff_path, names_path])
+    except Exception as exc:
+        raise ReviewPreparationError(
+            BlockerCode.DIFF_UNAVAILABLE, "fresh exact-SHA diff failed"
+        ) from exc
     diff_bytes = _download_bytes(downloaded[0]) if len(downloaded) > 0 else None
     names_bytes = _download_bytes(downloaded[1]) if len(downloaded) > 1 else None
     if diff_bytes is None or names_bytes is None:
@@ -204,6 +252,7 @@ async def prepare_exact_review(
         base_sha=base_sha,
         changed_file_paths=parsed_files,
         max_bytes=max_trusted_context_bytes,
+        allow_missing_root_instructions=allow_missing_root_instructions,
     )
     return PreparedReview(
         repo_dir=repo_dir,

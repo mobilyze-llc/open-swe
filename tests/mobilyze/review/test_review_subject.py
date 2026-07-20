@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +35,7 @@ class LocalSandboxBackend:
         self.fail_fragment: str | None = None
         self.extra_name_only_path: str | None = None
         self.truncate_fragment: str | None = None
+        self.raise_fragment: str | None = None
         self.download_count = 0
 
     @property
@@ -42,6 +44,8 @@ class LocalSandboxBackend:
 
     def execute(self, command: str, *, timeout: int | None = None) -> object:
         self.commands.append(command)
+        if self.raise_fragment and self.raise_fragment in command:
+            raise RuntimeError("forced backend exception")
         if self.fail_fragment and self.fail_fragment in command:
             return SimpleNamespace(output="forced failure", exit_code=1)
         if self.truncate_fragment and self.truncate_fragment in command:
@@ -124,7 +128,7 @@ def _repo(
     return work, repo, base, head
 
 
-def _policy(**overrides: int) -> ReviewPolicy:
+def _policy(*, allow_missing_root_instructions: bool = True, **overrides: int) -> ReviewPolicy:
     limits = {
         "max_diff_bytes": 50_000,
         "max_pr_metadata_bytes": 2_000,
@@ -137,6 +141,7 @@ def _policy(**overrides: int) -> ReviewPolicy:
     return ReviewPolicy(
         version="review-policy-2026-07",
         agent_definitions=(AgentDefinitionReference(id="finder", sha256="1" * 64),),
+        allow_missing_root_instructions=allow_missing_root_instructions,
         lane_limits=LaneInputLimits(**limits),
     )
 
@@ -315,13 +320,24 @@ async def test_stale_sha_and_mid_build_change_block(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_reused_checkout_removes_untracked_files(tmp_path: Path) -> None:
-    _, repo, base, head = _repo(tmp_path)
+async def test_reused_checkout_removes_untracked_and_ignored_files(tmp_path: Path) -> None:
+    _, repo, base, head = _repo(
+        tmp_path,
+        base_files={
+            "AGENTS.md": "root rules\n",
+            ".gitignore": "ignored-review-input.txt\n",
+            "app.py": "value = 1\n",
+        },
+        head_files={"app.py": "value = 2\n"},
+    )
     stale = repo / "stale-review-input.txt"
+    ignored = repo / "ignored-review-input.txt"
     stale.write_text("not in the requested head")
+    ignored.write_text("also not in the requested head")
     result = await _run(LocalSandboxBackend(), _request(tmp_path, base, head))
     assert result.subject is not None
     assert not stale.exists()
+    assert not ignored.exists()
 
 
 @pytest.mark.asyncio
@@ -349,6 +365,33 @@ async def test_poisoned_diff_cache_is_overwritten_by_fresh_sha_diff(tmp_path: Pa
     assert stale_path.read_text() != "diff --git a/poison.py b/poison.py\n"
     assert "poison.py" not in _artifact_path(request, result.subject.diff).read_text()
     assert "app.py" in _artifact_path(request, result.subject.diff).read_text()
+
+
+@pytest.mark.asyncio
+async def test_mutable_git_diff_driver_cannot_change_subject_identity(tmp_path: Path) -> None:
+    _, repo, base, head = _repo(
+        tmp_path,
+        base_files={
+            ".gitattributes": "app.py diff=poison\n",
+            "AGENTS.md": "root\n",
+            "app.py": "value = 1\n",
+        },
+        head_files={"app.py": "value = 2\n"},
+    )
+    first_request = _request(tmp_path, base, head, artifact_name="clean")
+    first = await _run(LocalSandboxBackend(), first_request)
+    assert first.subject is not None
+
+    _git(repo, "config", "diff.poison.textconv", "sed s/value/poison/g")
+    assert "poison" in _git(repo, "diff", f"{base}...{head}")
+    second_request = _request(tmp_path, base, head, artifact_name="poisoned")
+    second = await _run(LocalSandboxBackend(), second_request)
+
+    assert second.subject is not None
+    assert second.subject.subject_hash == first.subject.subject_hash
+    diff_text = _artifact_path(second_request, second.subject.diff).read_text()
+    assert "value = 2" in diff_text
+    assert "poison = 2" not in diff_text
 
 
 @pytest.mark.asyncio
@@ -404,10 +447,36 @@ async def test_trusted_skill_discovery_extraction_mismatch_blocks(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_subject_identity_and_manifest_are_artifact_root_independent(tmp_path: Path) -> None:
-    _, _, base, head = _repo(tmp_path)
+async def test_export_ignored_trusted_skill_file_blocks(tmp_path: Path) -> None:
+    _, _, base, head = _repo(
+        tmp_path,
+        base_files={
+            ".gitattributes": ".agents/skills/review/SKILL.md export-ignore\n",
+            ".agents/skills/review/SKILL.md": "skill\n",
+            "AGENTS.md": "root\n",
+            "app.py": "a\n",
+        },
+        head_files={"app.py": "b\n"},
+    )
+    result = await _run(LocalSandboxBackend(), _request(tmp_path, base, head))
+    assert result.blockers[0].code is BlockerCode.TRUSTED_SKILLS_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_subject_identity_and_manifest_are_storage_path_independent(tmp_path: Path) -> None:
+    _, repo, base, head = _repo(tmp_path)
+    second_root = tmp_path / "second-location"
+    second_work = second_root / "work"
+    second_work.mkdir(parents=True)
+    shutil.copytree(repo, second_work / "repo")
     first_request = _request(tmp_path, base, head, artifact_name="one")
-    second_request = _request(tmp_path, base, head, artifact_name="two")
+    second_request = _request(
+        tmp_path,
+        base,
+        head,
+        artifact_name="two",
+        work_dir=str(second_work),
+    )
     first = await _run(LocalSandboxBackend(), first_request)
     second = await _run(LocalSandboxBackend(), second_request)
     assert first.subject is not None and second.subject is not None
@@ -441,8 +510,9 @@ async def test_real_git_quoted_unicode_path_is_preserved(tmp_path: Path) -> None
     assert "café/app.py" in line_map
     context = json.loads(_artifact_path(request, result.subject.trusted_context).read_text())
     assert "café/AGENTS.md" in [item["path"] for item in context["instructions"]]
-    assert any("git -c core.quotePath=false diff --no-color" in cmd for cmd in backend.commands)
-    assert any("git -c core.quotePath=false diff --name-only -z" in cmd for cmd in backend.commands)
+    assert any("git config --local core.quotePath false" in cmd for cmd in backend.commands)
+    assert any("--no-ext-diff --no-textconv --no-renames" in cmd for cmd in backend.commands)
+    assert any("--name-only -z" in cmd for cmd in backend.commands)
 
 
 @pytest.mark.asyncio
@@ -463,6 +533,9 @@ async def test_non_blob_agents_uses_claude_blob_content(tmp_path: Path) -> None:
     assert context["instructions"] == [
         {
             "content": "fallback rules\n",
+            "git_blob": _git(
+                Path(request.work_dir) / request.repo, "rev-parse", f"{base}:CLAUDE.md"
+            ),
             "path": "CLAUDE.md",
             "sha256": context["instructions"][0]["sha256"],
         }
@@ -486,6 +559,32 @@ async def test_missing_root_is_typed_degradation_and_discovery_failure_blocks(
     backend = LocalSandboxBackend()
     backend.fail_fragment = "git -c core.quotePath=false ls-tree -r -z"
     result = await _run(backend, request)
+    assert result.blockers[0].code is BlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_diff_backend_exception_returns_typed_blocker(tmp_path: Path) -> None:
+    _, _, base, head = _repo(tmp_path)
+    backend = LocalSandboxBackend()
+    backend.raise_fragment = "--no-ext-diff --no-textconv --no-renames"
+    result = await _run(backend, _request(tmp_path, base, head))
+    assert result.blockers[0].code is BlockerCode.DIFF_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_missing_root_requires_explicit_policy_degradation(tmp_path: Path) -> None:
+    _, _, base, head = _repo(
+        tmp_path,
+        base_files={"app.py": "a\n"},
+        head_files={"app.py": "b\n"},
+    )
+    request = _request(
+        tmp_path,
+        base,
+        head,
+        policy=_policy(allow_missing_root_instructions=False),
+    )
+    result = await _run(LocalSandboxBackend(), request)
     assert result.blockers[0].code is BlockerCode.TRUSTED_INSTRUCTIONS_UNAVAILABLE
 
 
@@ -601,6 +700,31 @@ async def test_review_thread_failure_is_explicit_degradation(tmp_path: Path) -> 
     assert DegradedCode.REVIEW_THREADS_UNAVAILABLE in {
         item.code for item in result.subject.degraded
     }
+
+
+@pytest.mark.asyncio
+async def test_fail_open_review_thread_result_is_explicitly_unverified(tmp_path: Path) -> None:
+    _, _, base, head = _repo(tmp_path)
+    request = _request(tmp_path, base, head)
+    with (
+        patch(
+            "agent.mobilyze.review.subject.fetch_pr",
+            AsyncMock(side_effect=[_payload(base, head)] * 2),
+        ),
+        patch(
+            "agent.mobilyze.review.subject.fetch_pr_metadata",
+            AsyncMock(return_value=("title", "body")),
+        ),
+        patch(
+            "agent.mobilyze.review.subject.fetch_pr_review_threads",
+            AsyncMock(return_value=[]),
+        ),
+    ):
+        result = await materialize_review_subject(
+            cast(SandboxBackendProtocol, LocalSandboxBackend()), request, token="token"
+        )
+    assert result.subject is not None
+    assert DegradedCode.REVIEW_THREADS_UNVERIFIED in {item.code for item in result.subject.degraded}
 
 
 def test_lane_limits_must_be_positive() -> None:

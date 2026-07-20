@@ -140,12 +140,15 @@ async def materialize_review_subject(
     token: str,
 ) -> ReviewSubjectMaterialization:
     """Materialize one immutable, SHA-bound review subject."""
-    initial_pr = await fetch_pr(
-        owner=request.owner,
-        repo=request.repo,
-        pr_number=request.pr_number,
-        token=token,
-    )
+    try:
+        initial_pr = await fetch_pr(
+            owner=request.owner,
+            repo=request.repo,
+            pr_number=request.pr_number,
+            token=token,
+        )
+    except Exception:
+        initial_pr = None
     if initial_pr is None:
         return _block(BlockerCode.PR_UNAVAILABLE, "pull request metadata is unavailable")
     if not _identity_matches(initial_pr, request):
@@ -163,16 +166,22 @@ async def materialize_review_subject(
             re_review=request.re_review,
             work_dir=request.work_dir,
             max_trusted_context_bytes=request.policy.lane_limits.max_trusted_context_bytes,
+            allow_missing_root_instructions=request.policy.allow_missing_root_instructions,
         )
     except (ReviewPreparationError, TrustedContextError) as exc:
         return _block(exc.code, exc.detail)
+    except Exception as exc:
+        return _block(BlockerCode.REPOSITORY_PREP_FAILED, f"review preparation failed: {exc}")
 
-    metadata = await fetch_pr_metadata(
-        owner=request.owner,
-        repo=request.repo,
-        pr_number=request.pr_number,
-        token=token,
-    )
+    try:
+        metadata = await fetch_pr_metadata(
+            owner=request.owner,
+            repo=request.repo,
+            pr_number=request.pr_number,
+            token=token,
+        )
+    except Exception:
+        metadata = None
     if metadata is None:
         return _block(BlockerCode.PR_UNAVAILABLE, "pull request title and body are unavailable")
     degraded = list(prepared.trusted_context.degraded)
@@ -192,12 +201,23 @@ async def materialize_review_subject(
                 detail="review threads could not be loaded",
             )
         )
-    final_pr = await fetch_pr(
-        owner=request.owner,
-        repo=request.repo,
-        pr_number=request.pr_number,
-        token=token,
-    )
+    else:
+        degraded.append(
+            DegradedField(
+                code=DegradedCode.REVIEW_THREADS_UNVERIFIED,
+                field="review_threads",
+                detail="review thread snapshot is best-effort and completeness is unverified",
+            )
+        )
+    try:
+        final_pr = await fetch_pr(
+            owner=request.owner,
+            repo=request.repo,
+            pr_number=request.pr_number,
+            token=token,
+        )
+    except Exception:
+        final_pr = None
     if final_pr is None or not _identity_matches(final_pr, request):
         return _block(
             BlockerCode.SUBJECT_CHANGED, "pull request SHAs changed during materialization"

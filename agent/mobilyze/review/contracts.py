@@ -34,6 +34,7 @@ class BlockerCode(StrEnum):
 class DegradedCode(StrEnum):
     ROOT_INSTRUCTIONS_ABSENT = "root_instructions_absent"
     REVIEW_THREADS_UNAVAILABLE = "review_threads_unavailable"
+    REVIEW_THREADS_UNVERIFIED = "review_threads_unverified"
 
 
 class ReviewArtifact(PersistedContract):
@@ -79,6 +80,7 @@ class AgentDefinitionReference(PersistedContract):
 class ReviewPolicy(PersistedContract):
     version: str = Field(min_length=1)
     agent_definitions: tuple[AgentDefinitionReference, ...] = Field(min_length=1)
+    allow_missing_root_instructions: bool = False
     lane_limits: LaneInputLimits
 
 
