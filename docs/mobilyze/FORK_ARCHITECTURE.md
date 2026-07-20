@@ -24,7 +24,7 @@ Endpoint profiles describe deployment metadata and capabilities; they are not se
 
 Task profiles own the sandbox or image, skills, MCP servers, permissions, credentials, and cleanup. API agents receive MCP capabilities through Open SWE's MCP bridge and task profile, not through Codex-native configuration.
 
-No executor may be introduced implicitly or bypass the approved Agent Definition, endpoint/profile, provider-session, or helper identity that governs it. Direct or unclassified model calls remain prohibited; approved subscription-backed and official provider API access both use `api_model` rather than separate graph or executor kinds.
+No executor may be introduced implicitly or bypass the approved Agent Definition or any applicable endpoint/profile, provider-session, or helper identity that governs it. Direct or unclassified model calls remain prohibited; approved subscription-backed and official provider API access both use `api_model` rather than separate graph or executor kinds.
 
 ## Ownership boundaries
 
@@ -46,8 +46,8 @@ Upstream-owned files may be changed only as declared integration seams. A seam s
 - Keep provider adapters separate. Shared code may own process lifecycle and normalized events, not provider-specific flags or parsers.
 - Implement async-only runtime paths. Do not add parallel sync implementations.
 - Let Open SWE own the agent/tool loop for `api_model`; do not wrap approved API access in a provider-specific Mobilyze loop.
-- Persist opaque provider-generated session IDs instead of requiring caller-generated IDs.
-- Never retry a side-effectful coding run blindly. Classify whether execution started, whether writes occurred, and whether the provider session can resume.
+- For `cli_agent`, persist the opaque provider-generated session ID and resume that exact session. Apply this rule to another approved executor only when its provider explicitly exposes a resumable provider session; otherwise `api_model` and bounded `external_helper` execution do not require provider-session IDs.
+- Never retry a side-effectful coding run blindly. Classify whether execution started, whether writes occurred, and whether an explicitly exposed provider session can resume.
 - Treat sandbox/image selection, skills, MCP configuration, permissions, credentials, cleanup, and provider homes as task-profile inputs, not global host state.
 - Read reviewer skills and policy from a trusted base SHA or administrator-controlled source, never an untrusted PR head.
 - Disable optional model-backed features in Mobilyze mode until an approved Agent Definition selects their executor and named endpoint/profile/helper identities.
