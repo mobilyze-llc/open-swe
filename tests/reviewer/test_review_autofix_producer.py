@@ -1,0 +1,425 @@
+"""Focused contract tests for the review-publish auto-fix producer."""
+
+from __future__ import annotations
+
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from agent.review.findings import Finding, Severity, new_finding
+from agent.review.publish import render_inline_comment_body
+
+_THREAD_ID = "123e4567-e89b-12d3-a456-426614174000"
+_BRANCH = f"open-swe/{_THREAD_ID}-fix-review"
+_TEAM_SETTINGS_KEY = (("team_settings",), "default")
+_CYCLE_KEY = (("autofix_pr_state",), "o/r#7:review_autofix_cycles")
+_PENDING_KEY = (("autofix", _THREAD_ID), "pending_event")
+
+
+class _Item:
+    def __init__(self, value: dict[str, Any]) -> None:
+        self.value = value
+
+
+class _Store:
+    def __init__(self, *, enabled: bool = True, threshold: str = "medium") -> None:
+        self.items: dict[tuple[tuple[str, ...], str], dict[str, Any]] = {
+            _TEAM_SETTINGS_KEY: {
+                "autofix_enabled": enabled,
+                "autofix_severity_threshold": threshold,
+            }
+        }
+        self.puts: list[tuple[tuple[str, ...], str, dict[str, Any]]] = []
+        self.fail_put_namespace: tuple[str, ...] | None = None
+
+    async def aget(self, namespace: tuple[str, ...], key: str) -> _Item | None:
+        value = self.items.get((namespace, key))
+        return _Item(value) if value is not None else None
+
+    async def aput(self, namespace: tuple[str, ...], key: str, value: dict[str, Any]) -> None:
+        if namespace == self.fail_put_namespace:
+            raise RuntimeError("store unavailable")
+        self.items[(namespace, key)] = value
+        self.puts.append((namespace, key, value))
+
+
+def _finding(*, severity: Severity = "high") -> Finding:
+    return new_finding(
+        severity=severity,
+        confidence="high",
+        category="correctness",
+        file="src/foo.py",
+        start_line=10,
+        end_line=10,
+        title="Broken guard",
+        description="boom",
+        suggestion="return early",
+        sha="head-sha",
+        finding_id="finding-1",
+    )
+
+
+def _client() -> MagicMock:
+    client = MagicMock()
+    client.threads.get = AsyncMock(
+        return_value={
+            "metadata": {
+                "source": "linear",
+                "github_login": "octocat",
+                "triggering_user_email": "octocat@example.com",
+                "source_context": {
+                    "linear_issue": {
+                        "linear_project_id": "OSWE",
+                        "linear_issue_number": "56",
+                    }
+                },
+            }
+        }
+    )
+    return client
+
+
+@pytest.mark.parametrize(
+    ("case", "enabled", "threshold", "severity", "repo_enabled", "pr_disabled", "findings"),
+    [
+        ("autofix-disabled", False, "medium", "high", True, False, 1),
+        ("below-threshold", True, "high", "medium", True, False, 1),
+        ("repo-not-enrolled", True, "medium", "high", False, False, 1),
+        ("pr-opted-out", True, "medium", "high", True, True, 1),
+        ("zero-newly-surfaced", True, "medium", "high", True, False, 0),
+    ],
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+async def test_review_autofix_trigger_truth_table_false_cases(
+    case: str,
+    enabled: bool,
+    threshold: str,
+    severity: Severity,
+    repo_enabled: bool,
+    pr_disabled: bool,
+    findings: int,
+) -> None:
+    from agent.tools.publish_review import _maybe_dispatch_review_autofix
+
+    del case
+    store = _Store(enabled=enabled, threshold=threshold)
+    dispatch = AsyncMock()
+    status = AsyncMock()
+    with (
+        patch("agent.tools.publish_review.get_store", return_value=store),
+        patch(
+            "agent.tools.publish_review.is_review_repo_enabled",
+            AsyncMock(return_value=repo_enabled),
+        ),
+        patch(
+            "agent.tools.publish_review.is_pr_autofix_disabled",
+            AsyncMock(return_value=pr_disabled),
+        ),
+        patch("agent.tools.publish_review.dispatch_client", return_value=_client()),
+        patch("agent.tools.publish_review.dispatch_agent_run", dispatch),
+        patch("agent.tools.publish_review.post_autofix_status_check", status),
+    ):
+        await _maybe_dispatch_review_autofix(
+            owner="o",
+            repo="r",
+            pr_number=7,
+            head_sha="head-sha",
+            branch_name=_BRANCH,
+            token="token",
+            surfaced_findings=[_finding(severity=severity)] if findings else [],
+        )
+
+    assert _PENDING_KEY not in store.items
+    assert _CYCLE_KEY not in store.items
+    dispatch.assert_not_awaited()
+    status.assert_not_awaited()
+
+
+async def test_review_autofix_enqueues_exact_event_and_dispatches_minimal_nudge() -> None:
+    from agent.tools.publish_review import _maybe_dispatch_review_autofix
+
+    store = _Store()
+    client = _client()
+    dispatch = AsyncMock(return_value={"run_id": "run-1"})
+    status = AsyncMock(return_value=True)
+    with (
+        patch("agent.tools.publish_review.get_store", return_value=store),
+        patch(
+            "agent.tools.publish_review.is_review_repo_enabled",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "agent.tools.publish_review.is_pr_autofix_disabled",
+            AsyncMock(return_value=False),
+        ),
+        patch("agent.tools.publish_review.dispatch_client", return_value=client),
+        patch("agent.tools.publish_review.dispatch_agent_run", dispatch),
+        patch("agent.tools.publish_review.post_autofix_status_check", status),
+    ):
+        await _maybe_dispatch_review_autofix(
+            owner="o",
+            repo="r",
+            pr_number=7,
+            head_sha="head-sha",
+            branch_name=_BRANCH,
+            token="token",
+            surfaced_findings=[_finding()],
+        )
+
+    assert store.items[_PENDING_KEY] == {
+        "reason": "Open SWE Review surfaced findings for auto-fix.",
+        "details": [
+            "PR: https://github.com/o/r/pull/7",
+            "Head SHA: head-sha",
+            "[HIGH] src/foo.py:10 — Broken guard: boom\nSuggested change:\nreturn early",
+        ],
+    }
+    assert store.items[_CYCLE_KEY] == {"cycle_count": 1}
+    dispatch.assert_awaited_once_with(
+        _THREAD_ID,
+        "Process the pending Open SWE review auto-fix event for this pull request.",
+        {
+            "thread_id": _THREAD_ID,
+            "source": "linear",
+            "repo": {"owner": "o", "name": "r"},
+            "pr_number": 7,
+            "pr_url": "https://github.com/o/r/pull/7",
+            "head_sha": "head-sha",
+            "github_login": "octocat",
+            "user_email": "octocat@example.com",
+            "linear_issue": {
+                "linear_project_id": "OSWE",
+                "linear_issue_number": "56",
+            },
+        },
+        source="review_autofix",
+        client=client,
+    )
+    dispatch_args = dispatch.await_args
+    assert dispatch_args is not None
+    assert "boom" not in dispatch_args.args[1]
+    status.assert_awaited_once()
+    status_args = status.await_args
+    assert status_args is not None
+    assert status_args.kwargs["title"] == "Auto-fix cycle 1 dispatched"
+
+
+async def test_review_autofix_cycle_cap_stops_third_publish_and_survives_opt_out() -> None:
+    from agent.tools.publish_review import _maybe_dispatch_review_autofix
+
+    store = _Store()
+    dispatch = AsyncMock(return_value={"run_id": "run-1"})
+    status = AsyncMock(return_value=True)
+    pr_disabled = AsyncMock(side_effect=[False, False, True, False])
+    with (
+        patch("agent.tools.publish_review.get_store", return_value=store),
+        patch(
+            "agent.tools.publish_review.is_review_repo_enabled",
+            AsyncMock(return_value=True),
+        ),
+        patch("agent.tools.publish_review.is_pr_autofix_disabled", pr_disabled),
+        patch("agent.tools.publish_review.dispatch_client", return_value=_client()),
+        patch("agent.tools.publish_review.dispatch_agent_run", dispatch),
+        patch("agent.tools.publish_review.post_autofix_status_check", status),
+    ):
+        for _ in range(4):
+            await _maybe_dispatch_review_autofix(
+                owner="o",
+                repo="r",
+                pr_number=7,
+                head_sha="head-sha",
+                branch_name=_BRANCH,
+                token="token",
+                surfaced_findings=[_finding()],
+            )
+
+    assert dispatch.await_count == 2
+    assert store.items[_CYCLE_KEY] == {"cycle_count": 2}
+    assert [call.kwargs["title"] for call in status.await_args_list] == [
+        "Auto-fix cycle 1 dispatched",
+        "Auto-fix cycle 2 dispatched",
+        "Auto-fix cycle limit reached",
+    ]
+
+
+@pytest.mark.parametrize("failure", ["thread-resolution", "store-write", "dispatch"])
+async def test_review_autofix_producer_errors_are_neutral_and_do_not_raise(failure: str) -> None:
+    from agent.tools.publish_review import _maybe_dispatch_review_autofix
+
+    store = _Store()
+    if failure == "store-write":
+        store.fail_put_namespace = ("autofix", _THREAD_ID)
+    dispatch = AsyncMock(
+        side_effect=RuntimeError("dispatch unavailable") if failure == "dispatch" else None
+    )
+    status = AsyncMock(return_value=True)
+    with (
+        patch("agent.tools.publish_review.get_store", return_value=store),
+        patch(
+            "agent.tools.publish_review.is_review_repo_enabled",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "agent.tools.publish_review.is_pr_autofix_disabled",
+            AsyncMock(return_value=False),
+        ),
+        patch("agent.tools.publish_review.dispatch_client", return_value=_client()),
+        patch("agent.tools.publish_review.dispatch_agent_run", dispatch),
+        patch("agent.tools.publish_review.post_autofix_status_check", status),
+    ):
+        await _maybe_dispatch_review_autofix(
+            owner="o",
+            repo="r",
+            pr_number=7,
+            head_sha="head-sha",
+            branch_name="open-swe/no-thread-id" if failure == "thread-resolution" else _BRANCH,
+            token="token",
+            surfaced_findings=[_finding()],
+        )
+
+    status.assert_awaited_once()
+    status_args = status.await_args
+    assert status_args is not None
+    assert status_args.kwargs["title"] == "Auto-fix dispatch failed"
+
+
+async def test_publish_review_config_off_preserves_literal_outcome() -> None:
+    from agent.tools.publish_review import _publish_review_async
+
+    finding = _finding()
+    store = _Store(enabled=False)
+    post_review = AsyncMock(return_value={"id": 555})
+    dispatch = AsyncMock()
+    status = AsyncMock()
+    with (
+        patch("agent.tools.publish_review.get_store", return_value=store),
+        patch("agent.tools.publish_review.get_thread_id_from_runtime", return_value="reviewer"),
+        patch(
+            "agent.tools.publish_review.list_findings_async",
+            AsyncMock(return_value=[finding]),
+        ),
+        patch("agent.tools.publish_review.post_pull_request_review", post_review),
+        patch("agent.tools.publish_review.fetch_review_comments", AsyncMock(return_value=[])),
+        patch("agent.tools.publish_review._record_review_publication", AsyncMock()),
+        patch(
+            "agent.tools.publish_review._missing_comment_ids_for_published_findings",
+            return_value=False,
+        ),
+        patch("agent.tools.publish_review._store_thread_ids_on_findings", AsyncMock()),
+        patch(
+            "agent.tools.publish_review._resolve_threads_for_resolved_findings",
+            AsyncMock(return_value=0),
+        ),
+        patch("agent.tools.publish_review.set_reviewer_thread_metadata", AsyncMock()),
+        patch("agent.tools.publish_review._maybe_post_slack_completion_reply", AsyncMock()),
+        patch("agent.tools.publish_review.settle_review_check_run", AsyncMock()),
+        patch("agent.tools.publish_review.dispatch_agent_run", dispatch),
+        patch("agent.tools.publish_review.post_autofix_status_check", status),
+    ):
+        result = await _publish_review_async(
+            owner="o",
+            repo="r",
+            pr_number=7,
+            head_sha="head-sha",
+            token="token",
+            severity_threshold="medium",
+            cap=15,
+            is_re_review=False,
+            branch_name=_BRANCH,
+        )
+
+    assert result == {
+        "success": True,
+        "review_id": 555,
+        "surfaced_count": 1,
+        "hidden_count": 0,
+        "resolved_thread_count": 0,
+    }
+    post_review_args = post_review.await_args
+    assert post_review_args is not None
+    assert (
+        post_review_args.kwargs["head_sha"],
+        post_review_args.kwargs["inline_comments"],
+    ) == (
+        "head-sha",
+        [
+            {
+                "path": "src/foo.py",
+                "line": 10,
+                "side": "RIGHT",
+                "body": render_inline_comment_body(finding),
+            }
+        ],
+    )
+    assert store.puts == []
+    dispatch.assert_not_awaited()
+    status.assert_not_awaited()
+
+
+async def test_publish_review_succeeds_when_autofix_store_write_raises() -> None:
+    from agent.tools.publish_review import _publish_review_async
+
+    finding = _finding()
+    store = _Store()
+    store.fail_put_namespace = ("autofix", _THREAD_ID)
+    status = AsyncMock(return_value=True)
+    with (
+        patch("agent.tools.publish_review.get_store", return_value=store),
+        patch("agent.tools.publish_review.get_thread_id_from_runtime", return_value="reviewer"),
+        patch(
+            "agent.tools.publish_review.list_findings_async",
+            AsyncMock(return_value=[finding]),
+        ),
+        patch(
+            "agent.tools.publish_review.post_pull_request_review",
+            AsyncMock(return_value={"id": 555}),
+        ),
+        patch("agent.tools.publish_review.fetch_review_comments", AsyncMock(return_value=[])),
+        patch("agent.tools.publish_review._record_review_publication", AsyncMock()),
+        patch(
+            "agent.tools.publish_review._missing_comment_ids_for_published_findings",
+            return_value=False,
+        ),
+        patch("agent.tools.publish_review._store_thread_ids_on_findings", AsyncMock()),
+        patch(
+            "agent.tools.publish_review._resolve_threads_for_resolved_findings",
+            AsyncMock(return_value=0),
+        ),
+        patch("agent.tools.publish_review.set_reviewer_thread_metadata", AsyncMock()),
+        patch("agent.tools.publish_review._maybe_post_slack_completion_reply", AsyncMock()),
+        patch("agent.tools.publish_review.settle_review_check_run", AsyncMock()),
+        patch(
+            "agent.tools.publish_review.is_review_repo_enabled",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "agent.tools.publish_review.is_pr_autofix_disabled",
+            AsyncMock(return_value=False),
+        ),
+        patch("agent.tools.publish_review.dispatch_client", return_value=_client()),
+        patch("agent.tools.publish_review.dispatch_agent_run", AsyncMock()),
+        patch("agent.tools.publish_review.post_autofix_status_check", status),
+    ):
+        result = await _publish_review_async(
+            owner="o",
+            repo="r",
+            pr_number=7,
+            head_sha="head-sha",
+            token="token",
+            severity_threshold="medium",
+            cap=15,
+            is_re_review=False,
+            branch_name=_BRANCH,
+        )
+
+    assert result == {
+        "success": True,
+        "review_id": 555,
+        "surfaced_count": 1,
+        "hidden_count": 0,
+        "resolved_thread_count": 0,
+    }
+    status_args = status.await_args
+    assert status_args is not None
+    assert status_args.kwargs["title"] == "Auto-fix dispatch failed"
