@@ -9,9 +9,11 @@ verbatim form martian published.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
+import time
 from typing import Any, Literal, cast
 
 from langgraph_sdk import get_client
@@ -136,6 +138,36 @@ def _build_configurable(inputs: dict[str, Any]) -> dict[str, Any]:
     return configurable
 
 
+def _client_timeout_s() -> float:
+    raw = os.getenv("REVIEWER_EVAL_CLIENT_TIMEOUT_S", "3600")
+    try:
+        return float(raw)
+    except ValueError:
+        return 3600.0
+
+
+async def _settle_run(
+    client: Any, thread_id: str, result: dict[str, Any] | Any
+) -> dict[str, Any] | Any:
+    """Wait out a runs.wait that returned before the run reached a terminal state.
+
+    Either side of the wait long-poll can cap and return the in-flight thread
+    values early; scoring that snapshot records a false-empty publication. Poll
+    the run record until it is terminal, then return the final thread values.
+    """
+    deadline = time.monotonic() + _client_timeout_s()
+    while time.monotonic() < deadline:
+        runs = await client.runs.list(thread_id, limit=1)
+        status = runs[0]["status"] if runs else None
+        if status not in ("pending", "running"):
+            if status is None or not runs:
+                return result
+            state = await client.threads.get_state(thread_id)
+            return state.get("values", result)
+        await asyncio.sleep(15)
+    raise TimeoutError(f"run on thread {thread_id} not terminal after client timeout")
+
+
 async def review_pr(inputs: dict[str, Any]) -> dict[str, Any]:
     """LangSmith target: run the reviewer agent on one PR."""
     repo = inputs.get("repo", "")
@@ -147,7 +179,7 @@ async def review_pr(inputs: dict[str, Any]) -> dict[str, Any]:
         pr_number,
         pr_url,
     )
-    client = get_client(url=get_langgraph_url())
+    client = get_client(url=get_langgraph_url(), timeout=_client_timeout_s())
     thread = await client.threads.create()
     thread_id: str = thread["thread_id"]
     _record_thread_id(thread_id)
@@ -158,6 +190,7 @@ async def review_pr(inputs: dict[str, Any]) -> dict[str, Any]:
             input={"messages": [{"role": "user", "content": _build_user_message(inputs)}]},
             config={"configurable": _build_configurable(inputs)},
         )
+        result = await _settle_run(client, thread_id, result)
         score_mode = get_score_mode()
         publish_completed = True
         if score_mode == "surfaced_findings":
