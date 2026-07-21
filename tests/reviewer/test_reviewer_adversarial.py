@@ -207,6 +207,75 @@ async def test_prepare_renders_definition_prompt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_materializes_diff_without_api_token() -> None:
+    diff = (
+        "diff --git a/example.py b/example.py\n"
+        "--- a/example.py\n"
+        "+++ b/example.py\n"
+        "@@ -1 +1 @@\n"
+        "-old = 1\n"
+        "+new = 2\n"
+    )
+    config = cast(
+        RunnableConfig,
+        {
+            "configurable": {
+                "thread_id": "adversarial-thread",
+                "repo": {"owner": "test-owner", "name": "test-repo"},
+                "pr_number": 7,
+                "base_sha": "a" * 40,
+                "head_sha": "b" * 40,
+                "reviewer_eval": True,
+            }
+        },
+    )
+    middleware = PrepareAdversarialReviewerRunMiddleware(
+        thread_id="adversarial-thread",
+        config=config,
+        use_gateway=False,
+    )
+
+    with (
+        patch(
+            "agent.reviewer_adversarial._ensure_reviewer_sandbox_for_thread",
+            new_callable=AsyncMock,
+            return_value=(MagicMock(), None),
+        ),
+        patch(
+            "agent.reviewer_adversarial.aresolve_sandbox_work_dir",
+            new_callable=AsyncMock,
+            return_value="/workspace",
+        ),
+        patch(
+            "agent.reviewer_adversarial.prepare_review_repo",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "agent.reviewer_adversarial.fetch_pr_diff",
+            new_callable=AsyncMock,
+        ) as fetch_diff,
+        patch(
+            "agent.reviewer_adversarial.materialize_review_diff",
+            new_callable=AsyncMock,
+            return_value=MagicMock(diff_text=diff),
+        ) as materialize,
+        patch(
+            "agent.reviewer_adversarial.fetch_pr_metadata",
+            new_callable=AsyncMock,
+        ) as fetch_metadata,
+    ):
+        updates = await _run_prepare(middleware)
+
+    fetch_diff.assert_not_awaited()
+    fetch_metadata.assert_not_awaited()
+    assert materialize.await_args is not None
+    assert materialize.await_args.kwargs["diff_text"] is None
+    assert updates["diff_text"] == diff
+    assert updates["diff_line_set"] is not None
+
+
+@pytest.mark.asyncio
 async def test_model_key_resolution() -> None:
     requested: list[str] = []
     fake = MagicMock()

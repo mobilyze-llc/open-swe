@@ -172,46 +172,50 @@ class PrepareAdversarialReviewerRunMiddleware(PrepareReviewerRunMiddleware):
             configurable.get("reviewer_eval") is True or configurable.get("eval") is True
         )
 
-        can_fetch_pr = (
+        can_use_api = (
             isinstance(pr_number, int)
             and bool(repo_owner)
             and bool(repo_name)
-            and bool(github_token)
+            and github_token is not None
         )
-        diff_text = ""
-        diff_line_set: dict[str, dict[str, set[int]]] | None = None
-        if can_fetch_pr and github_token is not None and isinstance(pr_number, int):
+        fetched: str | None = None
+        if can_use_api and github_token is not None and isinstance(pr_number, int):
             fetched = await fetch_pr_diff(
                 owner=repo_owner,
                 repo=repo_name,
                 pr_number=pr_number,
                 token=github_token,
             )
-            if fetched is not None:
-                try:
-                    diff_base, diff_head, merge_base = review_diff_range(
-                        base_sha=base_sha,
-                        head_sha=head_sha,
-                        last_reviewed_sha="",
-                        re_review=False,
-                    )
-                    materialized = await materialize_review_diff(
-                        sandbox_backend,
-                        work_dir=f"{work_dir}/{repo_name}",
-                        base_ref=diff_base,
-                        head_ref=diff_head,
-                        merge_base=merge_base,
-                        diff_text=fetched,
-                    )
-                    diff_text = materialized.diff_text
-                except (RuntimeError, ValueError):
-                    logger.exception("Failed to materialize adversarial review diff")
-                    diff_text = fetched
-                diff_line_set = compute_diff_line_set(diff_text) if diff_text else None
+        diff_text = ""
+        diff_line_set: dict[str, dict[str, set[int]]] | None = None
+        if repo_ready and repo_name and base_sha and head_sha:
+            try:
+                diff_base, diff_head, merge_base = review_diff_range(
+                    base_sha=base_sha,
+                    head_sha=head_sha,
+                    last_reviewed_sha="",
+                    re_review=False,
+                )
+                materialized = await materialize_review_diff(
+                    sandbox_backend,
+                    work_dir=f"{work_dir}/{repo_name}",
+                    base_ref=diff_base,
+                    head_ref=diff_head,
+                    merge_base=merge_base,
+                    diff_text=fetched,
+                )
+                diff_text = materialized.diff_text
+            except (RuntimeError, ValueError):
+                logger.exception("Failed to materialize adversarial review diff")
+                diff_text = fetched or ""
+        elif fetched:
+            diff_text = fetched
+        if diff_text:
+            diff_line_set = compute_diff_line_set(diff_text)
 
         pr_title = ""
         pr_body = ""
-        if can_fetch_pr and github_token is not None and isinstance(pr_number, int):
+        if can_use_api and github_token is not None and isinstance(pr_number, int):
             metadata = await fetch_pr_metadata(
                 owner=repo_owner,
                 repo=repo_name,
