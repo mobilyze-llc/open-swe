@@ -8,19 +8,22 @@ from typing import Annotated, Any
 
 from langgraph.config import get_config, get_store
 from langgraph.prebuilt import InjectedState
-from langgraph.store.base import BaseStore
 
 from ..dashboard.agent_overrides import load_profile
-from ..dashboard.autofix_state import AUTOFIX_PR_STATE_NAMESPACE, is_pr_autofix_disabled
+from ..dashboard.autofix_state import (
+    get_pr_autofix_cycle_count,
+    is_pr_autofix_disabled,
+    set_pr_autofix_cycle_count,
+)
 from ..dashboard.enabled_repos import is_review_repo_enabled
 from ..dashboard.team_settings import (
-    TEAM_SETTINGS_KEY,
-    TEAM_SETTINGS_NAMESPACE,
+    get_team_autofix_settings,
     get_team_review_trace_links_enabled,
 )
 from ..dispatch import dispatch_agent_run, dispatch_client
 from ..review.diff import compute_diff_line_set, fetch_pr_diff, is_range_in_diff
 from ..review.findings import (
+    DEFAULT_FINDING_TITLE,
     REVIEW_FINDING_CAP,
     REVIEWER_EVAL_PUBLICATION_KEY,
     SEVERITY_ORDER,
@@ -59,8 +62,8 @@ from ..review.publish import (
 from ..review.reconcile import reconcile_findings_with_review_threads
 from ..utils.dashboard_links import dashboard_review_url, dashboard_thread_url
 from ..utils.github_checks import (
-    _review_check_blocking_enabled,
     post_autofix_status_check,
+    review_check_blocking_enabled,
     review_check_conclusion,
 )
 from ..utils.github_comments import get_thread_id_from_branch
@@ -218,7 +221,8 @@ def _is_reviewer_eval_mode(configurable: dict[str, Any]) -> bool:
 
 
 async def _review_check_finding_count(thread_id: str, newly_posted_count: int) -> int:
-    if not _review_check_blocking_enabled():
+    # Blocking checks count all standing findings; informational checks preserve publish-time count.
+    if not review_check_blocking_enabled():
         return newly_posted_count
     findings = await list_findings_async(thread_id)
     return sum(
@@ -602,152 +606,26 @@ async def _publish_review_async(
     return result
 
 
-def _store_item_value(item: object) -> dict[str, Any]:
-    if isinstance(item, dict):
-        value = item.get("value")
-    else:
-        value = getattr(item, "value", None)
-    return value if isinstance(value, dict) else {}
-
-
-async def _review_autofix_settings(store: BaseStore) -> tuple[bool, Severity]:
-    try:
-        item = await store.aget(tuple(TEAM_SETTINGS_NAMESPACE), TEAM_SETTINGS_KEY)
-    except Exception:
-        logger.debug("Could not read review auto-fix team settings", exc_info=True)
-        return False, "medium"
-    value = _store_item_value(item)
-    threshold = value.get("autofix_severity_threshold")
-    if not isinstance(threshold, str) or threshold not in SEVERITY_ORDER:
-        threshold = "medium"
-    return value.get("autofix_enabled") is True, _cast_severity(threshold)
-
-
-def _review_autofix_cycle_key(owner: str, repo: str, pr_number: int) -> str:
-    return f"{owner.lower()}/{repo.lower()}#{pr_number}:review_autofix_cycles"
-
-
-async def _review_autofix_cycle_count(
-    store: BaseStore, owner: str, repo: str, pr_number: int
-) -> int:
-    item = await store.aget(
-        tuple(AUTOFIX_PR_STATE_NAMESPACE),
-        _review_autofix_cycle_key(owner, repo, pr_number),
-    )
-    count = _store_item_value(item).get("cycle_count", 0)
-    return count if isinstance(count, int) and not isinstance(count, bool) and count >= 0 else 0
-
-
 def _review_autofix_finding_detail(finding: Finding) -> str:
     severity = str(finding.get("severity") or "medium").upper()
     file_path = str(finding.get("file") or "unknown file")
-    start_line = finding.get("start_line")
-    end_line = finding.get("end_line")
-    if isinstance(end_line, int):
-        line_ref = str(end_line) if start_line in {None, end_line} else f"{start_line}-{end_line}"
-        location = f"{file_path}:{line_ref}"
-    else:
-        location = file_path
-    title = finding.get("title")
+    line = finding.get("end_line")
+    title = str(finding.get("title") or DEFAULT_FINDING_TITLE)
     description = str(finding.get("description") or "").strip()
-    if isinstance(title, str) and title.strip() and title.strip() not in description:
-        description = f"{title.strip()}: {description}" if description else title.strip()
-    detail = f"[{severity}] {location} — {description}"
-    suggestion = finding.get("suggestion")
-    if isinstance(suggestion, str) and suggestion.strip():
-        detail += f"\nSuggested change:\n{suggestion.strip()}"
-    return detail
+    return f"[{severity}] {file_path}:{line if isinstance(line, int) else '?'} — {title}: {description}"
 
 
-async def _resolve_review_autofix_thread(client: Any, branch_name: str) -> tuple[str, object]:
-    threads = await client.threads.search(
-        metadata={"branch_name": branch_name},
-        limit=10,
-    )
-    for thread in threads or []:
-        thread_dict = thread if isinstance(thread, dict) else {}
-        metadata = thread_dict.get("metadata")
-        if not isinstance(metadata, dict) or metadata.get("branch_name") != branch_name:
-            continue
-        thread_id = thread_dict.get("thread_id") or thread_dict.get("id")
-        if isinstance(thread_id, str) and thread_id:
-            return thread_id, thread
-
+async def _resolve_review_autofix_thread(
+    client: Any, branch_name: str
+) -> tuple[str, dict[str, Any]]:
     thread_id = get_thread_id_from_branch(branch_name)
-    if not thread_id:
+    if thread_id:
+        return thread_id, await client.threads.get(thread_id)
+    threads = await client.threads.search(metadata={"branch_name": branch_name}, limit=10)
+    if not threads:
         raise RuntimeError(f"could not resolve implementation thread from branch {branch_name!r}")
-    return thread_id, await client.threads.get(thread_id)
-
-
-def _review_autofix_profile_login(thread: object) -> str | None:
-    thread_dict = thread if isinstance(thread, dict) else {}
-    metadata = thread_dict.get("metadata")
-    metadata = metadata if isinstance(metadata, dict) else {}
-    github_login = metadata.get("github_login")
-    return github_login if isinstance(github_login, str) and github_login else None
-
-
-def _review_autofix_dispatch_config(
-    thread: object,
-    *,
-    thread_id: str,
-    owner: str,
-    repo: str,
-    pr_number: int,
-    pr_url: str,
-    head_sha: str,
-) -> dict[str, Any]:
-    thread_dict = thread if isinstance(thread, dict) else {}
-    metadata = thread_dict.get("metadata")
-    metadata = metadata if isinstance(metadata, dict) else {}
-    source = metadata.get("source")
-    if not isinstance(source, str) or not source:
-        raise RuntimeError(f"implementation thread {thread_id} has no source metadata")
-    configurable: dict[str, Any] = {
-        "thread_id": thread_id,
-        "source": source,
-        "repo": {"owner": owner, "name": repo},
-        "pr_number": pr_number,
-        "pr_url": pr_url,
-        "head_sha": head_sha,
-    }
-    github_login = metadata.get("github_login")
-    if isinstance(github_login, str) and github_login:
-        configurable["github_login"] = github_login
-    user_email = metadata.get("triggering_user_email")
-    if isinstance(user_email, str) and user_email:
-        configurable["user_email"] = user_email
-    source_context = metadata.get("source_context")
-    if isinstance(source_context, dict):
-        for key in ("slack_thread", "linear_issue", "github_issue"):
-            value = source_context.get(key)
-            if isinstance(value, dict):
-                configurable[key] = value
-    return configurable
-
-
-async def _post_review_autofix_status(
-    *,
-    owner: str,
-    repo: str,
-    head_sha: str,
-    token: str,
-    title: str,
-    summary: str,
-    thread_id: str | None = None,
-) -> None:
-    try:
-        await post_autofix_status_check(
-            owner=owner,
-            repo=repo,
-            head_sha=head_sha,
-            token=token,
-            title=title,
-            summary=summary,
-            details_url=dashboard_thread_url(thread_id) if thread_id else None,
-        )
-    except Exception:
-        logger.warning("Could not post review auto-fix status check", exc_info=True)
+    thread = threads[0]
+    return thread["thread_id"], thread
 
 
 async def _maybe_dispatch_review_autofix(
@@ -760,16 +638,10 @@ async def _maybe_dispatch_review_autofix(
     token: str,
     surfaced_findings: list[Finding],
 ) -> None:
-    try:
-        store = get_store()
-    except Exception:
-        logger.debug("No store available for review auto-fix settings", exc_info=True)
-        return
-
-    enabled, severity_threshold = await _review_autofix_settings(store)
+    enabled, threshold = await get_team_autofix_settings()
     if not enabled:
         return
-    severity_rank = SEVERITY_ORDER[severity_threshold]
+    severity_rank = SEVERITY_ORDER[_cast_severity(threshold)]
     qualifying_findings = [
         finding
         for finding in surfaced_findings
@@ -787,23 +659,42 @@ async def _maybe_dispatch_review_autofix(
             return
         client = dispatch_client()
         implementation_thread_id, thread = await _resolve_review_autofix_thread(client, branch_name)
-        profile_login = _review_autofix_profile_login(thread)
-        if profile_login:
-            profile = await load_profile(profile_login)
+        metadata = thread["metadata"]
+        github_login = metadata.get("github_login")
+        if github_login:
+            profile = await load_profile(github_login)
             if isinstance(profile, dict) and profile.get("auto_fix_ci") is False:
                 return
-        configurable = _review_autofix_dispatch_config(
-            thread,
-            thread_id=implementation_thread_id,
-            owner=owner,
-            repo=repo,
-            pr_number=pr_number,
-            pr_url=pr_url,
-            head_sha=head_sha,
-        )
-        cycle_count = await _review_autofix_cycle_count(store, owner, repo, pr_number)
+        source = metadata.get("source")
+        if not source:
+            raise RuntimeError(
+                f"implementation thread {implementation_thread_id} has no source metadata"
+            )
+        configurable: dict[str, Any] = {
+            "thread_id": implementation_thread_id,
+            "source": source,
+            "repo": {"owner": owner, "name": repo},
+            "pr_number": pr_number,
+            "pr_url": pr_url,
+            "head_sha": head_sha,
+        }
+        for metadata_key, configurable_key in (
+            ("github_login", "github_login"),
+            ("triggering_user_email", "user_email"),
+        ):
+            value = metadata.get(metadata_key)
+            if value is not None:
+                configurable[configurable_key] = value
+        source_context = metadata.get("source_context")
+        if isinstance(source_context, dict):
+            for key in ("slack_thread", "linear_issue", "github_issue"):
+                value = source_context.get(key)
+                if isinstance(value, dict):
+                    configurable[key] = value
+
+        cycle_count = await get_pr_autofix_cycle_count(owner, repo, pr_number)
         if cycle_count >= _AUTOFIX_MAX_CYCLES:
-            await _post_review_autofix_status(
+            await post_autofix_status_check(
                 owner=owner,
                 repo=repo,
                 head_sha=head_sha,
@@ -813,7 +704,7 @@ async def _maybe_dispatch_review_autofix(
                     "Open SWE did not dispatch another fix run because this pull request "
                     f"has reached the {_AUTOFIX_MAX_CYCLES}-cycle limit."
                 ),
-                thread_id=implementation_thread_id,
+                details_url=dashboard_thread_url(implementation_thread_id),
             )
             return
 
@@ -822,25 +713,27 @@ async def _maybe_dispatch_review_autofix(
             f"Head SHA: {head_sha}",
             *[_review_autofix_finding_detail(finding) for finding in qualifying_findings],
         ]
+        store = get_store()
+        pending_namespace = ("autofix", implementation_thread_id)
         await store.aput(
-            ("autofix", implementation_thread_id),
+            pending_namespace,
             "pending_event",
             {"reason": "Open SWE Review surfaced findings for auto-fix.", "details": details},
         )
         next_cycle = cycle_count + 1
-        await dispatch_agent_run(
-            implementation_thread_id,
-            _AUTOFIX_NUDGE,
-            configurable,
-            source="review_autofix",
-            client=client,
-        )
-        await store.aput(
-            tuple(AUTOFIX_PR_STATE_NAMESPACE),
-            _review_autofix_cycle_key(owner, repo, pr_number),
-            {"cycle_count": next_cycle},
-        )
-        await _post_review_autofix_status(
+        try:
+            await dispatch_agent_run(
+                implementation_thread_id,
+                _AUTOFIX_NUDGE,
+                configurable,
+                source="review_autofix",
+                client=client,
+            )
+        except BaseException:
+            await store.adelete(pending_namespace, "pending_event")
+            raise
+        await set_pr_autofix_cycle_count(owner, repo, pr_number, next_cycle)
+        await post_autofix_status_check(
             owner=owner,
             repo=repo,
             head_sha=head_sha,
@@ -850,18 +743,20 @@ async def _maybe_dispatch_review_autofix(
                 f"Open SWE dispatched auto-fix cycle {next_cycle} of {_AUTOFIX_MAX_CYCLES} "
                 f"for {len(qualifying_findings)} newly surfaced review finding(s)."
             ),
-            thread_id=implementation_thread_id,
+            details_url=dashboard_thread_url(implementation_thread_id),
         )
     except Exception as exc:
         logger.exception("Review auto-fix producer failed for %s/%s#%s", owner, repo, pr_number)
-        await _post_review_autofix_status(
+        await post_autofix_status_check(
             owner=owner,
             repo=repo,
             head_sha=head_sha,
             token=token,
             title="Auto-fix dispatch failed",
-            summary=f"Open SWE could not dispatch auto-fix for {pr_url}: {type(exc).__name__}: {exc}",
-            thread_id=implementation_thread_id,
+            summary=f"Open SWE could not dispatch auto-fix for {pr_url}: {type(exc).__name__}",
+            details_url=(
+                dashboard_thread_url(implementation_thread_id) if implementation_thread_id else None
+            ),
         )
 
 

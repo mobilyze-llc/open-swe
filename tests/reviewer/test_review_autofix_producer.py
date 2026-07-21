@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,36 +16,36 @@ from agent.review.publish import render_inline_comment_body
 _THREAD_ID = "123e4567-e89b-12d3-a456-426614174000"
 _BRANCH = f"open-swe/{_THREAD_ID}-fix-review"
 _SLUG_BRANCH = "open-swe/fix-review"
-_TEAM_SETTINGS_KEY = (("team_settings",), "default")
-_CYCLE_KEY = (("autofix_pr_state",), "o/r#7:review_autofix_cycles")
 _PENDING_KEY = (("autofix", _THREAD_ID), "pending_event")
-
-
-class _Item:
-    def __init__(self, value: dict[str, Any]) -> None:
-        self.value = value
 
 
 class _Store:
     def __init__(self, *, enabled: bool = True, threshold: str = "medium") -> None:
-        self.items: dict[tuple[tuple[str, ...], str], dict[str, Any]] = {
-            _TEAM_SETTINGS_KEY: {
-                "autofix_enabled": enabled,
-                "autofix_severity_threshold": threshold,
-            }
-        }
+        self.enabled = enabled
+        self.threshold = threshold
+        self.cycle_count = 0
+        self.items: dict[tuple[tuple[str, ...], str], dict[str, Any]] = {}
         self.puts: list[tuple[tuple[str, ...], str, dict[str, Any]]] = []
+        self.deleted: list[tuple[tuple[str, ...], str]] = []
         self.fail_put_namespace: tuple[str, ...] | None = None
-
-    async def aget(self, namespace: tuple[str, ...], key: str) -> _Item | None:
-        value = self.items.get((namespace, key))
-        return _Item(value) if value is not None else None
 
     async def aput(self, namespace: tuple[str, ...], key: str, value: dict[str, Any]) -> None:
         if namespace == self.fail_put_namespace:
             raise RuntimeError("store unavailable")
         self.items[(namespace, key)] = value
         self.puts.append((namespace, key, value))
+
+    async def adelete(self, namespace: tuple[str, ...], key: str) -> None:
+        self.items.pop((namespace, key), None)
+        self.deleted.append((namespace, key))
+
+    async def get_cycle_count(self, owner: str, repo: str, pr_number: int) -> int:
+        return self.cycle_count
+
+    async def set_cycle_count(
+        self, owner: str, repo: str, pr_number: int, cycle_count: int
+    ) -> None:
+        self.cycle_count = cycle_count
 
 
 def _finding(*, severity: Severity = "high") -> Finding:
@@ -59,6 +61,16 @@ def _finding(*, severity: Severity = "high") -> Finding:
         suggestion="return early",
         sha="head-sha",
         finding_id="finding-1",
+    )
+
+
+def test_review_autofix_finding_detail_handles_legacy_title() -> None:
+    from agent.tools.publish_review import _review_autofix_finding_detail
+
+    finding = _finding()
+    finding.pop("title")
+    assert _review_autofix_finding_detail(finding) == (
+        "[HIGH] src/foo.py:10 — Code review finding: boom"
     )
 
 
@@ -93,6 +105,25 @@ def _autofix_profile_enabled() -> Iterator[None]:
         yield
 
 
+@contextmanager
+def _autofix_dependencies(store: _Store) -> Iterator[None]:
+    with (
+        patch(
+            "agent.tools.publish_review.get_team_autofix_settings",
+            AsyncMock(return_value=(store.enabled, store.threshold)),
+        ),
+        patch(
+            "agent.tools.publish_review.get_pr_autofix_cycle_count",
+            AsyncMock(side_effect=store.get_cycle_count),
+        ),
+        patch(
+            "agent.tools.publish_review.set_pr_autofix_cycle_count",
+            AsyncMock(side_effect=store.set_cycle_count),
+        ),
+    ):
+        yield
+
+
 @pytest.mark.parametrize(
     ("case", "enabled", "threshold", "severity", "repo_enabled", "pr_disabled", "findings"),
     [
@@ -120,6 +151,7 @@ async def test_review_autofix_trigger_truth_table_false_cases(
     dispatch = AsyncMock()
     status = AsyncMock()
     with (
+        _autofix_dependencies(store),
         patch("agent.tools.publish_review.get_store", return_value=store),
         patch(
             "agent.tools.publish_review.is_review_repo_enabled",
@@ -144,7 +176,7 @@ async def test_review_autofix_trigger_truth_table_false_cases(
         )
 
     assert _PENDING_KEY not in store.items
-    assert _CYCLE_KEY not in store.items
+    assert store.cycle_count == 0
     dispatch.assert_not_awaited()
     status.assert_not_awaited()
 
@@ -157,6 +189,7 @@ async def test_review_autofix_profile_disabled_skips_dispatch() -> None:
     dispatch = AsyncMock()
     load_profile = AsyncMock(return_value={"auto_fix_ci": False})
     with (
+        _autofix_dependencies(store),
         patch("agent.tools.publish_review.get_store", return_value=store),
         patch(
             "agent.tools.publish_review.is_review_repo_enabled",
@@ -182,7 +215,7 @@ async def test_review_autofix_profile_disabled_skips_dispatch() -> None:
 
     load_profile.assert_awaited_once_with("octocat")
     assert _PENDING_KEY not in store.items
-    assert _CYCLE_KEY not in store.items
+    assert store.cycle_count == 0
     dispatch.assert_not_awaited()
 
 
@@ -194,6 +227,7 @@ async def test_review_autofix_slug_branch_enqueues_event_and_dispatches_minimal_
     dispatch = AsyncMock(return_value={"run_id": "run-1"})
     status = AsyncMock(return_value=True)
     with (
+        _autofix_dependencies(store),
         patch("agent.tools.publish_review.get_store", return_value=store),
         patch(
             "agent.tools.publish_review.is_review_repo_enabled",
@@ -227,10 +261,10 @@ async def test_review_autofix_slug_branch_enqueues_event_and_dispatches_minimal_
         "details": [
             "PR: https://github.com/o/r/pull/7",
             "Head SHA: head-sha",
-            "[HIGH] src/foo.py:10 — Broken guard: boom\nSuggested change:\nreturn early",
+            "[HIGH] src/foo.py:10 — Broken guard: boom",
         ],
     }
-    assert store.items[_CYCLE_KEY] == {"cycle_count": 1}
+    assert store.cycle_count == 1
     dispatch.assert_awaited_once_with(
         _THREAD_ID,
         "Process the pending Open SWE review auto-fix event for this pull request.",
@@ -268,6 +302,7 @@ async def test_review_autofix_cycle_cap_stops_third_publish_and_survives_opt_out
     status = AsyncMock(return_value=True)
     pr_disabled = AsyncMock(side_effect=[False, False, True, False])
     with (
+        _autofix_dependencies(store),
         patch("agent.tools.publish_review.get_store", return_value=store),
         patch(
             "agent.tools.publish_review.is_review_repo_enabled",
@@ -290,7 +325,7 @@ async def test_review_autofix_cycle_cap_stops_third_publish_and_survives_opt_out
             )
 
     assert dispatch.await_count == 2
-    assert store.items[_CYCLE_KEY] == {"cycle_count": 2}
+    assert store.cycle_count == 2
     assert [call.kwargs["title"] for call in status.await_args_list] == [
         "Auto-fix cycle 1 dispatched",
         "Auto-fix cycle 2 dispatched",
@@ -298,21 +333,18 @@ async def test_review_autofix_cycle_cap_stops_third_publish_and_survives_opt_out
     ]
 
 
-@pytest.mark.parametrize("failure", ["thread-resolution", "store-write", "dispatch"])
+@pytest.mark.parametrize("failure", ["thread-resolution", "store-write"])
 async def test_review_autofix_producer_errors_are_neutral_and_do_not_raise(failure: str) -> None:
     from agent.tools.publish_review import _maybe_dispatch_review_autofix
 
     store = _Store()
     if failure == "store-write":
         store.fail_put_namespace = ("autofix", _THREAD_ID)
-    if failure == "dispatch":
-        store.items[_CYCLE_KEY] = {"cycle_count": 1}
-    dispatch = AsyncMock(
-        side_effect=RuntimeError("dispatch unavailable") if failure == "dispatch" else None
-    )
+    dispatch = AsyncMock()
     status = AsyncMock(return_value=True)
     client = _client(search_result=failure != "thread-resolution")
     with (
+        _autofix_dependencies(store),
         patch("agent.tools.publish_review.get_store", return_value=store),
         patch(
             "agent.tools.publish_review.is_review_repo_enabled",
@@ -340,8 +372,91 @@ async def test_review_autofix_producer_errors_are_neutral_and_do_not_raise(failu
     status_args = status.await_args
     assert status_args is not None
     assert status_args.kwargs["title"] == "Auto-fix dispatch failed"
-    if failure == "dispatch":
-        assert store.items[_CYCLE_KEY] == {"cycle_count": 1}
+
+
+async def test_review_autofix_dispatch_failure_clears_pending_event() -> None:
+    from agent.tools.publish_review import _maybe_dispatch_review_autofix
+
+    store = _Store()
+    store.cycle_count = 1
+    status = AsyncMock(return_value=True)
+    with (
+        _autofix_dependencies(store),
+        patch("agent.tools.publish_review.get_store", return_value=store),
+        patch(
+            "agent.tools.publish_review.is_review_repo_enabled",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "agent.tools.publish_review.is_pr_autofix_disabled",
+            AsyncMock(return_value=False),
+        ),
+        patch("agent.tools.publish_review.dispatch_client", return_value=_client()),
+        patch(
+            "agent.tools.publish_review.dispatch_agent_run",
+            AsyncMock(side_effect=RuntimeError("dispatch unavailable")),
+        ),
+        patch("agent.tools.publish_review.post_autofix_status_check", status),
+    ):
+        await _maybe_dispatch_review_autofix(
+            owner="o",
+            repo="r",
+            pr_number=7,
+            head_sha="head-sha",
+            branch_name=_BRANCH,
+            token="token",
+            surfaced_findings=[_finding()],
+        )
+
+    assert _PENDING_KEY not in store.items
+    assert store.deleted == [_PENDING_KEY]
+    assert store.cycle_count == 1
+    status.assert_awaited_once()
+    status_args = status.await_args
+    assert status_args is not None
+    assert status_args.kwargs["summary"] == (
+        "Open SWE could not dispatch auto-fix for https://github.com/o/r/pull/7: RuntimeError"
+    )
+
+
+async def test_review_autofix_dispatch_cancellation_clears_pending_event() -> None:
+    from agent.tools.publish_review import _maybe_dispatch_review_autofix
+
+    store = _Store()
+    status = AsyncMock(return_value=True)
+    with (
+        _autofix_dependencies(store),
+        patch("agent.tools.publish_review.get_store", return_value=store),
+        patch(
+            "agent.tools.publish_review.is_review_repo_enabled",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "agent.tools.publish_review.is_pr_autofix_disabled",
+            AsyncMock(return_value=False),
+        ),
+        patch("agent.tools.publish_review.dispatch_client", return_value=_client()),
+        patch(
+            "agent.tools.publish_review.dispatch_agent_run",
+            AsyncMock(side_effect=asyncio.CancelledError),
+        ),
+        patch("agent.tools.publish_review.post_autofix_status_check", status),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await _maybe_dispatch_review_autofix(
+            owner="o",
+            repo="r",
+            pr_number=7,
+            head_sha="head-sha",
+            branch_name=_BRANCH,
+            token="token",
+            surfaced_findings=[_finding()],
+        )
+
+    assert _PENDING_KEY not in store.items
+    assert store.deleted == [_PENDING_KEY]
+    assert store.cycle_count == 0
+    status.assert_not_awaited()
 
 
 async def test_publish_review_config_off_preserves_literal_outcome() -> None:
@@ -353,6 +468,7 @@ async def test_publish_review_config_off_preserves_literal_outcome() -> None:
     dispatch = AsyncMock()
     status = AsyncMock()
     with (
+        _autofix_dependencies(store),
         patch("agent.tools.publish_review.get_store", return_value=store),
         patch("agent.tools.publish_review.get_thread_id_from_runtime", return_value="reviewer"),
         patch(
@@ -425,6 +541,7 @@ async def test_publish_review_succeeds_when_autofix_store_write_raises() -> None
     store.fail_put_namespace = ("autofix", _THREAD_ID)
     status = AsyncMock(return_value=True)
     with (
+        _autofix_dependencies(store),
         patch("agent.tools.publish_review.get_store", return_value=store),
         patch("agent.tools.publish_review.get_thread_id_from_runtime", return_value="reviewer"),
         patch(
