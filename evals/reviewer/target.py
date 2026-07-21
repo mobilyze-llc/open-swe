@@ -165,7 +165,7 @@ async def _settle_run(
         if status == "success":
             state = await client.threads.get_state(thread_id)
             return state.get("values", result)
-        if status not in ("pending", "running"):
+        if status is not None and status not in ("pending", "running"):
             raise RuntimeError(f"reviewer run finished with status {status!r} on {thread_id}")
         await asyncio.sleep(15)
     raise TimeoutError(f"run on thread {thread_id} not terminal after client timeout")
