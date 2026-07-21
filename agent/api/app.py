@@ -18,11 +18,13 @@ from .health import router as health_router
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    from ..tools.schedule_thread_wakeup import _purge_expired_wakeups_best_effort
     from ..utils.model import close_cached_models, validate_local_dev_llm_config
     from ..utils.sandbox import validate_sandbox_startup_config
 
     validate_sandbox_startup_config()
     validate_local_dev_llm_config()
+    await _purge_expired_wakeups_best_effort()
     try:
         yield
     finally:

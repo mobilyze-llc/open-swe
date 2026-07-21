@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 _AGENT_ASSISTANT_ID = "agent"
 _MIN_DELAY_SECONDS = 60
 _MAX_DELAY_SECONDS = 86_400
-_END_TIME_PADDING_SECONDS = 90
+_WAKEUP_EXPIRY_GRACE_SECONDS = 90
 
 _WAKEUP_KIND = "thread_wakeup"
 _PURGE_PAGE_SIZE = 100
@@ -60,11 +60,11 @@ def _parse_iso(value: Any) -> datetime | None:
 
 
 async def find_expired_wakeup_cron_ids(client: Any, *, now: datetime) -> list[str]:
-    """Return the ids of ``thread_wakeup`` crons whose ``end_time`` has passed.
+    """Return ids of ``thread_wakeup`` crons whose metadata expiry has passed.
 
     Conservative: matches solely on ``metadata.kind == "thread_wakeup"`` AND a
-    past ``end_time``, so analyzer/dashboard crons are never selected. Paginates
-    fully before returning so the result is stable to delete afterwards.
+    past ``metadata.expires_at``, so analyzer/dashboard crons are never selected.
+    Paginates fully before returning so the result is stable to delete afterwards.
     """
     expired_ids: list[str] = []
     offset = 0
@@ -79,9 +79,12 @@ async def find_expired_wakeup_cron_ids(client: Any, *, now: datetime) -> list[st
         for cron in page:
             if not isinstance(cron, dict):
                 continue
-            end_time = _parse_iso(cron.get("end_time"))
+            metadata = cron.get("metadata")
+            expires_at = (
+                _parse_iso(metadata.get("expires_at")) if isinstance(metadata, dict) else None
+            )
             cron_id = cron.get("cron_id")
-            if end_time is not None and end_time < now and isinstance(cron_id, str) and cron_id:
+            if expires_at is not None and expires_at < now and isinstance(cron_id, str) and cron_id:
                 expired_ids.append(cron_id)
         if len(page) < _PURGE_PAGE_SIZE:
             break
@@ -90,11 +93,11 @@ async def find_expired_wakeup_cron_ids(client: Any, *, now: datetime) -> list[st
 
 
 async def purge_expired_wakeup_crons(client: Any, *, now: datetime) -> int:
-    """Delete ``thread_wakeup`` crons whose ``end_time`` has already passed.
+    """Delete ``thread_wakeup`` crons whose metadata expiry has passed.
 
-    Each wakeup is a thread-bound cron with an ``end_time`` (~90s past its fire)
-    that stops it re-firing, but the cron row itself is never removed, so dead
-    rows accumulate. This deletes only those dead rows. Returns the count deleted.
+    Each wakeup stores an expiry (~90s past its fire) in metadata so the cron can
+    be reaped without sending ``end_time``. This deletes only those expired rows.
+    Returns the count deleted.
     """
     expired_ids = await find_expired_wakeup_cron_ids(client, now=now)
     deleted = 0
@@ -124,19 +127,20 @@ async def _create_wakeup_cron(
 ) -> dict[str, Any]:
     client = get_client(url=langgraph_url())
     schedule = _build_one_shot_cron(fire_time)
-    end_time = fire_time + timedelta(seconds=_END_TIME_PADDING_SECONDS)
+    expires_at = fire_time + timedelta(seconds=_WAKEUP_EXPIRY_GRACE_SECONDS)
     run_config: Config = {"configurable": configurable}
+    timestamped_prompt = f"[scheduled wakeup for {fire_time.isoformat()}] {prompt}"
     cron = await client.crons.create_for_thread(
         thread_id,
         _AGENT_ASSISTANT_ID,
         schedule=schedule,
-        input={"messages": [{"role": "user", "content": prompt}]},
+        input={"messages": [{"role": "user", "content": timestamped_prompt}]},
         config=run_config,
-        end_time=end_time,
         timezone="UTC",
         metadata={
             "kind": "thread_wakeup",
             "thread_id": thread_id,
+            "expires_at": expires_at.isoformat(),
         },
     )
     cron_id = cron.get("cron_id") if isinstance(cron, dict) else getattr(cron, "cron_id", None)
@@ -155,6 +159,12 @@ async def schedule_thread_wakeup(delay_minutes: int, prompt: str | None = None) 
     waiting for CI to finish, a deploy to complete, or an external process
     to settle. The current thread will be re-invoked with the given prompt
     (or a default wakeup message) after the specified delay.
+
+    ``end_time`` is intentionally omitted: the in-memory runtime stores the SDK's
+    ISO string without coercion, so ``langgraph_runtime_inmem/ops.py:Crons.next``
+    raises while comparing it to a datetime and dead-loops the scheduler.
+    An annual re-fire requires zero restarts and zero new wakeups for a full year,
+    and self-identifies through the scheduled timestamp prepended to its prompt.
 
     Args:
         delay_minutes: How many minutes from now to wait before re-triggering.
