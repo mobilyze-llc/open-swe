@@ -26,6 +26,7 @@ from ..review.findings import (
     DEFAULT_FINDING_TITLE,
     REVIEW_FINDING_CAP,
     REVIEWER_EVAL_PUBLICATION_KEY,
+    REVIEWER_THREAD_KIND,
     SEVERITY_ORDER,
     Finding,
     ReviewerThreadMissingError,
@@ -615,17 +616,49 @@ def _review_autofix_finding_detail(finding: Finding) -> str:
     return f"[{severity}] {file_path}:{line if isinstance(line, int) else '?'} — {title}: {description}"
 
 
+def _thread_matches_review_pr(
+    thread: Mapping[str, Any], owner: str, repo: str, branch_name: str
+) -> bool:
+    """Reject threads that did not produce this PR's branch.
+
+    Agent thread UUIDs are embedded in branch names, and branch names are
+    author-controlled, so the UUID alone must never select a dispatch target:
+    the resolved thread's own persisted metadata has to point back at the same
+    branch (and repository, when the thread recorded one).
+    """
+    metadata = thread.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return False
+    if metadata.get("kind") == REVIEWER_THREAD_KIND:
+        return False
+    if metadata.get("branch_name") != branch_name:
+        return False
+    repo_config = metadata.get("repo")
+    if isinstance(repo_config, Mapping) and (
+        str(repo_config.get("owner", "")).lower() != owner.lower()
+        or str(repo_config.get("name", "")).lower() != repo.lower()
+    ):
+        return False
+    return True
+
+
 async def _resolve_review_autofix_thread(
-    client: Any, branch_name: str
+    client: Any, owner: str, repo: str, branch_name: str
 ) -> tuple[str, dict[str, Any]]:
     thread_id = get_thread_id_from_branch(branch_name)
     if thread_id:
-        return thread_id, await client.threads.get(thread_id)
+        thread = await client.threads.get(thread_id)
+        if not _thread_matches_review_pr(thread, owner, repo, branch_name):
+            raise RuntimeError(
+                f"thread {thread_id} does not match {owner}/{repo} branch {branch_name!r}; "
+                "refusing auto-fix dispatch"
+            )
+        return thread_id, thread
     threads = await client.threads.search(metadata={"branch_name": branch_name}, limit=10)
-    if not threads:
-        raise RuntimeError(f"could not resolve implementation thread from branch {branch_name!r}")
-    thread = threads[0]
-    return thread["thread_id"], thread
+    for thread in threads:
+        if _thread_matches_review_pr(thread, owner, repo, branch_name):
+            return thread["thread_id"], thread
+    raise RuntimeError(f"could not resolve implementation thread from branch {branch_name!r}")
 
 
 async def _maybe_dispatch_review_autofix(
@@ -658,7 +691,9 @@ async def _maybe_dispatch_review_autofix(
         if await is_pr_autofix_disabled(owner, repo, pr_number):
             return
         client = dispatch_client()
-        implementation_thread_id, thread = await _resolve_review_autofix_thread(client, branch_name)
+        implementation_thread_id, thread = await _resolve_review_autofix_thread(
+            client, owner, repo, branch_name
+        )
         metadata = thread["metadata"]
         github_login = metadata.get("github_login")
         if github_login:
@@ -733,6 +768,11 @@ async def _maybe_dispatch_review_autofix(
             # Accepted runs may outlive cancellation; pending_event is best-effort PR context.
             await store.adelete(pending_namespace, "pending_event")
             raise
+        # Deliberate ordering: count the cycle only after dispatch succeeds, so a
+        # transient dispatch failure never burns the small cycle budget. The
+        # opposite race (dispatch accepted, count write fails) at worst allows one
+        # extra cycle, and while the store is down later publishes fail closed on
+        # the cycle read anyway.
         await set_pr_autofix_cycle_count(owner, repo, pr_number, next_cycle)
         await post_autofix_status_check(
             owner=owner,

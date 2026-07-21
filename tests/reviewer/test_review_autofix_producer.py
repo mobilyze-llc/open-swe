@@ -418,6 +418,117 @@ async def test_review_autofix_cycle_read_failure_skips_dispatch() -> None:
     assert status_args.kwargs["summary"].endswith(": RuntimeError")
 
 
+def test_thread_match_rejects_forged_and_foreign_threads() -> None:
+    from agent.tools.publish_review import _thread_matches_review_pr
+
+    matching = {"metadata": {"branch_name": _BRANCH, "source": "linear"}}
+    assert _thread_matches_review_pr(matching, "o", "r", _BRANCH)
+
+    wrong_branch = {"metadata": {"branch_name": "open-swe/other", "source": "linear"}}
+    assert not _thread_matches_review_pr(wrong_branch, "o", "r", _BRANCH)
+
+    reviewer = {"metadata": {"branch_name": _BRANCH, "kind": "reviewer"}}
+    assert not _thread_matches_review_pr(reviewer, "o", "r", _BRANCH)
+
+    foreign_repo = {
+        "metadata": {"branch_name": _BRANCH, "repo": {"owner": "other", "name": "repo"}}
+    }
+    assert not _thread_matches_review_pr(foreign_repo, "o", "r", _BRANCH)
+
+    same_repo = {"metadata": {"branch_name": _BRANCH, "repo": {"owner": "O", "name": "R"}}}
+    assert _thread_matches_review_pr(same_repo, "o", "r", _BRANCH)
+
+    assert not _thread_matches_review_pr({"metadata": None}, "o", "r", _BRANCH)
+
+
+async def test_review_autofix_rejects_thread_that_does_not_match_branch() -> None:
+    from agent.tools.publish_review import _maybe_dispatch_review_autofix
+
+    # The PR branch embeds a valid thread UUID, but that thread's own metadata
+    # names a different branch: a forged branch must not select a dispatch target.
+    dispatch = AsyncMock()
+    status = AsyncMock(return_value=True)
+    with (
+        patch(
+            "agent.tools.publish_review.get_team_autofix_settings",
+            AsyncMock(return_value=(True, "medium")),
+        ),
+        patch(
+            "agent.tools.publish_review.is_review_repo_enabled",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "agent.tools.publish_review.is_pr_autofix_disabled",
+            AsyncMock(return_value=False),
+        ),
+        patch(
+            "agent.tools.publish_review.dispatch_client",
+            return_value=_client(branch_name="open-swe/some-other-branch"),
+        ),
+        patch(
+            "agent.tools.publish_review.get_pr_autofix_cycle_count",
+            AsyncMock(return_value=0),
+        ),
+        patch("agent.tools.publish_review.dispatch_agent_run", dispatch),
+        patch("agent.tools.publish_review.post_autofix_status_check", status),
+    ):
+        await _maybe_dispatch_review_autofix(
+            owner="o",
+            repo="r",
+            pr_number=7,
+            head_sha="head-sha",
+            branch_name=_BRANCH,
+            token="token",
+            surfaced_findings=[_finding()],
+        )
+
+    dispatch.assert_not_awaited()
+    status.assert_awaited_once()
+    status_args = status.await_args
+    assert status_args is not None
+    assert status_args.kwargs["title"] == "Auto-fix dispatch failed"
+
+
+async def test_review_autofix_optout_read_failure_skips_dispatch() -> None:
+    from agent.tools.publish_review import _maybe_dispatch_review_autofix
+
+    dispatch = AsyncMock()
+    status = AsyncMock(return_value=True)
+    with (
+        patch(
+            "agent.tools.publish_review.get_team_autofix_settings",
+            AsyncMock(return_value=(True, "medium")),
+        ),
+        patch(
+            "agent.tools.publish_review.is_review_repo_enabled",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "agent.tools.publish_review.is_pr_autofix_disabled",
+            AsyncMock(side_effect=RuntimeError("store unavailable")),
+        ),
+        patch("agent.tools.publish_review.dispatch_client", return_value=_client()),
+        patch("agent.tools.publish_review.dispatch_agent_run", dispatch),
+        patch("agent.tools.publish_review.post_autofix_status_check", status),
+    ):
+        await _maybe_dispatch_review_autofix(
+            owner="o",
+            repo="r",
+            pr_number=7,
+            head_sha="head-sha",
+            branch_name=_BRANCH,
+            token="token",
+            surfaced_findings=[_finding()],
+        )
+
+    # An unreadable opt-out record must abort dispatch, not read as opted-in.
+    dispatch.assert_not_awaited()
+    status.assert_awaited_once()
+    status_args = status.await_args
+    assert status_args is not None
+    assert status_args.kwargs["title"] == "Auto-fix dispatch failed"
+
+
 async def test_review_autofix_dispatch_failure_clears_pending_event() -> None:
     from agent.tools.publish_review import _maybe_dispatch_review_autofix
 
