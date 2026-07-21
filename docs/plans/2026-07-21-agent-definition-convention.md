@@ -1,8 +1,8 @@
-# Decision: agent definitions as files — the additive `agents/` convention
+# Decision: agent definitions as files — the additive agent-directory convention
 
-- **Status:** Accepted (Eric Litman, 2026-07-21)
+- **Status:** Accepted rev 2 (Eric Litman, 2026-07-21; revised same-day after a decorrelated Codex adversarial review returned NOT SHIPPABLE on rev 1 — disposition appendix at bottom; rev 1 is commit `c04f28419`)
 - **Ticket:** OSWE-33 (re-contracted; this doc supersedes the 2026-07-19 "Agent Definition v1 / execution plans" spec preserved in that issue's history)
-- **Kind:** point-in-time decision record. Frozen; changes require a new dated doc.
+- **Kind:** point-in-time decision record. Frozen after rev 2; further changes require a new dated doc.
 
 ## Context
 
@@ -43,27 +43,40 @@ Inventory that shaped the decision (all upstream-owned):
 
 ### Boundary
 
-1. **Repo-root `agents/` holds Mobilyze-defined agents only.** The boundary of the
-   convention is the fork seam. Upstream's three graphs (main, reviewer, analyzer)
-   are never restructured in the fork; changes to them travel via upstream PRs
-   exclusively. The implementation diff against upstream is additive files plus the
-   permitted seam touches (`langgraph.json` registration, webhook routing).
-2. `agents/<name>/` pairs by name with the existing `evals/<name>/` harness
-   convention (`evals/reviewer/` predates this decision).
+1. **`agent/resources/agents/` holds Mobilyze-defined agents only.** The boundary
+   of the convention is the fork seam. Upstream's graphs are never restructured in
+   the fork; changes to them travel via upstream PRs exclusively. The
+   implementation diff against the fork base is additive files plus the permitted
+   seam touches (`langgraph.json` registration, webhook routing).
+
+   *Rev 2 note — why packaged, not repo-root:* `langgraph.json` declares
+   `dependencies: ["."]`, so the runtime pip-installs the project, and the wheel
+   packages only `agent/` (`pyproject.toml` `packages = ["agent"]`). A repo-root
+   `agents/` directory exists in source checkouts but not in the installed
+   package — definitions would silently vanish in exactly the deployment path
+   that matters. `agent/resources/` is already packaged and already loaded via
+   `importlib.resources` (the `default_prompt.md` idiom), so definitions live at
+   `agent/resources/agents/<name>/`.
+2. `agent/resources/agents/<name>/` pairs by name with the existing
+   `evals/<name>/` harness convention (`evals/reviewer/` predates this decision).
 
 ### Shape
 
 3. **An agent is a named directory; `agent.md` is required.** One form only — no
-   bare-file variant. Frontmatter is a closed set:
+   bare-file variant. Frontmatter is a closed set of exactly two keys:
    - `description` — purpose; for subagents this is the delegation signal used by
      the `task` tool.
    - `tools` — names resolved against the curated registry
-     (`agent/tools/__init__.py`). Unknown names are load errors.
-   - `mcp` — server → tool-allowlist references resolved against a small
-     name → loader registry over the existing `agent/integrations` idiom.
-   - `env` — CLI-lane agents only: environment variable **names**, never values.
+     (`agent/tools/__init__.py`). Unknown names are load errors. **Omission means
+     `tools: []`, never parent inheritance** — deepagents treats an absent
+     `SubAgent.tools` key as "inherit the parent's tools," which would hand
+     reviewer personas `add_finding`/`publish_review`/HTTP and destructive Linear
+     tools. The factory translates omission to an empty list and enforces a
+     per-graph capability ceiling; finding-mutation and publication tools are
+     reserved to the parent. Prompt text is not an authorization boundary.
 
    Body = the system prompt template (existing `str.format` placeholders allowed).
+   (Rev 2: the `mcp` and `env` keys were cut from v1 — see Deferred below.)
 4. **`subagents/*.md` hydrate deepagents `SubAgent` specs.** The directory listing
    is the roster — no roster field in `agent.md` (no double-entry bookkeeping).
 5. **`shared.md` is the single composition slot.** When present it is prepended to
@@ -71,9 +84,19 @@ Inventory that shaped the decision (all upstream-owned):
    duplicated content (e.g. a review-findings bar) drifts, and drift across
    personas is what makes multi-agent output incoherent. There is **no other
    composition mechanism**: no named partials, no includes syntax, no conditionals.
-6. **Three prompt layers, two of which already exist:** fleet voice via the harness
-   profile base (upstream, untouched) → workflow-scoped `shared.md` (this
-   convention) → per-file body.
+6. **Prompt assembly is owned by the factory — the fleet base is NOT inherited for
+   free.** Rev 1 claimed the harness-profile base layers under persona bodies
+   automatically. It does the opposite: deepagents' `_apply_profile_prompt` runs
+   uniformly over declarative subagents with `base_prompt=spec["system_prompt"]`,
+   and a registered `base_system_prompt` **replaces** that prompt outright — under
+   the Open SWE per-provider profiles, every file-defined persona would silently
+   become `OPEN_SWE_SHARED_BASE`. The convention therefore requires: the
+   loader/factory assembles the full subagent prompt itself (fleet base +
+   `shared.md` + persona body) and guarantees — with a test that inspects the
+   effective system prompt — that persona text actually reaches the model under
+   the registered profiles. How (unregistered model spec, `CompiledSubAgent`, or
+   equivalent) is an implementation choice; the assembled-prompt-reaches-the-model
+   property is the requirement.
 
 ### Exclusions (deliberate)
 
@@ -81,11 +104,32 @@ Inventory that shaped the decision (all upstream-owned):
    chain. Keeping model out of definitions is what allows A/B-ing models against a
    fixed prompt artifact — prompt/model orthogonality is a goal, not an accident.
    (Eve pins the model in `agent.ts`; this stack is deliberately ahead of Eve here.)
+   Precision (rev 2): "the runtime chain" is per-graph-family, and the reviewer's
+   differs from the main agent's. The main agent resolves per-thread config →
+   dashboard profile (`load_profile` by GitHub login) → team default; the reviewer
+   family resolves `reviewer_model_id`/`reviewer_reasoning_effort` (and separately
+   `reviewer_subagent_model_id`/`reviewer_subagent_reasoning_effort`) → team
+   reviewer default pair — **no profile step**. The new graph follows the reviewer
+   family's chain with its own configurable keys, named in the contract, so parent
+   and persona models stay independently overridable for evals.
 8. **No `name` field.** The directory name is the identity.
 9. **No secrets or connection config in files.** Credentials remain encrypted in
    team settings / per-user OAuth; MCP transports, headers, and timeouts remain in
-   the loader modules. Frontmatter says *may use*; runtime decides *available*.
-10. **The loader parses and validates only.** Closed schema, unknown fields
+   the loader modules.
+10. **Deferred out of v1 (rev 2): the `mcp` and `env` frontmatter keys.** Neither
+    has a consumer — the adversarial reviewer uses no MCP tools, and `env` exists
+    only for the not-yet-contracted CLI lane — so v1 shipping them would be unused
+    extension surface. The review also surfaced hazards the future design must
+    answer before the `mcp` key returns: per-server tool names are discovered
+    asynchronously at connect time (a static allowlist can't be load-validated),
+    existing loaders degrade to empty on failure, and credential scope differs per
+    server (Notion is user-bound via `profile_login`, Datadog uses team
+    credentials, Corridor is deployment-global) — "configured" must not be
+    conflated with "authorized," or a malicious PR under review could reach team-
+    or user-scoped data tools. The declaration-vs-materialization split
+    (frontmatter says *may use*; runtime decides *available*) remains the intended
+    shape when a consumer arrives.
+11. **The loader parses and validates only.** Closed schema, unknown fields
     rejected, all references validated, deterministic error reporting, import/
     factory-time loading. It never imports code from definition directories, never
     makes runtime decisions, and there is no hot reload — releases are immutable;
@@ -96,7 +140,7 @@ Inventory that shaped the decision (all upstream-owned):
 | Eve | Verdict | Why |
 |---|---|---|
 | `subagents/` | **Adopt** | Core of this convention. |
-| `connections/` | **Adopt declaratively** | `mcp:` references over the existing loader idiom; no OpenAPI→tools generation. |
+| `connections/` | **Defer** (rev 2) | Intended shape: `mcp:` references over the existing loader idiom — but no v1 consumer, and open hazards (async tool discovery, credential-scope divergence); no OpenAPI→tools generation ever. |
 | `hooks/` | Decline | This is langchain middleware — ordered, behavioral, code. Hooks-as-data would import code from data dirs and make agent self-modification unreviewable. Ceiling if ever needed: deepagents `excluded_middleware` by name. |
 | `sandbox/` | Decline | `ensure_sandbox_for_thread` is a stronger existing version; no per-agent knob has a consumer. |
 | `schedules/` | Decline | Scheduling here is runtime data (per-repo analyzer crons, `schedule_thread_wakeup`), not static agent facts. |
@@ -114,24 +158,27 @@ superseded execution-plan compiler.
 
 ## First consumer: adversarial reviewer
 
-A **new** graph (`agents/reviewer-adversarial/` name TBD at implementation) beside
-the stock upstream reviewer — persona subagents (e.g. security, correctness) plus
-an adjudicator, publishing through the existing findings tools. Two topologies are
-both expressible in the layout, and choosing between them is the first eval
-experiment the structure exists to make cheap:
+A **new** graph (`agent/resources/agents/reviewer-adversarial/`, name TBD at
+implementation) beside the stock upstream reviewer — persona subagents (e.g.
+security, correctness) returning candidates, the **parent acting as adjudicator**
+(cross-examining candidates against the diff before recording), publishing
+through the existing findings tools.
 
-- **Parent-as-adjudicator** — personas return candidates; the parent (already
-  holding candidates + diff) cross-examines and publishes. No extra pass, but
-  anchored on finder reasoning.
-- **Adjudicator-as-subagent** — a fresh-context refuter per candidate batch.
-  Decorrelated, higher precision expected; each subagent pass is a cold
-  ~0.7–1.6M-real-token context establishment (canary-2 baseline), and pass count
-  is the budget lever.
+*Rev 2 scope cut:* rev 1 shipped both adjudicator topologies and chose "by eval,"
+but defined no decision rule — no precision threshold, no budget ceiling, no
+owner — and the existing eval target reports findings and judge scores, not
+subagent pass counts or real-token spend, so identical results could justify
+opposite topologies. v1 therefore ships **parent-as-adjudicator only** (it
+matches the stock reviewer's existing parent-validation flow). The decorrelated
+fresh-context-refuter variant is preserved as a follow-up experiment ticket
+(sub-issue of OSWE-33) whose contract must state the decision rule up front:
+metrics (judge precision on `evals/reviewer/` goldens, pass count, real-token
+cost vs the canary-2 baseline of ~0.7–1.6M real tokens per cold subagent pass),
+the comparison threshold, and Eric as decision owner. Proving the file
+convention does not require implementing both orchestrations.
 
-Switching topologies is adding/removing `subagents/adjudicator.md` plus a
-paragraph in `agent.md`; `evals/reviewer/` (goldens + judge) measures the
-precision delta. The persona roster being visible in `ls` makes a directory
-review double as a budget review.
+The persona roster being visible in `ls` still makes a directory review double
+as a budget review.
 
 ## Rejected alternatives
 
@@ -158,10 +205,16 @@ review double as a budget review.
 3. **Large (not pursued):** upstream adoption of the `agents/` directory
    convention wholesale.
 
-Any rung that lands lets the fork converge on one convention with zero delta. Per
-the standing bar, every upstream submission gets an adversarial maintainer-caliber
-pass first. If upstream adopts prompts-as-files in any form, the fork migrates to
-**their** form immediately.
+Rev 2 correction: no rung yields **zero** delta — each removes a specific slice
+of fork surface and leaves the rest. Rung 1 removes the fork's interest in
+carrying prompt-file relocations but leaves `agent.md`/`shared.md`, the loader,
+the factory, and registration in the fork. Rung 2 removes the fork's subagent
+loader **only if** the deepagents proposal stays generic — markdown+frontmatter →
+`SubAgent`, nothing more; open-swe-specific keys or semantics would (rightly) be
+rejected by a deepagents maintainer, so OSWE-74 proposes the generic core only.
+Per the standing bar, every upstream submission gets an adversarial
+maintainer-caliber pass first. If upstream adopts prompts-as-files in any form,
+the fork migrates to **their** form immediately.
 
 ## Tripwires (conditions that reopen this decision)
 
@@ -172,3 +225,26 @@ pass first. If upstream adopts prompts-as-files in any form, the fork migrates t
   language; stop.
 - The loader needs its own correctness reasoning (caching, normalization,
   selective rerun) → it has become a framework; cut.
+
+## Appendix: adversarial review disposition (2026-07-21, rev 2)
+
+Decorrelated Codex review (GPT-family, via the codex plugin runtime; cmux
+substrate was down on both hosts and is deprecated) returned **NOT SHIPPABLE**
+on rev 1 with 7 P1 findings and 1 P2. Disposition after independent
+verification of each claim against the repo and the installed deepagents wheel:
+
+| # | Finding (P) | Verdict | Disposition in rev 2 |
+|---|---|---|---|
+| 1 | Harness profile **replaces** raw `SubAgent` prompts — personas silently clobbered (P1, critical) | Confirmed in `_apply_profile_prompt` source | Prompt assembly owned by factory; effective-prompt test required (Decision §6) |
+| 2 | Repo-root `agents/` absent from installed package (`dependencies: ["."]` + wheel packages only `agent/`) (P1) | Confirmed | Definitions moved to `agent/resources/agents/`, `importlib.resources` idiom (§1) |
+| 3 | `mcp` registry has no safe load contract and no v1 consumer (P1) | Accepted (matches anti-bloat bar) | `mcp` + `env` keys deferred out of v1 with hazards recorded (§10) |
+| 4 | Omitted subagent `tools` inherits privileged parent tools (P1) | Confirmed in `SubAgent` semantics | Omission ⇒ `[]`; capability ceiling; publication tools parent-only (§3) |
+| 5 | Reviewer model chain misstated (no profile step; separate parent/subagent keys) (P1) | Confirmed in `get_reviewer_agent` | Reviewer-family chain named precisely (§7) |
+| 6 | `git diff upstream/main` AC uses wrong baseline (24 pre-existing fork paths) (P1) | Confirmed | AC re-anchored to fork-base…HEAD (contract) |
+| 7 | Topology bake-off lacks decision rule; both topologies unnecessary for v1 (P1) | Accepted in part | v1 ships parent-as-adjudicator; refuter experiment split to sub-issue with mandatory decision rule (First consumer) |
+| 8 | "Zero delta" upstream-convergence overclaim; deepagents rung must stay generic (P2) | Accepted | Residual-surface accounting; OSWE-74 scoped generic-only (Upstream ladder) |
+
+Review artifact: session task `b4izsg8oj` output (codex thread
+`019f8562-a9ab-7e53-aa94-29da0bf4e236`). Findings 2 and 7 reverse rev-1 choices
+the operator had approved (repo-root location; dual-topology bake-off) — flagged
+for explicit operator veto in the session that produced this revision.
