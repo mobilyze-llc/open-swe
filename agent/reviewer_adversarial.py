@@ -11,8 +11,11 @@ the private reviewer helpers ``_build_first_review_context``,
 loudly instead of allowing behavior to drift. The definition is loaded at
 import time so malformed markdown fails the process at boot, not at the first
 review. Version one treats every dispatch as a first review and does not handle
-re-reviews or finding replies; production webhook routing remains on the stock
-reviewer. Reach this graph through evals with
+re-reviews or finding replies; it also deliberately omits the stock reviewer's
+extra context inputs (org guidelines, repo review style, AGENTS.md conventions,
+API-standards skill, PR trace context, repo skills) so the topology experiment
+runs on the definition files alone. Production webhook routing remains on the
+stock reviewer. Reach this graph through evals with
 ``REVIEWER_ASSISTANT_ID=reviewer_adversarial`` or by direct LangGraph API
 dispatch.
 """
