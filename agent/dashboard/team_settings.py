@@ -269,18 +269,19 @@ def _default_settings() -> dict[str, Any]:
     }
 
 
-async def get_team_settings() -> dict[str, Any]:
-    defaults = _default_settings()
+async def _get_stored_team_settings() -> dict[str, Any]:
     try:
         item = await _client().store.get_item(TEAM_SETTINGS_NAMESPACE, TEAM_SETTINGS_KEY)
     except Exception as e:
         logger.debug("team settings lookup failed: %s", e)
-        return defaults
-    if item is None:
-        return defaults
+        return {}
     value = item.get("value") if isinstance(item, dict) else getattr(item, "value", None)
-    if not isinstance(value, dict):
-        return defaults
+    return value if isinstance(value, dict) else {}
+
+
+async def get_team_settings() -> dict[str, Any]:
+    defaults = _default_settings()
+    value = await _get_stored_team_settings()
     # Skip None-valued model fields so legacy records (or PUTs that cleared the
     # selection) still surface the hardcoded default instead of a null.
     overlay = {k: v for k, v in value.items() if v is not None}
@@ -415,6 +416,15 @@ async def get_team_default_grouping_model() -> tuple[str, str]:
         settings.get("default_reviewer_subagent_model"),
         settings.get("default_reviewer_subagent_reasoning_effort"),
     )
+
+
+async def get_team_autofix_settings() -> tuple[bool, str]:
+    """Return the review auto-fix enabled flag and severity threshold."""
+    settings = await _get_stored_team_settings()
+    threshold = settings.get("autofix_severity_threshold")
+    if threshold not in ("low", "medium", "high", "critical"):
+        threshold = "medium"
+    return settings.get("autofix_enabled") is True, threshold
 
 
 async def get_team_review_trace_links_enabled() -> bool:

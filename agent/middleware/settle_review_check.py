@@ -10,7 +10,7 @@ default, or as failure when blocking review checks are enabled.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast, get_args
 
 from langchain.agents.middleware import AgentState, after_agent
 from langgraph.config import get_config
@@ -18,7 +18,7 @@ from langgraph.runtime import Runtime
 
 from ..review.findings import get_thread_metadata
 from ..review.publish import settle_review_check_run
-from ..utils.github_checks import _review_check_blocking_enabled
+from ..utils.github_checks import CheckConclusion, review_check_blocking_enabled
 from ..utils.github_token import get_github_token
 
 logger = logging.getLogger(__name__)
@@ -55,16 +55,12 @@ async def settle_review_check_on_exit(
         # PATCH failed transiently — retry with the real conclusion instead of
         # misreporting a published review as failed.
         pending = metadata.get("review_check_pending_result")
-        if isinstance(pending, dict) and pending.get("conclusion") in {
-            "success",
-            "neutral",
-            "failure",
-        }:
-            conclusion = pending["conclusion"]
+        if isinstance(pending, dict) and pending.get("conclusion") in get_args(CheckConclusion):
+            conclusion = cast(CheckConclusion, pending["conclusion"])
             title = str(pending.get("title") or "Review completed")
             summary = str(pending.get("summary") or "")
         else:
-            conclusion = "failure" if _review_check_blocking_enabled() else "neutral"
+            conclusion = "failure" if review_check_blocking_enabled() else "neutral"
             title = "Review did not complete"
             summary = (
                 "The Open SWE review run ended without publishing a review. "

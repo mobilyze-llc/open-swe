@@ -154,8 +154,8 @@ async def post_autofix_status_check(
     return True
 
 
-def _review_check_blocking_enabled() -> bool:
-    """Return whether surfaced review findings should fail the check."""
+def review_check_blocking_enabled() -> bool:
+    """Return the deliberately env-scoped deployment toggle, unlike team autofix settings."""
     return os.getenv("REVIEW_CHECK_BLOCKING", "").lower() in {"1", "true", "yes"}
 
 
@@ -164,7 +164,7 @@ def review_check_conclusion(surfaced_count: int) -> tuple[CheckConclusion, str, 
     if surfaced_count > 0:
         issue_word = "issue" if surfaced_count == 1 else "issues"
         return (
-            "failure" if _review_check_blocking_enabled() else "success",
+            "failure" if review_check_blocking_enabled() else "success",
             f"Found {surfaced_count} potential {issue_word}",
             f"Open SWE surfaced {surfaced_count} potential {issue_word} on this pull request.",
         )
