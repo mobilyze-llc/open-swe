@@ -24,7 +24,7 @@ from langsmith.schemas import Example, Run
 
 from agent.review.findings import REVIEW_FINDING_CAP
 
-JUDGE_MODEL = "claude-opus-4-5"
+JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "claude-opus-4-5")
 
 # Call Anthropic directly. Without an explicit base_url the Anthropic SDK falls
 # back to ANTHROPIC_BASE_URL, which in dev shells points at the LangSmith
