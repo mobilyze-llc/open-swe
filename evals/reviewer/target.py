@@ -154,13 +154,14 @@ async def _settle_run(
     Either side of the wait long-poll can cap and return the in-flight thread
     values early; scoring that snapshot records a false-empty publication. Poll
     the run record until it is terminal, then return the final thread values.
+    An empty runs listing (read lag) keeps polling rather than trusting the
+    early snapshot. The timeout budget is per phase, not wall-clock: the client
+    request timeout and this deadline stack.
     """
     deadline = time.monotonic() + _client_timeout_s()
     while time.monotonic() < deadline:
         runs = await client.runs.list(thread_id, limit=1)
         status = runs[0]["status"] if runs else None
-        if status is None or not runs:
-            return result
         if status == "success":
             state = await client.threads.get_state(thread_id)
             return state.get("values", result)

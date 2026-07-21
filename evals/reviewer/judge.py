@@ -13,6 +13,7 @@ directly comparable to martian's published numbers.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from functools import cache
@@ -24,12 +25,16 @@ from langsmith.schemas import Example, Run
 
 from agent.review.findings import REVIEW_FINDING_CAP
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_JUDGE_MODEL = "claude-opus-4-5"
 
-# Call Anthropic directly. Without an explicit base_url the Anthropic SDK falls
-# back to ANTHROPIC_BASE_URL, which in dev shells points at the LangSmith
-# gateway and 403s for this model — silently nulling every judge score.
-JUDGE_BASE_URL = os.environ.get("JUDGE_ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+# Default to the Anthropic API directly. Without an explicit base_url the
+# Anthropic SDK falls back to ANTHROPIC_BASE_URL, which in dev shells points at
+# the LangSmith gateway and 403s for this model — silently nulling every judge
+# score. Resolved lazily in _get_judge (with JUDGE_MODEL) so dotenv loading in
+# run_eval.main applies before either value is read.
+DEFAULT_JUDGE_BASE_URL = "https://api.anthropic.com"
 
 JUDGE_SYSTEM = "You are a precise code review evaluator. Always respond with valid JSON."
 
@@ -95,14 +100,18 @@ def _get_judge() -> ChatAnthropic:
         api_key = os.environ.get("JUDGE_ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise RuntimeError(
-                "No Anthropic API key for the judge. Set JUDGE_ANTHROPIC_API_KEY or "
-                "ANTHROPIC_API_KEY (the judge calls Anthropic directly, not via a gateway)."
+                "No API key for the judge. Set JUDGE_ANTHROPIC_API_KEY or "
+                "ANTHROPIC_API_KEY (the judge calls the Anthropic API directly by "
+                "default; set JUDGE_ANTHROPIC_BASE_URL to route through a gateway)."
             )
+        model = os.environ.get("JUDGE_MODEL", DEFAULT_JUDGE_MODEL)
+        base_url = os.environ.get("JUDGE_ANTHROPIC_BASE_URL", DEFAULT_JUDGE_BASE_URL)
+        logger.info("Judge model %s via %s", model, base_url)
         _judge = ChatAnthropic(
-            model=os.environ.get("JUDGE_MODEL", DEFAULT_JUDGE_MODEL),
+            model=model,
             temperature=0.0,
             max_tokens=512,
-            base_url=JUDGE_BASE_URL,
+            base_url=base_url,
             api_key=api_key,
             max_retries=3,
         )
