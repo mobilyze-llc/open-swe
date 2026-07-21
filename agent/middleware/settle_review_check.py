@@ -18,7 +18,7 @@ from langgraph.runtime import Runtime
 
 from ..review.findings import get_thread_metadata
 from ..review.publish import settle_review_check_run
-from ..utils.github_checks import CheckConclusion, review_check_blocking_enabled
+from ..utils.github_checks import CheckConclusion, incomplete_review_check_result
 from ..utils.github_token import get_github_token
 
 logger = logging.getLogger(__name__)
@@ -60,12 +60,7 @@ async def settle_review_check_on_exit(
             title = str(pending.get("title") or "Review completed")
             summary = str(pending.get("summary") or "")
         else:
-            conclusion = "failure" if review_check_blocking_enabled() else "neutral"
-            title = "Review did not complete"
-            summary = (
-                "The Open SWE review run ended without publishing a review. "
-                "Re-trigger the review by pushing a commit or re-requesting it."
-            )
+            conclusion, title, summary = incomplete_review_check_result()
         await settle_review_check_run(
             thread_id=thread_id,
             owner=owner,

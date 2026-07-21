@@ -155,8 +155,27 @@ async def post_autofix_status_check(
 
 
 def review_check_blocking_enabled() -> bool:
-    """Return the deliberately env-scoped deployment toggle, unlike team autofix settings."""
+    """Return whether surfaced findings should fail the review check.
+
+    Deliberately env-scoped (deployment-level merge policy) rather than a team
+    setting: whoever operates branch protection owns this toggle.
+    """
     return os.getenv("REVIEW_CHECK_BLOCKING", "").lower() in {"1", "true", "yes"}
+
+
+def incomplete_review_check_result() -> tuple[CheckConclusion, str, str]:
+    """Conclusion for a review run that ended without publishing.
+
+    Shared by every settle path (after-agent middleware and the run-completion
+    handler) so an unfinished review cannot satisfy a blocking check through
+    one path while failing it through another.
+    """
+    return (
+        "failure" if review_check_blocking_enabled() else "neutral",
+        "Review did not complete",
+        "The Open SWE review run ended without publishing a review. "
+        "Re-trigger the review by pushing a commit or re-requesting it.",
+    )
 
 
 def review_check_conclusion(surfaced_count: int) -> tuple[CheckConclusion, str, str]:
