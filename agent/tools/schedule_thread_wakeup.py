@@ -129,11 +129,12 @@ async def _create_wakeup_cron(
     schedule = _build_one_shot_cron(fire_time)
     expires_at = fire_time + timedelta(seconds=_WAKEUP_EXPIRY_GRACE_SECONDS)
     run_config: Config = {"configurable": configurable}
+    timestamped_prompt = f"[scheduled wakeup for {fire_time.isoformat()}] {prompt}"
     cron = await client.crons.create_for_thread(
         thread_id,
         _AGENT_ASSISTANT_ID,
         schedule=schedule,
-        input={"messages": [{"role": "user", "content": prompt}]},
+        input={"messages": [{"role": "user", "content": timestamped_prompt}]},
         config=run_config,
         timezone="UTC",
         metadata={
@@ -162,6 +163,8 @@ async def schedule_thread_wakeup(delay_minutes: int, prompt: str | None = None) 
     ``end_time`` is intentionally omitted: the in-memory runtime stores the SDK's
     ISO string without coercion, so ``langgraph_runtime_inmem/ops.py:Crons.next``
     raises while comparing it to a datetime and dead-loops the scheduler.
+    An annual re-fire requires zero restarts and zero new wakeups for a full year,
+    and self-identifies through the scheduled timestamp prepended to its prompt.
 
     Args:
         delay_minutes: How many minutes from now to wait before re-triggering.

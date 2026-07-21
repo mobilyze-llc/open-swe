@@ -139,6 +139,9 @@ async def test_create_wakeup_cron_omits_end_time(monkeypatch: pytest.MonkeyPatch
     call = client.crons.create_calls[0]
     assert call["args"] == ("test-thread-123", "agent")
     assert "end_time" not in call["kwargs"]
+    assert call["kwargs"]["input"]["messages"][0]["content"] == (
+        f"[scheduled wakeup for {fire_time.isoformat()}] Check CI status"
+    )
     assert (
         call["kwargs"]["metadata"]["expires_at"]
         == (fire_time + timedelta(seconds=wakeup_tool._WAKEUP_EXPIRY_GRACE_SECONDS)).isoformat()

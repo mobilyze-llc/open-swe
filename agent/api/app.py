@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from ..dashboard import router as dashboard_router
 from ..dashboard.plan_api import plan_router
 from ..dashboard.workflow_approval_api import workflow_approval_router
+from ..tools.schedule_thread_wakeup import _purge_expired_wakeups_best_effort
 from ..webhooks.github_routes import router as github_webhook_router
 from ..webhooks.linear_routes import router as linear_webhook_router
 from ..webhooks.slack_routes import router as slack_webhook_router
@@ -23,6 +24,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     validate_sandbox_startup_config()
     validate_local_dev_llm_config()
+    await _purge_expired_wakeups_best_effort()
     try:
         yield
     finally:
