@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from deepagents.middleware.subagents import SubAgent
+from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT, SubAgent
 from langchain.agents.middleware.types import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage
@@ -161,7 +161,12 @@ def build_subagents(
     model: BaseChatModel,
     reserved_tools: frozenset[str] = frozenset(),
 ) -> list[SubAgent]:
-    """Hydrate validated subagent definitions into deepagents specs."""
+    """Hydrate validated subagent definitions into deepagents specs.
+
+    Unless the definition supplies its own, a toolless ``general-purpose``
+    override is appended so deepagents' auto-added default cannot inherit the
+    parent's tools past the capability ceiling.
+    """
     errors = [
         f"subagents/{subagent.name}.md: tool '{tool}' is reserved for the parent agent"
         for subagent in definition.subagents
@@ -186,6 +191,18 @@ def build_subagents(
                 "model": model,
                 "tools": [getattr(agent_tools, tool) for tool in subagent.tools],
                 "middleware": [_SubagentSystemPromptMiddleware(prompt)],
+            }
+        )
+    gp_name = GENERAL_PURPOSE_SUBAGENT["name"]
+    if all(spec["name"] != gp_name for spec in specs):
+        specs.append(
+            {
+                "name": gp_name,
+                "description": "Not part of this agent's roster; do not dispatch.",
+                "system_prompt": "",
+                "model": model,
+                "tools": [],
+                "middleware": [],
             }
         )
     return specs

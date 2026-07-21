@@ -133,8 +133,11 @@ async def test_build_subagents_resolves_tools_and_never_inherits_parent_tools(
 
     specs = build_subagents(definition, model=model)
 
-    assert [spec["name"] for spec in specs] == ["with-tools", "without-tools"]
-    with_tools, without_tools = specs
+    assert [spec["name"] for spec in specs] == ["with-tools", "without-tools", "general-purpose"]
+    with_tools, without_tools, general_purpose = specs
+    assert general_purpose.get("tools") == []
+    assert general_purpose.get("middleware") == []
+    assert "do not dispatch" in general_purpose["description"]
     assert with_tools.get("model") is model
     assert with_tools.get("tools") == [list_findings]
     assert "tools" in without_tools
@@ -158,6 +161,34 @@ async def test_build_subagents_resolves_tools_and_never_inherits_parent_tools(
     await middleware.awrap_model_call(ModelRequest(model=model, messages=[]), handler)
     assert seen[0].system_message is not None
     assert seen[0].system_message.text == "Shared persona.\n\nTool persona.\n"
+
+
+def test_definition_supplied_general_purpose_is_not_double_appended(tmp_path: Path) -> None:
+    definition_dir = tmp_path / "own-gp"
+    _write(
+        definition_dir,
+        "agent.md",
+        """---
+description: Parent
+---
+Parent body.
+""",
+    )
+    _write(
+        definition_dir,
+        "subagents/general-purpose.md",
+        """---
+description: Custom general purpose
+---
+Custom body.
+""",
+    )
+    definition = load_agent_definition("own-gp", root=tmp_path)
+
+    specs = build_subagents(definition, model=_model())
+
+    assert [spec["name"] for spec in specs] == ["general-purpose"]
+    assert specs[0]["description"] == "Custom general purpose"
 
 
 def test_reserved_subagent_tools_are_aggregated_without_touching_parent_tools(

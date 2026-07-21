@@ -10,12 +10,18 @@ the private reviewer helpers ``_build_first_review_context``,
 ``_repo_checkout_note`` so an upstream rename breaks this module's import
 loudly instead of allowing behavior to drift. The definition is loaded at
 import time so malformed markdown fails the process at boot, not at the first
-review. Version one treats every dispatch as a first review and does not handle
-re-reviews or finding replies; it also deliberately omits the stock reviewer's
-extra context inputs (org guidelines, repo review style, AGENTS.md conventions,
-API-standards skill, PR trace context, repo skills) so the topology experiment
-runs on the definition files alone. Production webhook routing remains on the
-stock reviewer. Reach this graph through evals with
+review. Version one accepts first-review dispatch only — configs carrying
+``re_review``, ``reviewer_event``, or ``last_reviewed_sha`` are rejected at run
+preparation, because the shared findings tools read those keys themselves and
+would apply re-review semantics the rendered prompt does not. It also
+deliberately omits the stock reviewer's extra context inputs (org guidelines,
+repo review style, AGENTS.md conventions, API-standards skill, PR trace
+context, repo skills) so the topology experiment runs on the definition files
+alone. In eval mode the harness's ``reviewer_model_id`` /
+``reviewer_subagent_model_id`` pins are honored when no
+``reviewer_adversarial_*`` key is set, so ``REVIEWER_EVAL_MODEL_ID`` works
+through ``evals/reviewer``; outside eval mode the stock reviewer keys are
+ignored. Production webhook routing remains on the stock reviewer. Reach this graph through evals with
 ``REVIEWER_ASSISTANT_ID=reviewer_adversarial`` or by direct LangGraph API
 dispatch.
 """
@@ -130,6 +136,15 @@ _ = _render_parent_prompt(
 class PrepareAdversarialReviewerRunMiddleware(PrepareReviewerRunMiddleware):
     async def _prepare(self, state: PrepareRunState, runtime: Runtime) -> dict[str, Any]:
         configurable = self._config.get("configurable") or {}
+        if (
+            configurable.get("re_review")
+            or configurable.get("reviewer_event")
+            or configurable.get("last_reviewed_sha")
+        ):
+            raise RuntimeError(
+                "reviewer_adversarial v1 handles first reviews only; re-review and "
+                "finding-reply dispatch belong to the stock reviewer"
+            )
         repo_config = configurable.get("repo") or {}
         sandbox_backend, github_token = await _ensure_reviewer_sandbox_for_thread(
             self._thread_id, configurable
@@ -156,11 +171,6 @@ class PrepareAdversarialReviewerRunMiddleware(PrepareReviewerRunMiddleware):
         reviewer_eval = (
             configurable.get("reviewer_eval") is True or configurable.get("eval") is True
         )
-        if configurable.get("re_review") or configurable.get("reviewer_event"):
-            logger.warning(
-                "The v1 adversarial reviewer treats every dispatch as a first review and "
-                "is ignoring the re-review or reviewer-event signal"
-            )
 
         can_fetch_pr = (
             isinstance(pr_number, int)
@@ -265,11 +275,22 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
         logger.info("No thread_id or not for execution, returning reviewer without sandbox")
         return create_deep_agent(system_prompt="", tools=[]).with_config(config)
 
-    configured_model_id = configurable.get("reviewer_adversarial_model_id")
-    configured_effort = configurable.get("reviewer_adversarial_reasoning_effort")
-    if isinstance(configured_model_id, str) and configured_model_id:
-        model_id = configured_model_id
-        reasoning_effort = configured_effort if isinstance(configured_effort, str) else None
+    is_eval = configurable.get("reviewer_eval") is True or configurable.get("eval") is True
+
+    def _configured_pair(namespaced: str, eval_fallback: str) -> tuple[str, str | None] | None:
+        model_key = configurable.get(namespaced + "_model_id")
+        effort_key = namespaced + "_reasoning_effort"
+        if not (isinstance(model_key, str) and model_key) and is_eval:
+            model_key = configurable.get(eval_fallback + "_model_id")
+            effort_key = eval_fallback + "_reasoning_effort"
+        if isinstance(model_key, str) and model_key:
+            effort = configurable.get(effort_key)
+            return model_key, effort if isinstance(effort, str) else None
+        return None
+
+    configured = _configured_pair("reviewer_adversarial", "reviewer")
+    if configured is not None:
+        model_id, reasoning_effort = configured
         subagent_model_id = model_id
         subagent_effort = reasoning_effort
     else:
@@ -278,13 +299,9 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
             (subagent_model_id, subagent_effort),
         ) = await _cached_reviewer_team_defaults()
 
-    configured_subagent_model_id = configurable.get("reviewer_adversarial_subagent_model_id")
-    configured_subagent_effort = configurable.get("reviewer_adversarial_subagent_reasoning_effort")
-    if isinstance(configured_subagent_model_id, str) and configured_subagent_model_id:
-        subagent_model_id = configured_subagent_model_id
-        subagent_effort = (
-            configured_subagent_effort if isinstance(configured_subagent_effort, str) else None
-        )
+    configured_subagent = _configured_pair("reviewer_adversarial_subagent", "reviewer_subagent")
+    if configured_subagent is not None:
+        subagent_model_id, subagent_effort = configured_subagent
 
     fable_enabled = await get_team_fable_enabled()
     model_id, reasoning_effort = gate_fable_model(

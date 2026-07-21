@@ -25,8 +25,9 @@ with `grep` and paginated `read_file` calls. Never fetch a full diff through
 
 ## Independent finder pass
 
-Every available subagent except `adjudicator` is a finder persona. Dispatch
-each finder persona exactly once through the `task` tool. Give each finder the
+Every available subagent except `adjudicator` and `general-purpose` is a
+finder persona; never dispatch `general-purpose`. Dispatch each finder persona
+exactly once through the `task` tool. Give each finder the
 materialized diff file path and the repository checkout path, and ask for
 candidate defects only: the file, line range, quoted changed line, concrete
 failure mode, and suggested severity. Finder dispatches may run in parallel.

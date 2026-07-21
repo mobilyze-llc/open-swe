@@ -196,9 +196,14 @@ async def test_prepare_renders_definition_prompt() -> None:
         assert "Eval mode — calibration" in eval_prompt
         assert "Pre-existing PR review threads" not in eval_prompt
 
-        re_review_updates = await prepare({"re_review": True})
-        re_review_prompt = cast(str, re_review_updates["rendered_system_prompt"])
-        assert "This is a first review" in re_review_prompt
+        rejected_configs: tuple[dict[str, object], ...] = (
+            {"re_review": True},
+            {"reviewer_event": "finding_reply"},
+            {"last_reviewed_sha": "c" * 40},
+        )
+        for rejected in rejected_configs:
+            with pytest.raises(RuntimeError, match="first reviews only"):
+                await prepare(rejected)
 
 
 @pytest.mark.asyncio
@@ -258,3 +263,18 @@ async def test_model_key_resolution() -> None:
             "team-main",
             "team-sub",
         ]
+        assert await run({"reviewer_eval": True, "reviewer_model_id": "E"}) == ["E", "E"]
+        assert await run(
+            {
+                "eval": True,
+                "reviewer_model_id": "E",
+                "reviewer_subagent_model_id": "F",
+            }
+        ) == ["E", "F"]
+        assert await run(
+            {
+                "reviewer_eval": True,
+                "reviewer_adversarial_model_id": "X",
+                "reviewer_model_id": "E",
+            }
+        ) == ["X", "X"]
