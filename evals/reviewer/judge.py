@@ -24,7 +24,7 @@ from langsmith.schemas import Example, Run
 
 from agent.review.findings import REVIEW_FINDING_CAP
 
-JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "claude-opus-4-5")
+DEFAULT_JUDGE_MODEL = "claude-opus-4-5"
 
 # Call Anthropic directly. Without an explicit base_url the Anthropic SDK falls
 # back to ANTHROPIC_BASE_URL, which in dev shells points at the LangSmith
@@ -99,7 +99,7 @@ def _get_judge() -> ChatAnthropic:
                 "ANTHROPIC_API_KEY (the judge calls Anthropic directly, not via a gateway)."
             )
         _judge = ChatAnthropic(
-            model=JUDGE_MODEL,
+            model=os.environ.get("JUDGE_MODEL", DEFAULT_JUDGE_MODEL),
             temperature=0.0,
             max_tokens=512,
             base_url=JUDGE_BASE_URL,
