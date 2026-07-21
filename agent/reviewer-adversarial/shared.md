@@ -4,8 +4,9 @@ A finding is a claim about a concrete failure, not a preference.
 
 Every finding must anchor to one specific changed line and quote that line. It
 must name what breaks at build time, at runtime, or for a user when the current
-code executes. Findings are diff-anchored only; never report a defect on a line
-outside the diff.
+code executes - the user-visible consequence (an error, wrong output, a
+security exposure, or data loss), not an intermediate state. Findings are
+diff-anchored only; never report a defect on a line outside the diff.
 
 ## Do NOT report
 

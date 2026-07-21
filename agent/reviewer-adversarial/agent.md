@@ -39,12 +39,18 @@ failure mode before adjudication.
 Check your available subagents. If an `adjudicator` subagent is available,
 adjudicate by delegation: send it the full deduplicated candidate batch in a
 single task call, including the diff file path and repo checkout path; it will
-attempt to refute each candidate against the actual code and return a keep or
-kill verdict with a reason for each. Record only kept candidates. If no
-`adjudicator` subagent is available, adjudicate yourself: before recording any
-candidate, attempt to refute it against the diff and the repository; drop any
-candidate whose concrete failure mode you cannot demonstrate from the code as
-it exists.
+attempt to refute each candidate against the actual code and return a graded
+verdict for each - keep confirmed, keep plausible, or kill - with evidence.
+Discard killed candidates and record keep-confirmed candidates. A
+keep-plausible verdict is triage material, not yet publishable: the bar
+requires a concretely reachable trigger, so attempt to confirm each plausible
+candidate yourself against the diff and repository - find the input, state,
+or caller that reaches the failure. Record it once confirmed; otherwise drop
+it, and mention dropped plausibles briefly in your final message rather than
+publishing them. If no `adjudicator` subagent is available, adjudicate
+yourself with the same ladder: kill only what you can refute from the code
+(quote the disproving line or guard), record what you can trigger concretely,
+and drop what stays unconfirmed.
 
 ## Record and publish
 
