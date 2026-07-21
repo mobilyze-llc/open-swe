@@ -1,8 +1,8 @@
 # Decision: agent definitions as files — the additive agent-directory convention
 
-- **Status:** Accepted rev 2 (Eric Litman, 2026-07-21; revised same-day after a decorrelated Codex adversarial review returned NOT SHIPPABLE on rev 1 — disposition appendix at bottom; rev 1 is commit `c04f28419`)
+- **Status:** Accepted rev 3 (Eric Litman, 2026-07-21). Rev 2 same-day after a decorrelated Codex adversarial review returned NOT SHIPPABLE on rev 1 (disposition appendix at bottom; rev 1 = `c04f28419`, rev 2 = `857f0b13e`). Rev 3 same-day resolving the two operator vetoes rev 2 had flagged: placement corrected to `agent/<name>/` (rev 1's repo-root location had mis-encoded operator intent, which rev 2 then "fixed" in the wrong direction), and the dual-topology experiment restored into OSWE-33 with metrics sourced from LangSmith traces instead of new eval infrastructure.
 - **Ticket:** OSWE-33 (re-contracted; this doc supersedes the 2026-07-19 "Agent Definition v1 / execution plans" spec preserved in that issue's history)
-- **Kind:** point-in-time decision record. Frozen after rev 2; further changes require a new dated doc.
+- **Kind:** point-in-time decision record. Frozen after rev 3; further changes require a new dated doc.
 
 ## Context
 
@@ -43,22 +43,29 @@ Inventory that shaped the decision (all upstream-owned):
 
 ### Boundary
 
-1. **`agent/resources/agents/` holds Mobilyze-defined agents only.** The boundary
-   of the convention is the fork seam. Upstream's graphs are never restructured in
-   the fork; changes to them travel via upstream PRs exclusively. The
-   implementation diff against the fork base is additive files plus the permitted
-   seam touches (`langgraph.json` registration, webhook routing).
+1. **Each Mobilyze-defined agent is a subdirectory of the existing `agent/`
+   package: `agent/<name>/`.** No separate `agents/` directory at any level — the
+   operator rejected both the repo-root variant and the extra container level.
+   The boundary of the convention is the fork seam. Upstream's graphs are never
+   restructured in the fork; changes to them travel via upstream PRs exclusively.
+   The implementation diff against the fork base is additive files plus the
+   permitted seam touches (`langgraph.json` registration, webhook routing).
 
-   *Rev 2 note — why packaged, not repo-root:* `langgraph.json` declares
-   `dependencies: ["."]`, so the runtime pip-installs the project, and the wheel
-   packages only `agent/` (`pyproject.toml` `packages = ["agent"]`). A repo-root
-   `agents/` directory exists in source checkouts but not in the installed
-   package — definitions would silently vanish in exactly the deployment path
-   that matters. `agent/resources/` is already packaged and already loaded via
-   `importlib.resources` (the `default_prompt.md` idiom), so definitions live at
-   `agent/resources/agents/<name>/`.
-2. `agent/resources/agents/<name>/` pairs by name with the existing
-   `evals/<name>/` harness convention (`evals/reviewer/` predates this decision).
+   Why this satisfies the review's packaging finding: `langgraph.json` declares
+   `dependencies: ["."]`, so the runtime pip-installs the project and only the
+   `agent/` package ships in the wheel — a repo-root directory would vanish at
+   runtime. Anything inside `agent/` ships, as `agent/skills/<name>/` and
+   `agent/resources/default_prompt.md` prove in production today; load via
+   `importlib.resources.files("agent") / <name>`.
+
+   Two conventions make in-package placement safe and discoverable:
+   - **Discovery is by marker, not by listing:** a subdirectory of `agent/` is an
+     agent definition iff it contains `agent.md`. Code directories never do.
+   - **Definition directories use hyphenated names** (`reviewer-adversarial`),
+     matching the `agent/skills/` naming style; a hyphenated name cannot be
+     imported, so it can never collide with an upstream Python module.
+2. `agent/<name>/` pairs by name with the existing `evals/<name>/` harness
+   convention (`evals/reviewer/` predates this decision).
 
 ### Shape
 
@@ -158,27 +165,37 @@ superseded execution-plan compiler.
 
 ## First consumer: adversarial reviewer
 
-A **new** graph (`agent/resources/agents/reviewer-adversarial/`, name TBD at
-implementation) beside the stock upstream reviewer — persona subagents (e.g.
-security, correctness) returning candidates, the **parent acting as adjudicator**
-(cross-examining candidates against the diff before recording), publishing
-through the existing findings tools.
+A **new** graph (`agent/reviewer-adversarial/`, name TBD at implementation)
+beside the stock upstream reviewer — persona subagents (e.g. security,
+correctness) plus an adjudicator, publishing through the existing findings
+tools. Two topologies are both expressible in the layout, and **choosing between
+them by eval is in scope of OSWE-33** — it is the first experiment the structure
+exists to make cheap:
 
-*Rev 2 scope cut:* rev 1 shipped both adjudicator topologies and chose "by eval,"
-but defined no decision rule — no precision threshold, no budget ceiling, no
-owner — and the existing eval target reports findings and judge scores, not
-subagent pass counts or real-token spend, so identical results could justify
-opposite topologies. v1 therefore ships **parent-as-adjudicator only** (it
-matches the stock reviewer's existing parent-validation flow). The decorrelated
-fresh-context-refuter variant is preserved as a follow-up experiment ticket
-(sub-issue of OSWE-33) whose contract must state the decision rule up front:
-metrics (judge precision on `evals/reviewer/` goldens, pass count, real-token
-cost vs the canary-2 baseline of ~0.7–1.6M real tokens per cold subagent pass),
-the comparison threshold, and Eric as decision owner. Proving the file
-convention does not require implementing both orchestrations.
+- **Parent-as-adjudicator** — personas return candidates; the parent (already
+  holding candidates + diff) cross-examines and publishes. No extra pass, but
+  anchored on finder reasoning.
+- **Adjudicator-as-subagent** — a fresh-context refuter per candidate batch.
+  Decorrelated, higher precision expected; each subagent pass is a cold
+  ~0.7–1.6M-real-token context establishment (canary-2 baseline), and pass count
+  is the budget lever.
 
-The persona roster being visible in `ls` still makes a directory review double
-as a budget review.
+Switching is adding/removing `subagents/adjudicator.md` plus a paragraph in
+`agent.md`.
+
+*Rev 3 measurement stance (resolves the review's "no decision rule" finding
+without building anything):* **no new eval or metrics infrastructure.**
+Precision comes from the existing `evals/reviewer/` harness (goldens + judge,
+already built). Pass counts and real-token spend come from **LangSmith traces**
+— the reviewer graphs already run under `traced_graph_factory` into a tracing
+project, and per-run token accounting is a platform capability — computed by
+external scripts against the traces of the eval runs, not by code shipped in
+this repo. The comparison threshold is the operator's call at experiment time.
+Rev 2's attempt to defer this experiment to a gated sub-issue was vetoed by the
+operator; the experiment is core to the ticket's purpose.
+
+The persona roster being visible in `ls` makes a directory review double as a
+budget review.
 
 ## Rejected alternatives
 
@@ -236,15 +253,20 @@ verification of each claim against the repo and the installed deepagents wheel:
 | # | Finding (P) | Verdict | Disposition in rev 2 |
 |---|---|---|---|
 | 1 | Harness profile **replaces** raw `SubAgent` prompts — personas silently clobbered (P1, critical) | Confirmed in `_apply_profile_prompt` source | Prompt assembly owned by factory; effective-prompt test required (Decision §6) |
-| 2 | Repo-root `agents/` absent from installed package (`dependencies: ["."]` + wheel packages only `agent/`) (P1) | Confirmed | Definitions moved to `agent/resources/agents/`, `importlib.resources` idiom (§1) |
+| 2 | Repo-root `agents/` absent from installed package (`dependencies: ["."]` + wheel packages only `agent/`) (P1) | Confirmed — but the reviewed location itself mis-encoded operator intent (rev 1 wrote repo-root; the operator had meant inside `agent/`) | Rev 3: definitions live at `agent/<name>/` (in-package, ships in wheel, `agent/skills/` precedent); rev 2's `agent/resources/agents/` superseded (§1) |
 | 3 | `mcp` registry has no safe load contract and no v1 consumer (P1) | Accepted (matches anti-bloat bar) | `mcp` + `env` keys deferred out of v1 with hazards recorded (§10) |
 | 4 | Omitted subagent `tools` inherits privileged parent tools (P1) | Confirmed in `SubAgent` semantics | Omission ⇒ `[]`; capability ceiling; publication tools parent-only (§3) |
 | 5 | Reviewer model chain misstated (no profile step; separate parent/subagent keys) (P1) | Confirmed in `get_reviewer_agent` | Reviewer-family chain named precisely (§7) |
 | 6 | `git diff upstream/main` AC uses wrong baseline (24 pre-existing fork paths) (P1) | Confirmed | AC re-anchored to fork-base…HEAD (contract) |
-| 7 | Topology bake-off lacks decision rule; both topologies unnecessary for v1 (P1) | Accepted in part | v1 ships parent-as-adjudicator; refuter experiment split to sub-issue with mandatory decision rule (First consumer) |
+| 7 | Topology bake-off lacks decision rule; both topologies unnecessary for v1 (P1) | Defect real; rev-2 deferral **vetoed by operator** | Rev 3: experiment restored in-scope; metrics from existing `evals/reviewer/` harness + LangSmith traces via external scripts (no new eval infrastructure); threshold = operator's call at run time (First consumer) |
 | 8 | "Zero delta" upstream-convergence overclaim; deepagents rung must stay generic (P2) | Accepted | Residual-surface accounting; OSWE-74 scoped generic-only (Upstream ladder) |
 
 Review artifact: session task `b4izsg8oj` output (codex thread
-`019f8562-a9ab-7e53-aa94-29da0bf4e236`). Findings 2 and 7 reverse rev-1 choices
-the operator had approved (repo-root location; dual-topology bake-off) — flagged
-for explicit operator veto in the session that produced this revision.
+`019f8562-a9ab-7e53-aa94-29da0bf4e236`). Findings 2 and 7 reversed rev-1 choices
+the operator had approved and were flagged for veto; **both vetoes were
+exercised same-day and are resolved in rev 3** — placement per operator intent
+(`agent/<name>/`, which also satisfies finding 2's packaging constraint), and
+the dual-topology experiment restored with LangSmith-sourced metrics (finding
+7's real defect — unmeasurable comparison — resolved by platform traces, not by
+new machinery). Sub-issue OSWE-75, created under the rev-2 deferral, was
+canceled.
