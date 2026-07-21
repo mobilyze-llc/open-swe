@@ -165,7 +165,11 @@ def build_subagents(
 
     Unless the definition supplies its own, a toolless ``general-purpose``
     override is appended so deepagents' auto-added default cannot inherit the
-    parent's tools past the capability ceiling.
+    parent's tools past the capability ceiling. The ceiling governs
+    curated-registry tools only: deepagents' filesystem middleware still equips
+    every subagent with the shared sandbox's read/write/execute surface, so
+    subagents operate inside the parent's sandbox trust boundary, same as the
+    stock reviewer's.
     """
     errors = [
         f"subagents/{subagent.name}.md: tool '{tool}' is reserved for the parent agent"
