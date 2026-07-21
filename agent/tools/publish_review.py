@@ -730,6 +730,7 @@ async def _maybe_dispatch_review_autofix(
                 client=client,
             )
         except BaseException:
+            # Accepted runs may outlive cancellation; pending_event is best-effort PR context.
             await store.adelete(pending_namespace, "pending_event")
             raise
         await set_pr_autofix_cycle_count(owner, repo, pr_number, next_cycle)

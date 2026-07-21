@@ -44,14 +44,10 @@ async def is_pr_autofix_disabled(owner: str, repo: str, pr_number: int) -> bool:
 
 async def get_pr_autofix_cycle_count(owner: str, repo: str, pr_number: int) -> int:
     """Return the number of review auto-fix cycles dispatched for a PR."""
-    try:
-        item = await _client().store.get_item(
-            AUTOFIX_PR_STATE_NAMESPACE,
-            f"{_key(owner, repo, pr_number)}:review_autofix_cycles",
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.debug("autofix PR cycle lookup failed: %s", e)
-        return 0
+    item = await _client().store.get_item(
+        AUTOFIX_PR_STATE_NAMESPACE,
+        f"{_key(owner, repo, pr_number)}:review_autofix_cycles",
+    )
     if item is None:
         return 0
     value = item.get("value") if isinstance(item, dict) else getattr(item, "value", None)

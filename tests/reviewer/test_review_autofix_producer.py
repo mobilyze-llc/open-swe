@@ -374,6 +374,50 @@ async def test_review_autofix_producer_errors_are_neutral_and_do_not_raise(failu
     assert status_args.kwargs["title"] == "Auto-fix dispatch failed"
 
 
+async def test_review_autofix_cycle_read_failure_skips_dispatch() -> None:
+    from agent.tools.publish_review import _maybe_dispatch_review_autofix
+
+    dispatch = AsyncMock()
+    status = AsyncMock(return_value=True)
+    with (
+        patch(
+            "agent.tools.publish_review.get_team_autofix_settings",
+            AsyncMock(return_value=(True, "medium")),
+        ),
+        patch(
+            "agent.tools.publish_review.is_review_repo_enabled",
+            AsyncMock(return_value=True),
+        ),
+        patch(
+            "agent.tools.publish_review.is_pr_autofix_disabled",
+            AsyncMock(return_value=False),
+        ),
+        patch("agent.tools.publish_review.dispatch_client", return_value=_client()),
+        patch(
+            "agent.tools.publish_review.get_pr_autofix_cycle_count",
+            AsyncMock(side_effect=RuntimeError("store unavailable")),
+        ),
+        patch("agent.tools.publish_review.dispatch_agent_run", dispatch),
+        patch("agent.tools.publish_review.post_autofix_status_check", status),
+    ):
+        await _maybe_dispatch_review_autofix(
+            owner="o",
+            repo="r",
+            pr_number=7,
+            head_sha="head-sha",
+            branch_name=_BRANCH,
+            token="token",
+            surfaced_findings=[_finding()],
+        )
+
+    dispatch.assert_not_awaited()
+    status.assert_awaited_once()
+    status_args = status.await_args
+    assert status_args is not None
+    assert status_args.kwargs["title"] == "Auto-fix dispatch failed"
+    assert status_args.kwargs["summary"].endswith(": RuntimeError")
+
+
 async def test_review_autofix_dispatch_failure_clears_pending_event() -> None:
     from agent.tools.publish_review import _maybe_dispatch_review_autofix
 
