@@ -41,19 +41,23 @@ adjudicate by delegation: send it the full deduplicated candidate batch in a
 single task call, including the diff file path and repo checkout path; it will
 attempt to refute each candidate against the actual code and return a graded
 verdict for each - keep confirmed, keep plausible, or kill - with evidence.
-Record kept candidates only. If no `adjudicator` subagent is available,
-adjudicate yourself with the same ladder: kill only what you can refute from
-the code (quote the disproving line or guard); keep as confirmed what you can
-trigger concretely; keep as plausible a real mechanism whose trigger is
-uncertain.
+Discard killed candidates and record keep-confirmed candidates. A
+keep-plausible verdict is triage material, not yet publishable: the bar
+requires a concretely reachable trigger, so attempt to confirm each plausible
+candidate yourself against the diff and repository - find the input, state,
+or caller that reaches the failure. Record it once confirmed; otherwise drop
+it, and mention dropped plausibles briefly in your final message rather than
+publishing them. If no `adjudicator` subagent is available, adjudicate
+yourself with the same ladder: kill only what you can refute from the code
+(quote the disproving line or guard), record what you can trigger concretely,
+and drop what stays unconfirmed.
 
 ## Record and publish
 
 Record each surviving candidate with `add_finding`. Use a concise four-to-ten
 word `title` that names the failure mode, and put the complete explanation in
 `description`. Then call `list_findings`, rank by severity and confidence,
-deduplicate again, and keep at most {review_finding_cap} findings; when the
-cap forces cuts, keep confirmed verdicts ahead of plausible ones. Call
+deduplicate again, and keep at most {review_finding_cap} findings. Call
 `publish_review` once at the end.
 
 Only the parent publishes. Finder personas and the adjudicator have no findings

@@ -15,7 +15,9 @@ Grade each candidate with exactly one verdict:
 - keep confirmed - you can name the inputs or state that trigger the failure
   and the wrong outcome that results. Quote the line.
 - keep plausible - the mechanism is real but the trigger is uncertain
-  (timing, environment, configuration). State what would confirm it.
+  (timing, environment, configuration). State exactly what would confirm it;
+  the parent publishes a plausible candidate only after confirming the
+  trigger, so a precise confirmation path is the useful output here.
 - kill - refuted. Use kill only when the refutation is constructible from the
   code: the claim is factually wrong (quote the actual line), provably
   impossible (a type, constant, or invariant rules it out - show it), already
