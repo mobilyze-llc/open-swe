@@ -27,6 +27,7 @@ class _FakeCrons:
         self._crons = list(crons)
         self.deleted: list[str] = []
         self.search_calls: list[dict[str, Any]] = []
+        self.create_calls: list[dict[str, Any]] = []
 
     async def search(
         self,
@@ -49,17 +50,23 @@ class _FakeCrons:
         self.deleted.append(cron_id)
         self._crons = [c for c in self._crons if c.get("cron_id") != cron_id]
 
+    async def create_for_thread(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        self.create_calls.append({"args": args, "kwargs": kwargs})
+        return {"cron_id": "created-cron"}
+
 
 class _FakeClient:
     def __init__(self, crons: list[dict[str, Any]]) -> None:
         self.crons = _FakeCrons(crons)
 
 
-def _wakeup_cron(cron_id: str, end_time: datetime | None) -> dict[str, Any]:
+def _wakeup_cron(cron_id: str, expires_at: datetime | None) -> dict[str, Any]:
+    metadata = {"kind": "thread_wakeup"}
+    if expires_at is not None:
+        metadata["expires_at"] = expires_at.isoformat()
     return {
         "cron_id": cron_id,
-        "end_time": end_time.isoformat() if end_time else None,
-        "metadata": {"kind": "thread_wakeup"},
+        "metadata": metadata,
     }
 
 
@@ -113,6 +120,29 @@ async def test_schedule_thread_wakeup_rejects_missing_thread_id(
     result = await wakeup_tool.schedule_thread_wakeup(5)
     assert result["success"] is False
     assert "thread_id" in result["error"].lower()
+
+
+async def test_create_wakeup_cron_omits_end_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _FakeClient([])
+    fire_time = datetime(2026, 6, 30, 22, 0, tzinfo=UTC)
+    monkeypatch.setattr(wakeup_tool, "get_client", lambda url: client)
+
+    result = await wakeup_tool._create_wakeup_cron(
+        thread_id="test-thread-123",
+        fire_time=fire_time,
+        prompt="Check CI status",
+        configurable={"thread_id": "test-thread-123"},
+    )
+
+    assert result["success"] is True
+    assert result["cron_id"] == "created-cron"
+    call = client.crons.create_calls[0]
+    assert call["args"] == ("test-thread-123", "agent")
+    assert "end_time" not in call["kwargs"]
+    assert (
+        call["kwargs"]["metadata"]["expires_at"]
+        == (fire_time + timedelta(seconds=wakeup_tool._WAKEUP_EXPIRY_GRACE_SECONDS)).isoformat()
+    )
 
 
 async def test_schedule_thread_wakeup_creates_cron(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -304,7 +334,7 @@ async def test_purge_deletes_only_expired_wakeups() -> None:
             _wakeup_cron("expired-1", now - timedelta(hours=1)),
             _wakeup_cron("expired-2", now - timedelta(days=1)),
             _wakeup_cron("future-1", now + timedelta(hours=1)),
-            _wakeup_cron("no-end", None),
+            _wakeup_cron("no-expiry", None),
         ]
     )
 
