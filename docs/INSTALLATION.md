@@ -419,6 +419,7 @@ LANGSMITH_URL_PROD="https://smith.langchain.com"
 ANTHROPIC_API_KEY=""                   # Anthropic API key
 OPENAI_API_KEY=""                      # OpenAI API key (when using openai: models)
 OPENAI_BASE_URL=""                     # Optional OpenAI-compatible /v1 endpoint; Responses API required
+OPENAI_BASE_URL_OWNS_RETRIES=""        # true only when that endpoint owns bounded transient retries
 GOOGLE_API_KEY=""                      # Google AI API key (when using google_genai: models)
 FIREWORKS_API_KEY=""                   # Fireworks API key (when using fireworks: models)
 

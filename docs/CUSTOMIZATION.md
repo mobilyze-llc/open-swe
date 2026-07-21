@@ -150,9 +150,12 @@ Set `OPENAI_BASE_URL` to route direct OpenAI models through a Responses-compatib
 endpoint. Keep the `/v1` suffix. Supply `OPENAI_API_KEY` through the deployment's
 secret mechanism rather than a shared shell environment. Use HTTPS unless the
 endpoint is on loopback or an encrypted private overlay such as Tailscale.
+Set `OPENAI_BASE_URL_OWNS_RETRIES=true` only when that endpoint performs its own
+bounded transient-failure retry; Open SWE then disables the OpenAI SDK retry layer.
 
 ```bash
 OPENAI_BASE_URL="https://openai-proxy.internal.example/v1"
+OPENAI_BASE_URL_OWNS_RETRIES="true"
 ```
 
 `max_tokens` is a maximum completion/output token budget, not the model's total context window. For OpenAI reasoning models, this budget can include both internal reasoning tokens and final response tokens.

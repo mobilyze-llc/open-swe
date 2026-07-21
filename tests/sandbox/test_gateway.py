@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -17,6 +18,7 @@ from agent.utils.model import OpenAIReasoning
 
 _GATEWAY_ENV_VARS = (
     "OPENAI_BASE_URL",
+    "OPENAI_BASE_URL_OWNS_RETRIES",
     "LANGSMITH_API_KEY",
     "LANGSMITH_API_KEY_PROD",
     "LANGSMITH_GATEWAY_API_KEY",
@@ -27,10 +29,13 @@ _GATEWAY_ENV_VARS = (
 
 
 @pytest.fixture(autouse=True)
-def _clean_gateway_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _clean_gateway_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Start each test from a known env: no key, gateway off, default base URL."""
     for name in _GATEWAY_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+    model._MODEL_CACHE.clear()
+    yield
+    model._MODEL_CACHE.clear()
 
 
 # --- gateway_overrides --------------------------------------------------------
@@ -340,6 +345,30 @@ def test_make_model_direct_openai_uses_responses_websocket() -> None:
     assert captured["store"] is False
     assert captured["include"] == ["reasoning.encrypted_content"]
     assert captured["output_version"] == "responses/v1"
+    assert captured["max_retries"] == model.DEFAULT_MAX_RETRIES
+
+
+def test_make_model_retry_owner_without_base_url_preserves_sdk_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL_OWNS_RETRIES", "true")
+    captured, fake = _capture_init_chat_model()
+    with patch.object(model, "init_chat_model", fake):
+        model.make_model("openai:gpt-5.6-sol", use_gateway=False)
+    assert captured["base_url"] == model.OPENAI_RESPONSES_WS_BASE_URL
+    assert captured["max_retries"] == model.DEFAULT_MAX_RETRIES
+
+
+def test_make_model_empty_openai_base_url_preserves_sdk_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "")
+    monkeypatch.setenv("OPENAI_BASE_URL_OWNS_RETRIES", "true")
+    captured, fake = _capture_init_chat_model()
+    with patch.object(model, "init_chat_model", fake):
+        model.make_model("openai:gpt-5.6-sol", use_gateway=False)
+    assert captured["base_url"] == model.OPENAI_RESPONSES_WS_BASE_URL
+    assert captured["max_retries"] == model.DEFAULT_MAX_RETRIES
 
 
 def test_make_model_direct_openai_honors_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -349,12 +378,36 @@ def test_make_model_direct_openai_honors_base_url(monkeypatch: pytest.MonkeyPatc
         model.make_model("openai:gpt-5.6-sol", use_gateway=False)
     assert captured["base_url"] == "http://studio2.example:8317/v1"
     assert captured["use_responses_api"] is True
+    assert captured["max_retries"] == model.DEFAULT_MAX_RETRIES
+
+
+def test_make_model_direct_openai_retry_owner_disables_sdk_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://studio2.example:8317/v1/")
+    monkeypatch.setenv("OPENAI_BASE_URL_OWNS_RETRIES", "true")
+    captured, fake = _capture_init_chat_model()
+    with patch.object(model, "init_chat_model", fake):
+        model.make_model("openai:gpt-5.6-sol", use_gateway=False)
+    assert captured["max_retries"] == 0
+
+
+def test_make_model_direct_openai_base_url_preserves_explicit_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://studio2.example:8317/v1")
+    monkeypatch.setenv("OPENAI_BASE_URL_OWNS_RETRIES", "true")
+    captured, fake = _capture_init_chat_model()
+    with patch.object(model, "init_chat_model", fake):
+        model.make_model("openai:gpt-5.6-sol", use_gateway=False, max_retries=2)
+    assert captured["max_retries"] == 2
 
 
 def test_make_model_gateway_openai_replaces_websocket(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OPENAI_BASE_URL", "http://studio2.example:8317/v1")
+    monkeypatch.setenv("OPENAI_BASE_URL_OWNS_RETRIES", "true")
     monkeypatch.setenv("LANGSMITH_API_KEY", "ls-key")
     captured, fake = _capture_init_chat_model()
     with patch.object(model, "init_chat_model", fake):
@@ -365,6 +418,7 @@ def test_make_model_gateway_openai_replaces_websocket(
     assert captured["include"] == ["reasoning.encrypted_content"]
     assert captured["output_version"] == "responses/v1"
     assert captured["api_key"] == "ls-key"
+    assert captured["max_retries"] == model.DEFAULT_MAX_RETRIES
 
 
 def test_make_model_gateway_openai_chat_completions_optout_converts_reasoning(

@@ -29,6 +29,10 @@ def _freeze_model_kwargs(kwargs: dict[str, object]) -> tuple[tuple[str, str], ..
     return tuple(sorted((key, repr(value)) for key, value in kwargs.items()))
 
 
+def _env_enabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 async def close_cached_models() -> None:
     models = list(_MODEL_CACHE.values())
     _MODEL_CACHE.clear()
@@ -120,10 +124,10 @@ def make_model(model_id: str, *, use_gateway: bool | None = None, **kwargs: Unpa
     provider defaults below (see :mod:`agent.utils.gateway`).
     """
     model_kwargs: dict[str, object] = dict(kwargs)
-    model_kwargs.setdefault("max_retries", DEFAULT_MAX_RETRIES)
+    direct_openai_base_url = os.environ.get("OPENAI_BASE_URL")
 
     if model_id.startswith("openai:"):
-        base_url = os.environ.get("OPENAI_BASE_URL") or OPENAI_RESPONSES_WS_BASE_URL
+        base_url = direct_openai_base_url or OPENAI_RESPONSES_WS_BASE_URL
         model_kwargs["base_url"] = base_url.rstrip("/")
         model_kwargs["use_responses_api"] = True
 
@@ -132,6 +136,16 @@ def make_model(model_id: str, *, use_gateway: bool | None = None, **kwargs: Unpa
         overrides = gateway_overrides(model_id)
         if overrides is not None:
             model_kwargs.update(overrides)
+
+    routed_through_direct_openai_base_url = (
+        model_id.startswith("openai:")
+        and direct_openai_base_url is not None
+        and model_kwargs.get("base_url") == direct_openai_base_url.rstrip("/")
+    )
+    endpoint_owns_retries = routed_through_direct_openai_base_url and _env_enabled(
+        "OPENAI_BASE_URL_OWNS_RETRIES"
+    )
+    model_kwargs.setdefault("max_retries", 0 if endpoint_owns_retries else DEFAULT_MAX_RETRIES)
 
     if model_id.startswith("openai:"):
         _configure_openai_responses_kwargs(model_kwargs)
