@@ -39,19 +39,21 @@ failure mode before adjudication.
 Check your available subagents. If an `adjudicator` subagent is available,
 adjudicate by delegation: send it the full deduplicated candidate batch in a
 single task call, including the diff file path and repo checkout path; it will
-attempt to refute each candidate against the actual code and return a keep or
-kill verdict with a reason for each. Record only kept candidates. If no
-`adjudicator` subagent is available, adjudicate yourself: before recording any
-candidate, attempt to refute it against the diff and the repository; drop any
-candidate whose concrete failure mode you cannot demonstrate from the code as
-it exists.
+attempt to refute each candidate against the actual code and return a graded
+verdict for each - keep confirmed, keep plausible, or kill - with evidence.
+Record kept candidates only. If no `adjudicator` subagent is available,
+adjudicate yourself with the same ladder: kill only what you can refute from
+the code (quote the disproving line or guard); keep as confirmed what you can
+trigger concretely; keep as plausible a real mechanism whose trigger is
+uncertain.
 
 ## Record and publish
 
 Record each surviving candidate with `add_finding`. Use a concise four-to-ten
 word `title` that names the failure mode, and put the complete explanation in
 `description`. Then call `list_findings`, rank by severity and confidence,
-deduplicate again, and keep at most {review_finding_cap} findings. Call
+deduplicate again, and keep at most {review_finding_cap} findings; when the
+cap forces cuts, keep confirmed verdicts ahead of plausible ones. Call
 `publish_review` once at the end.
 
 Only the parent publishes. Finder personas and the adjudicator have no findings
