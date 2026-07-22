@@ -89,6 +89,9 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
             repo_config["name"],
         )
     else:
+        repo_config = await service.get_linear_thread_repo_config(issue_id)
+
+    if not repo_config:
         comment_user_email = (data.get("user") or {}).get("email")
         try:
             profile_repo = await common.get_profile_default_repo(
@@ -130,6 +133,11 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
         repo_config = await common.get_team_default_repo()
 
     if not repo_config:
+        await service.post_linear_routing_failure(
+            issue_id,
+            data.get("id", ""),
+            "Couldn't determine the target repository. Specify it as `repo owner/name`.",
+        )
         return {"status": "ignored", "reason": "No default repository configured"}
 
     if not common._is_repo_allowed(repo_config):
@@ -137,6 +145,12 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
             "Rejecting Linear webhook: repo '%s/%s' not in allowlist",
             repo_config.get("owner"),
             repo_config.get("name"),
+        )
+        await service.post_linear_routing_failure(
+            issue_id,
+            data.get("id", ""),
+            f"The target repository `{repo_config['owner']}/{repo_config['name']}` is not enabled. "
+            "Specify an allowed repository as `repo owner/name`.",
         )
         return {"status": "ignored", "reason": "Repository not in allowlist"}
 

@@ -1,7 +1,7 @@
 """Tests for agent.utils.repo and Linear webhook repo override behavior."""
 
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -129,7 +129,7 @@ class TestLinearWebhookRepoOverride:
             mock_request.body.return_value = json.dumps(_base_payload).encode()
             mock_request.headers = {"Linear-Signature": "valid"}
 
-            bg_tasks = AsyncMock()
+            bg_tasks = MagicMock()
             result = await linear_webhook(mock_request, bg_tasks)
 
             assert result["status"] == "accepted"
@@ -173,12 +173,17 @@ class TestLinearWebhookRepoOverride:
                 },
             ),
             patch("agent.webhooks.common._is_repo_allowed", return_value=True),
+            patch(
+                "agent.webhooks.linear.get_linear_thread_repo_config",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
         ):
             mock_request = AsyncMock()
             mock_request.body.return_value = json.dumps(payload).encode()
             mock_request.headers = {"Linear-Signature": "valid"}
 
-            bg_tasks = AsyncMock()
+            bg_tasks = MagicMock()
             result = await linear_webhook(mock_request, bg_tasks)
 
             assert result["status"] == "accepted"
