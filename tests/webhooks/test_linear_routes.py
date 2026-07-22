@@ -12,6 +12,10 @@ from agent.webhooks import linear as linear_service
 from agent.webhooks.linear_routes import linear_webhook
 
 
+class _NotFoundError(RuntimeError):
+    status_code = 404
+
+
 def _payload(body: str = "@openswe please continue") -> dict:
     return {
         "type": "Comment",
@@ -49,6 +53,7 @@ async def _invoke(payload: dict) -> tuple[dict[str, str], MagicMock]:
 @pytest.mark.asyncio
 async def test_explicit_comment_repo_skips_thread_inheritance() -> None:
     thread_repo = AsyncMock(return_value={"owner": "stored", "name": "repo"})
+    persist_repo = AsyncMock()
     with (
         patch("agent.webhooks.common.verify_linear_signature", return_value=True),
         patch(
@@ -57,6 +62,7 @@ async def test_explicit_comment_repo_skips_thread_inheritance() -> None:
             return_value=_full_issue(),
         ),
         patch("agent.webhooks.linear.get_linear_thread_repo_config", thread_repo),
+        patch("agent.webhooks.linear.persist_linear_thread_repo_config", persist_repo),
         patch("agent.webhooks.common._is_repo_allowed", return_value=True),
     ):
         result, background_tasks = await _invoke(
@@ -65,6 +71,9 @@ async def test_explicit_comment_repo_skips_thread_inheritance() -> None:
 
     assert result["status"] == "accepted"
     thread_repo.assert_not_awaited()
+    persist_repo.assert_awaited_once_with(
+        "issue-456", {"owner": "explicit-owner", "name": "explicit-repo"}
+    )
     assert background_tasks.add_task.call_args.args[2] == {
         "owner": "explicit-owner",
         "name": "explicit-repo",
@@ -74,6 +83,7 @@ async def test_explicit_comment_repo_skips_thread_inheritance() -> None:
 @pytest.mark.asyncio
 async def test_existing_thread_repo_precedes_profile_and_team_defaults() -> None:
     profile_repo = AsyncMock(return_value={"owner": "profile", "name": "repo"})
+    persist_repo = AsyncMock()
     with (
         patch("agent.webhooks.common.verify_linear_signature", return_value=True),
         patch(
@@ -87,12 +97,14 @@ async def test_existing_thread_repo_precedes_profile_and_team_defaults() -> None
             return_value={"owner": "stored", "name": "repo"},
         ),
         patch("agent.webhooks.common.get_profile_default_repo", profile_repo),
+        patch("agent.webhooks.linear.persist_linear_thread_repo_config", persist_repo),
         patch("agent.webhooks.common._is_repo_allowed", return_value=True),
     ):
         result, background_tasks = await _invoke(_payload())
 
     assert result["status"] == "accepted"
     profile_repo.assert_not_awaited()
+    persist_repo.assert_awaited_once_with("issue-456", {"owner": "stored", "name": "repo"})
     assert background_tasks.add_task.call_args.args[2] == {
         "owner": "stored",
         "name": "repo",
@@ -101,6 +113,7 @@ async def test_existing_thread_repo_precedes_profile_and_team_defaults() -> None
 
 @pytest.mark.asyncio
 async def test_missing_thread_preserves_first_dispatch_profile_fallback() -> None:
+    persist_repo = AsyncMock()
     with (
         patch("agent.webhooks.common.verify_linear_signature", return_value=True),
         patch(
@@ -123,11 +136,13 @@ async def test_missing_thread_preserves_first_dispatch_profile_fallback() -> Non
             new_callable=AsyncMock,
             return_value={"owner": "profile", "name": "repo"},
         ),
+        patch("agent.webhooks.linear.persist_linear_thread_repo_config", persist_repo),
         patch("agent.webhooks.common._is_repo_allowed", return_value=True),
     ):
         result, background_tasks = await _invoke(_payload())
 
     assert result["status"] == "accepted"
+    persist_repo.assert_awaited_once_with("issue-456", {"owner": "profile", "name": "repo"})
     assert background_tasks.add_task.call_args.args[2] == {
         "owner": "profile",
         "name": "repo",
@@ -181,6 +196,7 @@ async def test_unroutable_mention_posts_visible_reason_and_returns_200() -> None
 @pytest.mark.asyncio
 async def test_allowlist_rejection_posts_visible_reason_and_returns_200() -> None:
     post_failure = AsyncMock()
+    persist_repo = AsyncMock()
     with (
         patch("agent.webhooks.common.verify_linear_signature", return_value=True),
         patch(
@@ -188,6 +204,7 @@ async def test_allowlist_rejection_posts_visible_reason_and_returns_200() -> Non
             new_callable=AsyncMock,
             return_value=_full_issue(),
         ),
+        patch("agent.webhooks.linear.persist_linear_thread_repo_config", persist_repo),
         patch("agent.webhooks.common._is_repo_allowed", return_value=False),
         patch("agent.webhooks.linear.post_linear_routing_failure", post_failure),
     ):
@@ -195,11 +212,44 @@ async def test_allowlist_rejection_posts_visible_reason_and_returns_200() -> Non
 
     assert result == {"status": "ignored", "reason": "Repository not in allowlist"}
     background_tasks.add_task.assert_not_called()
+    persist_repo.assert_not_awaited()
     post_failure.assert_awaited_once_with(
         "issue-456",
         "comment-123",
         "The target repository `blocked/repo` is not enabled. "
         "Specify an allowed repository as `repo owner/name`.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_explicit_repo_persist_failure_does_not_schedule_run() -> None:
+    post_failure = AsyncMock()
+    with (
+        patch("agent.webhooks.common.verify_linear_signature", return_value=True),
+        patch(
+            "agent.webhooks.common.fetch_linear_issue_details",
+            new_callable=AsyncMock,
+            return_value=_full_issue(),
+        ),
+        patch("agent.webhooks.common._is_repo_allowed", return_value=True),
+        patch(
+            "agent.webhooks.linear.persist_linear_thread_repo_config",
+            new_callable=AsyncMock,
+            side_effect=linear_service.LinearThreadRepoError("thread-1"),
+        ),
+        patch("agent.webhooks.linear.post_linear_routing_failure", post_failure),
+    ):
+        result, background_tasks = await _invoke(_payload("@openswe repo explicit/repo"))
+
+    assert result == {
+        "status": "ignored",
+        "reason": "Failed to persist thread repository metadata",
+    }
+    background_tasks.add_task.assert_not_called()
+    post_failure.assert_awaited_once_with(
+        "issue-456",
+        "comment-123",
+        "Couldn't save the target repository due to a temporary service error. Please retry.",
     )
 
 
@@ -237,10 +287,22 @@ async def test_thread_repo_helper_extracts_persisted_metadata() -> None:
 
 
 @pytest.mark.asyncio
-async def test_thread_repo_helper_falls_through_on_lookup_error() -> None:
-    client = SimpleNamespace(
-        threads=SimpleNamespace(get=AsyncMock(side_effect=RuntimeError("unavailable")))
-    )
+async def test_thread_repo_helper_rejects_missing_repo_metadata() -> None:
+    client = SimpleNamespace(threads=SimpleNamespace(get=AsyncMock(return_value={"metadata": {}})))
+    with (
+        patch.object(
+            linear_service.common, "generate_thread_id_from_issue", return_value="thread-1"
+        ),
+        patch.object(linear_service.common, "get_client", return_value=client),
+        pytest.raises(linear_service.LinearThreadRepoError),
+    ):
+        await linear_service.get_linear_thread_repo_config("issue-456")
+
+
+@pytest.mark.asyncio
+async def test_thread_repo_helper_returns_none_only_for_not_found() -> None:
+    not_found = _NotFoundError("not found")
+    client = SimpleNamespace(threads=SimpleNamespace(get=AsyncMock(side_effect=not_found)))
     with (
         patch.object(
             linear_service.common, "generate_thread_id_from_issue", return_value="thread-1"
@@ -250,6 +312,105 @@ async def test_thread_repo_helper_falls_through_on_lookup_error() -> None:
         repo_config = await linear_service.get_linear_thread_repo_config("issue-456")
 
     assert repo_config is None
+
+
+@pytest.mark.asyncio
+async def test_thread_repo_helper_raises_on_lookup_error() -> None:
+    client = SimpleNamespace(
+        threads=SimpleNamespace(get=AsyncMock(side_effect=RuntimeError("unavailable")))
+    )
+    with (
+        patch.object(
+            linear_service.common, "generate_thread_id_from_issue", return_value="thread-1"
+        ),
+        patch.object(linear_service.common, "get_client", return_value=client),
+        pytest.raises(linear_service.LinearThreadRepoError),
+    ):
+        await linear_service.get_linear_thread_repo_config("issue-456")
+
+
+@pytest.mark.asyncio
+async def test_thread_repo_lookup_error_does_not_use_fallbacks() -> None:
+    profile_repo = AsyncMock(return_value={"owner": "profile", "name": "repo"})
+    post_failure = AsyncMock()
+    with (
+        patch("agent.webhooks.common.verify_linear_signature", return_value=True),
+        patch(
+            "agent.webhooks.common.fetch_linear_issue_details",
+            new_callable=AsyncMock,
+            return_value=_full_issue(),
+        ),
+        patch(
+            "agent.webhooks.linear.get_linear_thread_repo_config",
+            new_callable=AsyncMock,
+            side_effect=linear_service.LinearThreadRepoError("thread-1"),
+        ),
+        patch("agent.webhooks.common.get_profile_default_repo", profile_repo),
+        patch("agent.webhooks.linear.post_linear_routing_failure", post_failure),
+    ):
+        result, background_tasks = await _invoke(_payload())
+
+    assert result == {
+        "status": "ignored",
+        "reason": "Failed to access thread repository metadata",
+    }
+    profile_repo.assert_not_awaited()
+    background_tasks.add_task.assert_not_called()
+    post_failure.assert_awaited_once_with(
+        "issue-456",
+        "comment-123",
+        "Couldn't safely read a repository from the existing thread. Retry or specify it "
+        "as `repo owner/name`.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_explicit_repo_persistence_updates_existing_thread() -> None:
+    client = SimpleNamespace(threads=SimpleNamespace(update=AsyncMock(), create=AsyncMock()))
+    with (
+        patch.object(
+            linear_service.common, "generate_thread_id_from_issue", return_value="thread-1"
+        ),
+        patch.object(linear_service.common, "get_client", return_value=client),
+    ):
+        await linear_service.persist_linear_thread_repo_config(
+            "issue-456", {"owner": "explicit", "name": "repo"}
+        )
+
+    client.threads.update.assert_awaited_once_with(
+        thread_id="thread-1", metadata={"repo": {"owner": "explicit", "name": "repo"}}
+    )
+    client.threads.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explicit_repo_persistence_creates_missing_thread() -> None:
+    not_found = _NotFoundError("not found")
+    client = SimpleNamespace(
+        threads=SimpleNamespace(
+            update=AsyncMock(side_effect=[not_found, None]),
+            create=AsyncMock(),
+        )
+    )
+    repo_config = {"owner": "explicit", "name": "repo"}
+    with (
+        patch.object(
+            linear_service.common, "generate_thread_id_from_issue", return_value="thread-1"
+        ),
+        patch.object(linear_service.common, "get_client", return_value=client),
+    ):
+        await linear_service.persist_linear_thread_repo_config("issue-456", repo_config)
+
+    client.threads.create.assert_awaited_once_with(
+        thread_id="thread-1",
+        if_exists="do_nothing",
+        metadata={"repo": repo_config},
+    )
+    assert client.threads.update.await_count == 2
+    assert client.threads.update.await_args_list[-1].kwargs == {
+        "thread_id": "thread-1",
+        "metadata": {"repo": repo_config},
+    }
 
 
 @pytest.mark.asyncio

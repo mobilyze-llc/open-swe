@@ -123,6 +123,10 @@ class TestLinearWebhookRepoOverride:
                 },
             ),
             patch("agent.webhooks.common._is_repo_allowed", return_value=True),
+            patch(
+                "agent.webhooks.linear.persist_linear_thread_repo_config",
+                new_callable=AsyncMock,
+            ),
             patch("agent.webhooks.common.BackgroundTasks"),
         ):
             mock_request = AsyncMock()
@@ -177,6 +181,10 @@ class TestLinearWebhookRepoOverride:
                 "agent.webhooks.linear.get_linear_thread_repo_config",
                 new_callable=AsyncMock,
                 return_value=None,
+            ),
+            patch(
+                "agent.webhooks.linear.persist_linear_thread_repo_config",
+                new_callable=AsyncMock,
             ),
         ):
             mock_request = AsyncMock()

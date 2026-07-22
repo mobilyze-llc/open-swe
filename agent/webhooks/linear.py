@@ -15,28 +15,63 @@ from . import common
 _LINEAR_ROUTING_FAILURE_PREFIX = "❌ **Agent Error**"
 
 
+class LinearThreadRepoError(RuntimeError):
+    """Raised when Linear thread repository metadata cannot be accessed safely."""
+
+
 async def get_linear_thread_repo_config(issue_id: str) -> dict[str, str] | None:
     """Read the repository already persisted for a Linear issue thread."""
     thread_id = common.generate_thread_id_from_issue(issue_id)
     try:
         thread = await common.get_client(url=common.LANGGRAPH_URL).threads.get(thread_id)
     except Exception as exc:  # noqa: BLE001
-        if not common._is_not_found_error(exc):
-            common.logger.exception(
-                "Failed to fetch Linear thread %s for repo resolution",
-                thread_id,
-            )
-        return None
+        if common._is_not_found_error(exc):
+            return None
+        common.logger.exception(
+            "Failed to fetch Linear thread %s for repo resolution",
+            thread_id,
+        )
+        raise LinearThreadRepoError(thread_id) from exc
 
     repo_config = common._extract_repo_config_from_thread(thread)
-    if repo_config:
-        common.logger.info(
-            "Applying repo from existing Linear thread %s: %s/%s",
-            thread_id,
-            repo_config["owner"],
-            repo_config["name"],
-        )
+    if not repo_config:
+        common.logger.warning("Linear thread %s has no valid repo metadata", thread_id)
+        raise LinearThreadRepoError(thread_id)
+    common.logger.info(
+        "Applying repo from existing Linear thread %s: %s/%s",
+        thread_id,
+        repo_config["owner"],
+        repo_config["name"],
+    )
     return repo_config
+
+
+async def persist_linear_thread_repo_config(issue_id: str, repo_config: dict[str, str]) -> None:
+    """Persist the resolved repository before scheduling the Linear run."""
+    thread_id = common.generate_thread_id_from_issue(issue_id)
+    client = common.get_client(url=common.LANGGRAPH_URL)
+    try:
+        await client.threads.update(thread_id=thread_id, metadata={"repo": repo_config})
+    except Exception as exc:  # noqa: BLE001
+        if not common._is_not_found_error(exc):
+            common.logger.exception(
+                "Failed to persist repo on Linear thread %s",
+                thread_id,
+            )
+            raise LinearThreadRepoError(thread_id) from exc
+        try:
+            await client.threads.create(
+                thread_id=thread_id,
+                if_exists="do_nothing",
+                metadata={"repo": repo_config},
+            )
+            await client.threads.update(thread_id=thread_id, metadata={"repo": repo_config})
+        except Exception as create_exc:  # noqa: BLE001
+            common.logger.exception(
+                "Failed to create Linear thread %s while persisting repo metadata",
+                thread_id,
+            )
+            raise LinearThreadRepoError(thread_id) from create_exc
 
 
 async def post_linear_routing_failure(
@@ -271,7 +306,6 @@ async def process_linear_issue(  # noqa: PLR0912, PLR0915
     await common.upsert_agent_thread_owner_metadata(
         thread_id,
         source="linear",
-        repo_config=repo_config,
         github_login=mapped_login or "",
         user_email=user_email or "",
         title=title or identifier or "Linear issue",

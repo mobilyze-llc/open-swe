@@ -50,7 +50,11 @@ def _run_process(
         title="",
         source_context=None,
     ):
-        captured["upsert"] = {"github_login": github_login, "user_email": user_email}
+        captured["upsert"] = {
+            "repo_config": repo_config,
+            "github_login": github_login,
+            "user_email": user_email,
+        }
         return None
 
     async def fake_resolve_login(email):
@@ -105,6 +109,7 @@ def test_linear_upsert_tags_thread_with_login() -> None:
         {"owner": "langchain-ai", "name": "open-swe"},
     )
 
+    assert upsert["repo_config"] is None
     assert upsert["github_login"] == "zhen"
     assert upsert["user_email"] == "zhen@example.com"
 

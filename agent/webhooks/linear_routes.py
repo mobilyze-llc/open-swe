@@ -89,7 +89,16 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
             repo_config["name"],
         )
     else:
-        repo_config = await service.get_linear_thread_repo_config(issue_id)
+        try:
+            repo_config = await service.get_linear_thread_repo_config(issue_id)
+        except service.LinearThreadRepoError:
+            await service.post_linear_routing_failure(
+                issue_id,
+                data.get("id", ""),
+                "Couldn't safely read a repository from the existing thread. Retry or specify it "
+                "as `repo owner/name`.",
+            )
+            return {"status": "ignored", "reason": "Failed to access thread repository metadata"}
 
     if not repo_config:
         comment_user_email = (data.get("user") or {}).get("email")
@@ -153,6 +162,16 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
             "Specify an allowed repository as `repo owner/name`.",
         )
         return {"status": "ignored", "reason": "Repository not in allowlist"}
+
+    try:
+        await service.persist_linear_thread_repo_config(issue_id, repo_config)
+    except service.LinearThreadRepoError:
+        await service.post_linear_routing_failure(
+            issue_id,
+            data.get("id", ""),
+            "Couldn't save the target repository due to a temporary service error. Please retry.",
+        )
+        return {"status": "ignored", "reason": "Failed to persist thread repository metadata"}
 
     repo_owner = repo_config["owner"]
     repo_name = repo_config["name"]
