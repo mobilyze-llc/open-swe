@@ -378,7 +378,11 @@ drift from deepagents' actual builtin set — both already tracked as OSWE-83.
   ever shipped. Not verified by touching the host — corroborated three ways instead.
 - **Dispatch-site → event map** (for the eventual flip; corrected per the PR #29 review — sites
   are not one-to-one with dispatch kinds):
-  - `trigger_pr_review_from_ref` (`github.py:191`) — explicit review request.
+  - `trigger_pr_review_from_ref` (`github.py:191`) — explicit review request. Note (adjudicated
+    PR #29 finding, upheld in OSWE-92's corrected record): this site never reads
+    `last_reviewed_sha` and never sets `re_review` — an explicit re-request on a reviewed PR
+    dispatches with first-review semantics today. OSWE-87 decides whether to fix the site or route
+    on thread metadata.
   - `_dispatch_first_review_from_pr_payload` (`github.py:312`) — `opened`/`ready_for_review`, BUT
     it computes `is_re_review = bool(last_reviewed_sha)` and dispatches `re_review=True` when the
     canonical thread was reviewed before (draft→ready, reopen). Routing must key on the *computed
@@ -561,3 +565,16 @@ task owns it at a time. Peak useful concurrency is wave 0's four lanes (+ the up
 after that the work is deliberately serial. Routing end-state: adversarial for first reviews +
 explicit requests; push re-reviews and finding replies stay on stock permanently (OSWE-87's
 selector interlock enforces this even under misconfig).
+
+## 17. Merge escape hatch (OSWE-93, applied 2026-07-22)
+
+Repo governance now splits `main` protection into two rulesets: **"Protect main"** (deletion,
+non-fast-forward, PR-required, and the eight CI/lint/CodeQL required checks; `bypass_actors`
+empty — CI is never bypassable) and **"Review gate"** (the single required "Open SWE Review"
+check; bypass: organization admins, pull-request mode only). The hatch is
+`gh pr merge <n> --squash --admin`, and it succeeds exactly when the only red rule is the review
+gate. Protocol: the hatch fires **only on the operator's explicit merge instruction for that PR**
+— never agent-initiated; skipped-over findings remain tracked in the findings ledger. GitHub
+records every bypass in the merge event and ruleset insights. First live use: PR #29
+(`88fc4135c`). Complementary to OSWE-92's settle-anywhere fix: 92 keeps the gate honest and
+writable; the hatch covers "merge now regardless," by the operator alone.
