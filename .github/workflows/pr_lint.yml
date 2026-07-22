@@ -6,12 +6,19 @@ permissions:
 on:
   pull_request:
     types: [opened, edited, synchronize]
+  # The check is required on main, so it must also report on merge queue
+  # commits; the title was already linted on the PR, so that run is a no-op.
+  merge_group:
 
 jobs:
   lint-pr-title:
     runs-on: ubuntu-latest
     steps:
+      - name: Pass on merge group
+        if: github.event_name == 'merge_group'
+        run: echo "PR title was linted on the pull request; nothing to validate on a merge group."
       - name: Validate PR Title
+        if: github.event_name == 'pull_request'
         uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
