@@ -18,6 +18,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
 from agent.prompt import OPEN_SWE_SHARED_BASE
+from agent.reviewer import REVIEWER_SUBAGENT_SYSTEM_PROMPT, _reviewer_subagent
 from agent.tools import list_findings
 from agent.utils.agent_definitions import (
     AgentDefinitionError,
@@ -253,6 +254,73 @@ async def test_prompt_middleware_prepends_persona_to_profile_prompt() -> None:
 
     assert seen[0].system_message is not None
     assert seen[0].system_message.text == f"{assembled}\n\n{OPEN_SWE_SHARED_BASE}"
+
+
+async def _capture_stock_reviewer_prompt(*, with_profile: bool) -> str:
+    parent_model = _ScriptedChatModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "task",
+                        "args": {
+                            "description": "Review the assigned files.",
+                            "subagent_type": "reviewer",
+                        },
+                        "id": "call-stock-reviewer",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="finished"),
+        ],
+        provider_key="stock-parent-fake",
+        model_name="stock-parent-model",
+    )
+    subagent_model = _ScriptedChatModel(
+        responses=[AIMessage(content="review complete")],
+        provider_key=(
+            "stock-reviewer-profile-fake" if with_profile else "stock-reviewer-default-fake"
+        ),
+        model_name="stock-reviewer-model",
+    )
+    if with_profile:
+        provider_key = get_model_provider(subagent_model)
+        assert provider_key == "stock-reviewer-profile-fake"
+        register_harness_profile(
+            provider_key,
+            HarnessProfile(base_system_prompt=OPEN_SWE_SHARED_BASE),
+        )
+
+    graph = create_deep_agent(
+        model=parent_model,
+        system_prompt="x",
+        tools=[],
+        subagents=[_reviewer_subagent(subagent_model)],
+    )
+    await graph.ainvoke({"messages": [HumanMessage(content="go")]})
+
+    assert len(subagent_model.system_prompts) == 1
+    return subagent_model.system_prompts[0]
+
+
+async def test_stock_reviewer_persona_survives_without_harness_profile(
+    isolated_harness_profiles: None,
+) -> None:
+    del isolated_harness_profiles
+    received = await _capture_stock_reviewer_prompt(with_profile=False)
+
+    assert received.startswith(REVIEWER_SUBAGENT_SYSTEM_PROMPT)
+
+
+async def test_stock_reviewer_persona_survives_real_harness_profile_replacement(
+    isolated_harness_profiles: None,
+) -> None:
+    del isolated_harness_profiles
+    received = await _capture_stock_reviewer_prompt(with_profile=True)
+
+    assert received.startswith(f"{REVIEWER_SUBAGENT_SYSTEM_PROMPT}\n\n{OPEN_SWE_SHARED_BASE}")
 
 
 async def test_persona_prompt_survives_real_deepagents_profile_replacement(
