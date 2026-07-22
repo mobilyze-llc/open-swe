@@ -143,9 +143,11 @@ def test_shared_base_requires_terse_slack_replies_with_share_path() -> None:
     assert "not normal assistant messages shown in the web UI" in OPEN_SWE_SHARED_BASE
     assert "post a very short acknowledgement" in OPEN_SWE_SHARED_BASE
     assert "before cloning/checking out repositories" in OPEN_SWE_SHARED_BASE
-    assert "Never paste long output" in OPEN_SWE_SHARED_BASE
+    assert "Except for the required plan-mode completion message" in OPEN_SWE_SHARED_BASE
+    assert "outside plan mode" in OPEN_SWE_SHARED_BASE
     assert "`save_plan`" in OPEN_SWE_SHARED_BASE
     assert "plan-review link" in OPEN_SWE_SHARED_BASE
+    assert "full-plan source-channel completion contract" in OPEN_SWE_SHARED_BASE
     assert "does not enter plan mode" in OPEN_SWE_SHARED_BASE
 
 
