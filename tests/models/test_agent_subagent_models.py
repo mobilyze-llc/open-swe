@@ -6,6 +6,16 @@ from langgraph.graph.state import RunnableConfig
 from agent.server import get_agent
 
 
+@pytest.fixture(autouse=True)
+def _plan_approval_policy_off():
+    with patch(
+        "agent.server._cached_require_plan_approval",
+        new_callable=AsyncMock,
+        return_value=False,
+    ):
+        yield
+
+
 class _DummyAgent:
     def with_config(self, config: RunnableConfig) -> "_DummyAgent":
         self.config = config

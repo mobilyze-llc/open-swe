@@ -294,3 +294,117 @@ async def test_policy_forced_revision_keeps_approve_plan_excluded() -> None:
     assert plan_mode._initial is True
     assert plan_mode._excluded == server.PLAN_MODE_EXCLUDED_TOOLS | {"approve_plan"}
     assert prepare_run._plan_gate_forced is True
+
+
+@pytest.mark.asyncio
+async def test_cached_plan_policy_serves_last_known_true_on_read_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    server.ttl_cache.clear()
+    try:
+        with patch(
+            "agent.dashboard.team_settings._get_stored_team_settings",
+            new_callable=AsyncMock,
+            side_effect=[{"require_plan_approval": True}, RuntimeError("store unavailable")],
+        ):
+            assert await server._cached_require_plan_approval() is True
+            server.ttl_cache.set_cached(server._REQUIRE_PLAN_APPROVAL_CACHE_KEY, True, -1)
+            caplog.set_level(logging.WARNING, logger="agent.utils.ttl_cache")
+            assert await server._cached_require_plan_approval() is True
+
+        assert "serving stale value" in caplog.text
+    finally:
+        server.ttl_cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_cached_plan_policy_cold_read_failure_fails_closed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    server.ttl_cache.clear()
+    try:
+        with patch(
+            "agent.dashboard.team_settings._get_stored_team_settings",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("store unavailable"),
+        ):
+            caplog.set_level(logging.WARNING, logger="agent.server")
+            assert await server._cached_require_plan_approval() is True
+
+        assert "no known-good value; requiring approval" in caplog.text
+    finally:
+        server.ttl_cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_cached_plan_policy_healthy_never_set_defaults_off() -> None:
+    server.ttl_cache.clear()
+    try:
+        with patch(
+            "agent.dashboard.team_settings._get_stored_team_settings",
+            new_callable=AsyncMock,
+            return_value={},
+        ):
+            assert await server._cached_require_plan_approval() is False
+    finally:
+        server.ttl_cache.clear()
+
+
+async def _capture_rejection_followup_config(
+    monkeypatch: pytest.MonkeyPatch,
+    metadata: dict[str, object],
+) -> dict[str, object]:
+    from agent.dashboard import plan_api
+
+    captured: dict[str, object] = {}
+
+    async def fake_dispatch(
+        thread_id: str,
+        text: str,
+        configurable: dict[str, object],
+        *,
+        source: str,
+    ) -> None:
+        captured.update(configurable)
+
+    monkeypatch.setattr(plan_api, "dispatch_agent_run", fake_dispatch)
+    await plan_api._dispatch_followup(
+        "thread-ctx",
+        metadata,
+        "revise the plan",
+        plan_mode=True,
+    )
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_forced_plan_rejection_followup_keeps_approve_plan_excluded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configurable = await _capture_rejection_followup_config(
+        monkeypatch,
+        {"source": "dashboard", "plan_gate_forced": True},
+    )
+    captured = await _capture_create_deep_agent_kwargs(configurable=configurable)
+
+    plan_mode = _plan_mode_middleware(captured)
+    assert plan_mode._initial is True
+    assert "approve_plan" in plan_mode._excluded
+
+
+@pytest.mark.asyncio
+async def test_voluntary_plan_rejection_followup_keeps_approve_plan_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configurable = await _capture_rejection_followup_config(
+        monkeypatch,
+        {"source": "dashboard"},
+    )
+    captured = await _capture_create_deep_agent_kwargs(
+        require_plan_approval=True,
+        configurable=configurable,
+    )
+
+    plan_mode = _plan_mode_middleware(captured)
+    assert plan_mode._initial is True
+    assert "approve_plan" not in plan_mode._excluded

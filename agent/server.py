@@ -721,12 +721,22 @@ async def _cached_fable_enabled() -> bool:
     )
 
 
+_REQUIRE_PLAN_APPROVAL_CACHE_KEY = "team:require-plan-approval"
+
+
 async def _cached_require_plan_approval() -> bool:
-    return await ttl_cache.cached(
-        f"team:require-plan-approval:{id(get_team_require_plan_approval)}",
-        60,
-        get_team_require_plan_approval,
-    )
+    try:
+        return await ttl_cache.cached(
+            _REQUIRE_PLAN_APPROVAL_CACHE_KEY,
+            60,
+            get_team_require_plan_approval,
+        )
+    except Exception:
+        logger.warning(
+            "Plan approval policy unavailable with no known-good value; requiring approval",
+            exc_info=True,
+        )
+        return True
 
 
 async def _record_plan_gate_bypass(thread_id: str, github_login: str | None) -> None:
