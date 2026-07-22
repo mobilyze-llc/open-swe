@@ -290,19 +290,21 @@ def _default_settings() -> dict[str, Any]:
     }
 
 
-async def _get_stored_team_settings() -> dict[str, Any]:
+async def _get_stored_team_settings(*, raise_on_error: bool = False) -> dict[str, Any]:
     try:
         item = await _client().store.get_item(TEAM_SETTINGS_NAMESPACE, TEAM_SETTINGS_KEY)
     except Exception as e:
         logger.debug("team settings lookup failed: %s", e)
+        if raise_on_error:
+            raise
         return {}
     value = item.get("value") if isinstance(item, dict) else getattr(item, "value", None)
     return value if isinstance(value, dict) else {}
 
 
-async def get_team_settings() -> dict[str, Any]:
+async def get_team_settings(*, raise_on_error: bool = False) -> dict[str, Any]:
     defaults = _default_settings()
-    value = await _get_stored_team_settings()
+    value = await _get_stored_team_settings(raise_on_error=raise_on_error)
     # Skip None-valued model fields so legacy records (or PUTs that cleared the
     # selection) still surface the hardcoded default instead of a null.
     overlay = {k: v for k, v in value.items() if v is not None}
@@ -484,8 +486,12 @@ async def get_team_autofix_settings() -> tuple[bool, str]:
 
 
 async def get_team_require_plan_approval() -> bool:
-    """Return whether every enrolled agent dispatch requires plan approval."""
-    settings = await get_team_settings()
+    """Return the plan gate policy, failing closed when settings cannot be read."""
+    try:
+        settings = await get_team_settings(raise_on_error=True)
+    except Exception:
+        logger.warning("Plan approval policy lookup failed; requiring approval", exc_info=True)
+        return True
     return settings.get("require_plan_approval") is True
 
 

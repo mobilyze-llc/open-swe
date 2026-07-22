@@ -178,3 +178,13 @@ async def test_upsert_sets_plan_approval_policy_explicitly() -> None:
 
     put.assert_awaited_once()
     assert value["require_plan_approval"] is False
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_lookup_failure_fails_closed() -> None:
+    with patch(
+        "agent.dashboard.team_settings._get_stored_team_settings",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("store unavailable"),
+    ):
+        assert await get_team_require_plan_approval() is True

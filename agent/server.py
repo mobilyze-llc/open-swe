@@ -736,7 +736,7 @@ async def _record_plan_gate_bypass(thread_id: str, github_login: str | None) -> 
     logger.info("Plan gate bypass for thread %s by %s at %s", thread_id, actor, stamp["at"])
     await client.threads.update(
         thread_id=thread_id,
-        metadata={"plan_gate_bypass": stamp},
+        metadata={"plan_gate_bypass": stamp, "plan_gate_forced": False},
     )
 
 
@@ -776,6 +776,7 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
         linear_issue_number: str,
         create_prs: bool,
         plan_mode: bool,
+        plan_gate_forced: bool,
         plan_profile_name: str,
         plan_profile_body: str,
         corridor_enabled: bool,
@@ -793,6 +794,7 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
         self._linear_issue_number = linear_issue_number
         self._create_prs = create_prs
         self._plan_mode = plan_mode
+        self._plan_gate_forced = plan_gate_forced
         self._plan_profile_name = plan_profile_name
         self._plan_profile_body = plan_profile_body
         self._corridor_enabled = corridor_enabled
@@ -807,6 +809,7 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
             "source": self._source,
             "repo": configurable.get("repo"),
             "plan_mode": self._plan_mode,
+            "plan_gate_forced": self._plan_gate_forced,
             "plan_profile": self._plan_profile_name,
             "model": self._model_id,
             "effort": self._effort,
@@ -845,6 +848,7 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
                     "effort": self._effort,
                     "source": self._source,
                     "plan_mode": self._plan_mode,
+                    "plan_gate_forced": self._plan_gate_forced,
                     "plan_profile": self._plan_profile_name,
                 },
             )
@@ -914,14 +918,20 @@ async def get_agent(config: RunnableConfig) -> Pregel:
         _cached_require_plan_approval(),
     )
     plan_gate_bypass = configurable.get("plan_gate_bypass") is True
-    plan_mode_forced = require_plan_approval and not plan_mode and not plan_gate_bypass
-    plan_gate_bypassed = require_plan_approval and not plan_mode and plan_gate_bypass
-    if plan_mode_forced:
-        plan_mode = True
-        configurable["plan_mode"] = True
-        logger.info("Plan approval policy forced plan mode for thread %s", thread_id)
-    elif plan_gate_bypassed:
+    plan_mode_forced = configurable.get("plan_gate_forced") is True
+    plan_gate_bypassed = plan_gate_bypass and (
+        plan_mode_forced or (require_plan_approval and not plan_mode)
+    )
+    if plan_gate_bypassed:
+        plan_mode_forced = False
+        configurable["plan_gate_forced"] = False
         await _record_plan_gate_bypass(thread_id, profile_login)
+    elif plan_mode_forced or (require_plan_approval and not plan_mode):
+        plan_mode = True
+        plan_mode_forced = True
+        configurable["plan_mode"] = True
+        configurable["plan_gate_forced"] = True
+        logger.info("Plan approval policy forced plan mode for thread %s", thread_id)
 
     plan_profile = resolve_stage_profile(
         "plan",
@@ -1202,6 +1212,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
                     linear_issue_number=linear_issue_number,
                     create_prs=always_create_prs,
                     plan_mode=plan_mode,
+                    plan_gate_forced=plan_mode_forced,
                     plan_profile_name=plan_profile.name,
                     plan_profile_body=plan_profile.body,
                     corridor_enabled=bool(corridor_tools),

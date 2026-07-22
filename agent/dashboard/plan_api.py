@@ -209,7 +209,7 @@ async def approve_plan_for_thread(
         text = "The plan has been approved. Implement it now as described in the plan."
     if feedback:
         text += "\n\nAlso take this reviewer feedback into account:\n\n" + feedback
-    await _dispatch_followup(thread_id, metadata, text, plan_mode=False)
+    await _dispatch_followup(thread_id, metadata, text, plan_mode=False, plan_gate_bypass=True)
     await _maybe_post_plan_approved_to_slack(
         metadata,
         comment_count=len(comments),
@@ -301,7 +301,12 @@ def _format_comments(comments: list[dict[str, Any]]) -> str:
 
 
 async def _dispatch_followup(
-    thread_id: str, metadata: dict[str, Any], text: str, *, plan_mode: bool
+    thread_id: str,
+    metadata: dict[str, Any],
+    text: str,
+    *,
+    plan_mode: bool,
+    plan_gate_bypass: bool = False,
 ) -> None:
     """Continue the existing thread with a new instruction run.
 
@@ -331,7 +336,9 @@ async def _dispatch_followup(
     # Carry the decision to the follow-up run: approve continues out of plan
     # mode (implement), reject stays in plan mode (revise the plan).
     configurable["plan_mode"] = plan_mode
-    if not plan_mode:
+    if metadata.get("plan_gate_forced") is True:
+        configurable["plan_gate_forced"] = True
+    if plan_gate_bypass:
         configurable["plan_gate_bypass"] = True
 
     await dispatch_agent_run(

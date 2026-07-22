@@ -281,3 +281,16 @@ async def test_policy_unset_preserves_legacy_tool_and_middleware_wiring() -> Non
     assert isinstance(bound_config, dict)
     baseline_configurable = _base_config().get("configurable")
     assert bound_config["configurable"] == baseline_configurable
+
+
+@pytest.mark.asyncio
+async def test_policy_forced_revision_keeps_approve_plan_excluded() -> None:
+    captured = await _capture_create_deep_agent_kwargs(
+        configurable={"plan_mode": True, "plan_gate_forced": True},
+    )
+
+    plan_mode = _plan_mode_middleware(captured)
+    prepare_run = _prepare_run_middleware(captured)
+    assert plan_mode._initial is True
+    assert plan_mode._excluded == server.PLAN_MODE_EXCLUDED_TOOLS | {"approve_plan"}
+    assert prepare_run._plan_gate_forced is True
