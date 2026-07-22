@@ -42,8 +42,15 @@ class PlanModeMiddleware(AgentMiddleware):
 
     state_schema = PlanModeState
 
-    def __init__(self, *, excluded: frozenset[str], initial: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        excluded: frozenset[str],
+        allowed: frozenset[str] | None = None,
+        initial: bool = False,
+    ) -> None:
         self._excluded = excluded
+        self._allowed = allowed
         self._initial = initial
 
     def before_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:  # noqa: ARG002
@@ -66,9 +73,14 @@ class PlanModeMiddleware(AgentMiddleware):
         return self._initial
 
     def _filter(self, request: ModelRequest) -> ModelRequest:
-        if not self._excluded or not self._active(request):
+        if not self._active(request):
             return request
-        filtered = [t for t in request.tools if _tool_name(t) not in self._excluded]
+        filtered = [
+            tool
+            for tool in request.tools
+            if _tool_name(tool) not in self._excluded
+            and (self._allowed is None or _tool_name(tool) in self._allowed)
+        ]
         if len(filtered) == len(request.tools):
             return request
         return request.override(tools=filtered)

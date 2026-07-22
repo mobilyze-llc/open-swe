@@ -46,9 +46,11 @@ from .dashboard.team_settings import (
     get_team_default_grouping_model,
     get_team_default_model_pair,
     get_team_fable_enabled,
+    get_team_stage_profile,
 )
 from .middleware import (
     BasePrepareRunMiddleware,
+    ExcludeToolsMiddleware,
     RepairOrphanedToolCallsMiddleware,
     SanitizeFireworksMessagesMiddleware,
     SanitizeThinkingBlocksMiddleware,
@@ -113,6 +115,7 @@ from .utils.github_token import cache_github_token_for_thread
 from .utils.model import DEFAULT_LLM_REASONING, make_model, provider_model_kwargs
 from .utils.repo_prep import materialize_trusted_skills, prepare_review_repo
 from .utils.sandbox_paths import aresolve_sandbox_work_dir
+from .utils.stage_profiles import DEEP_AGENT_TOOL_NAMES, resolve_stage_profile
 from .utils.tracing import REVIEW_TRACING_PROJECT, traced_graph_factory
 
 HISTORICAL_REVIEW_GUIDANCE = """- **Anything that overlaps an existing PR review thread.** A
@@ -330,6 +333,22 @@ mean a review was posted.
 """
 
 
+REVIEW_STAGE_TOOL_NAMES = DEEP_AGENT_TOOL_NAMES | frozenset(
+    {
+        "add_finding",
+        "fetch_review_diff",
+        "fetch_url",
+        "http_request",
+        "list_findings",
+        "publish_review",
+        "reply_to_finding_thread",
+        "resolve_finding_thread",
+        "update_finding",
+        "web_search",
+    }
+)
+
+
 REVIEWER_EVAL_PROMPT_SUFFIX = """
 # Eval mode — calibration
 
@@ -413,8 +432,9 @@ def _reviewer_system_prompt(
     agents_md_content: str | None = None,
     scoped_agents_md: dict[str, str] | None = None,
     api_standards_skill: str | None = None,
+    profile_body: str = REVIEWER_PROMPT_TEMPLATE,
 ) -> str:
-    prompt = REVIEWER_PROMPT_TEMPLATE.format(
+    prompt = profile_body.format(
         working_dir=working_dir,
         repo_owner=repo_owner or "<owner>",
         repo_name=repo_name or "<repo>",
@@ -891,6 +911,14 @@ async def _cached_reviewer_team_defaults():
     )
 
 
+async def _cached_review_profile_name() -> str | None:
+    return await ttl_cache.cached(
+        f"team:stage-profile:review:{id(get_team_stage_profile)}",
+        60,
+        lambda: get_team_stage_profile("review"),
+    )
+
+
 async def _cached_gateway_enabled() -> bool:
     return await ttl_cache.cached(
         f"team:gateway-enabled:{id(get_effective_gateway_enabled)}",
@@ -965,10 +993,14 @@ class PrepareReviewerRunMiddleware(BasePrepareRunMiddleware):
         thread_id: str,
         config: RunnableConfig,
         use_gateway: bool,
+        review_profile_name: str,
+        review_profile_body: str,
     ) -> None:
         self._thread_id = thread_id
         self._config = config
         self._use_gateway = use_gateway
+        self._review_profile_name = review_profile_name
+        self._review_profile_body = review_profile_body
 
     def _prepare_config_fingerprint(self) -> Any:
         configurable = self._config.get("configurable", {})
@@ -978,6 +1010,7 @@ class PrepareReviewerRunMiddleware(BasePrepareRunMiddleware):
             if isinstance(configurable, dict)
             else None,
             "thread_id": self._thread_id,
+            "review_profile": self._review_profile_name,
             "repo": repo_config,
             "pr_number": configurable.get("pr_number") if isinstance(configurable, dict) else None,
             "base_sha": configurable.get("base_sha") if isinstance(configurable, dict) else None,
@@ -1242,6 +1275,7 @@ class PrepareReviewerRunMiddleware(BasePrepareRunMiddleware):
             agents_md_content=agents_md_content,
             scoped_agents_md=scoped_agents_md,
             api_standards_skill=api_standards_skill,
+            profile_body=self._review_profile_body,
         )
         trace_context_prompt = format_pr_trace_context_prompt(pr_trace_context)
         if trace_context_prompt:
@@ -1314,6 +1348,14 @@ async def get_reviewer_agent(config: RunnableConfig) -> Pregel:
         logger.info("No thread_id or not for execution, returning reviewer agent without sandbox")
         return create_deep_agent(system_prompt="", tools=[]).with_config(config)
 
+    review_profile_name = await _cached_review_profile_name()
+    review_profile = resolve_stage_profile(
+        "review",
+        review_profile_name,
+        allowed_tools=REVIEW_STAGE_TOOL_NAMES,
+        fallback_body=REVIEWER_PROMPT_TEMPLATE,
+    )
+
     configured_model_id = configurable.get("reviewer_model_id")
     configured_effort = configurable.get("reviewer_reasoning_effort")
     if isinstance(configured_model_id, str) and configured_model_id:
@@ -1336,6 +1378,17 @@ async def get_reviewer_agent(config: RunnableConfig) -> Pregel:
             subagent_model_id,
             subagent_effort,
         )
+        if review_profile.model is not None:
+            logger.info(
+                "Applying review stage profile model: profile=%s model=%s effort=%s",
+                review_profile.name,
+                review_profile.model,
+                review_profile.reasoning_effort,
+            )
+            model_id = review_profile.model
+            reasoning_effort = review_profile.reasoning_effort
+            subagent_model_id = review_profile.model
+            subagent_effort = review_profile.reasoning_effort
     configured_subagent_model_id = configurable.get("reviewer_subagent_model_id")
     configured_subagent_effort = configurable.get("reviewer_subagent_reasoning_effort")
     if isinstance(configured_subagent_model_id, str) and configured_subagent_model_id:
@@ -1405,6 +1458,8 @@ async def get_reviewer_agent(config: RunnableConfig) -> Pregel:
                     thread_id=thread_id,
                     config=config,
                     use_gateway=use_gateway,
+                    review_profile_name=review_profile.name,
+                    review_profile_body=review_profile.body,
                 ),
                 SanitizeToolInputsMiddleware(),
                 ModelCallLimitMiddleware(run_limit=MODEL_CALL_RECURSION_LIMIT, exit_behavior="end"),
@@ -1413,6 +1468,11 @@ async def get_reviewer_agent(config: RunnableConfig) -> Pregel:
                 check_message_queue_before_model,
                 SlackAssistantStatusMiddleware(),
                 TimeoutWrapupMiddleware(),
+                *(
+                    [ExcludeToolsMiddleware(allowed=frozenset(review_profile.tools))]
+                    if review_profile.tools is not None
+                    else []
+                ),
                 SanitizeFireworksMessagesMiddleware(),
                 SanitizeThinkingBlocksMiddleware(),
                 RepairOrphanedToolCallsMiddleware(),

@@ -183,6 +183,8 @@ export interface TeamSettings {
   default_grouping_reasoning_effort?: string | null
   default_chat_model?: string | null
   default_chat_reasoning_effort?: string | null
+  plan_profile?: string | null
+  review_profile?: string | null
   updated_at?: string | null
 }
 

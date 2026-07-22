@@ -64,6 +64,17 @@ class TeamSettingsUpdate(BaseModel):
     default_grouping_reasoning_effort: str | None = None
     default_chat_model: str | None = None
     default_chat_reasoning_effort: str | None = None
+    plan_profile: str | None = None
+    review_profile: str | None = None
+
+    @field_validator("plan_profile", "review_profile", mode="before")
+    @classmethod
+    def _normalize_stage_profile(cls, v: object) -> str | None:
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError("stage profile must be a string")
+        return v.strip() or None
 
     @field_validator("org_guidelines", mode="before")
     @classmethod
@@ -272,6 +283,8 @@ def _default_settings() -> dict[str, Any]:
         # No hardcoded chat default: unset means "inherit the Agent default".
         "default_chat_model": None,
         "default_chat_reasoning_effort": None,
+        "plan_profile": None,
+        "review_profile": None,
         "updated_at": None,
     }
 
@@ -340,6 +353,16 @@ async def upsert_team_settings(update: TeamSettingsUpdate) -> dict[str, Any]:
         "default_grouping_reasoning_effort": update.default_grouping_reasoning_effort,
         "default_chat_model": update.default_chat_model,
         "default_chat_reasoning_effort": update.default_chat_reasoning_effort,
+        "plan_profile": (
+            update.plan_profile
+            if "plan_profile" in update.model_fields_set
+            else stored.get("plan_profile")
+        ),
+        "review_profile": (
+            update.review_profile
+            if "review_profile" in update.model_fields_set
+            else stored.get("review_profile")
+        ),
         "updated_at": datetime.now(UTC).isoformat(),
     }
     await _client().store.put_item(TEAM_SETTINGS_NAMESPACE, TEAM_SETTINGS_KEY, value)
@@ -349,6 +372,13 @@ async def upsert_team_settings(update: TeamSettingsUpdate) -> dict[str, Any]:
 async def get_team_default_repo() -> dict[str, str] | None:
     settings = await get_team_settings()
     return _parse_repo(settings.get("default_repo"))
+
+
+async def get_team_stage_profile(stage: Literal["plan", "review"]) -> str | None:
+    """Return the selected stage profile name, or None for the default."""
+    settings = await get_team_settings()
+    value = settings.get(f"{stage}_profile")
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 async def get_team_default_model(

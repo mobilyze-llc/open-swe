@@ -57,6 +57,7 @@ from .dashboard.team_settings import (
     get_team_default_model_pair,
     get_team_default_repo,
     get_team_fable_enabled,
+    get_team_stage_profile,
 )
 from .dashboard.user_mappings import email_for_login
 from .integrations.corridor_mcp import load_corridor_tools
@@ -87,7 +88,7 @@ from .middleware import (
     task_retry_on,
 )
 from .middleware.prepare_run import PrepareRunState
-from .prompt import construct_system_prompt
+from .prompt import PLAN_MODE_SECTION, construct_system_prompt
 from .runtime.constants import (
     DEFAULT_LLM_MAX_TOKENS,
     DEFAULT_RECURSION_LIMIT,
@@ -150,6 +151,7 @@ from .utils.sandbox_state import (
     set_sandbox_backend,
     unwrap_sandbox_backend,
 )
+from .utils.stage_profiles import DEEP_AGENT_TOOL_NAMES, resolve_stage_profile
 from .utils.tracing import AGENT_TRACING_PROJECT, traced_graph_factory
 
 client = get_client()
@@ -511,6 +513,35 @@ PLAN_MODE_EXCLUDED_TOOLS: frozenset[str] = frozenset(
         "linear_delete_issue",
     }
 )
+PLAN_STAGE_TOOL_NAMES = (
+    DEEP_AGENT_TOOL_NAMES
+    | frozenset(
+        {
+            "approve_plan",
+            "enter_plan_mode",
+            "fetch_url",
+            "http_request",
+            "linear_comment",
+            "linear_create_issue",
+            "linear_delete_issue",
+            "linear_get_issue",
+            "linear_get_issue_comments",
+            "linear_list_teams",
+            "linear_search_issues",
+            "linear_update_issue",
+            "open_pull_request",
+            "report_platform_issue",
+            "request_pr_review",
+            "save_plan",
+            "schedule_thread_wakeup",
+            "slack_add_reaction",
+            "slack_read_thread_messages",
+            "slack_start_new_thread",
+            "slack_thread_reply",
+            "web_search",
+        }
+    )
+) - PLAN_MODE_EXCLUDED_TOOLS
 
 
 def _general_purpose_subagent(
@@ -664,6 +695,14 @@ async def _cached_team_default_model_pair(kind: Literal["agent", "reviewer"]):
     )
 
 
+async def _cached_stage_profile_name(stage: Literal["plan", "review"]) -> str | None:
+    return await ttl_cache.cached(
+        f"team:stage-profile:{stage}:{id(get_team_stage_profile)}",
+        60,
+        lambda: get_team_stage_profile(stage),
+    )
+
+
 async def _cached_gateway_enabled() -> bool:
     return await ttl_cache.cached(
         f"team:gateway-enabled:{id(get_effective_gateway_enabled)}",
@@ -716,6 +755,8 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
         linear_issue_number: str,
         create_prs: bool,
         plan_mode: bool,
+        plan_profile_name: str,
+        plan_profile_body: str,
         corridor_enabled: bool,
         prepared_sandbox_backend: SandboxBackendProtocol | None = None,
         prepared_work_dir: str | None = None,
@@ -731,6 +772,8 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
         self._linear_issue_number = linear_issue_number
         self._create_prs = create_prs
         self._plan_mode = plan_mode
+        self._plan_profile_name = plan_profile_name
+        self._plan_profile_body = plan_profile_body
         self._corridor_enabled = corridor_enabled
         self._prepared_sandbox_backend = prepared_sandbox_backend
         self._prepared_work_dir = prepared_work_dir
@@ -743,6 +786,7 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
             "source": self._source,
             "repo": configurable.get("repo"),
             "plan_mode": self._plan_mode,
+            "plan_profile": self._plan_profile_name,
             "model": self._model_id,
             "effort": self._effort,
         }
@@ -780,6 +824,7 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
                     "effort": self._effort,
                     "source": self._source,
                     "plan_mode": self._plan_mode,
+                    "plan_profile": self._plan_profile_name,
                 },
             )
             await record_agent_thread_usage(
@@ -806,6 +851,7 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
                 default_repo=prompt_default_repo,
                 plan_mode=self._plan_mode,
                 plan_url=dashboard_plan_url(self._thread_id),
+                plan_profile_body=self._plan_profile_body,
                 repo_custom_instructions=repo_custom_instructions,
                 thread_url=dashboard_thread_url(self._thread_id),
                 corridor_enabled=self._corridor_enabled,
@@ -817,6 +863,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     """Get or create an agent with a sandbox for the given thread."""
     configurable = config.get("configurable") or {}
     thread_id = configurable.get("thread_id")
+    plan_mode = configurable.get("plan_mode") is True
 
     config["recursion_limit"] = DEFAULT_RECURSION_LIMIT
 
@@ -830,11 +877,18 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     profile_login = resolve_github_login(as_json_object(config))
     # Team/profile settings are accepted stale for a short TTL so graph factories
     # stay off the critical path during worker load and retry storms.
-    team_defaults, use_gateway, profile, fable_enabled = await asyncio.gather(
+    team_defaults, use_gateway, profile, fable_enabled, plan_profile_name = await asyncio.gather(
         _cached_team_default_model_pair("agent"),
         _cached_gateway_enabled(),
         _cached_profile(profile_login),
         _cached_fable_enabled(),
+        _cached_stage_profile_name("plan"),
+    )
+    plan_profile = resolve_stage_profile(
+        "plan",
+        plan_profile_name,
+        allowed_tools=PLAN_STAGE_TOOL_NAMES,
+        fallback_body=PLAN_MODE_SECTION,
     )
 
     linear_issue = as_json_object(configurable.get("linear_issue"))
@@ -879,6 +933,16 @@ async def get_agent(config: RunnableConfig) -> Pregel:
             )
             subagent_model_id = overridden_subagent_model
             subagent_effort = overridden_subagent_effort
+
+    if plan_mode and plan_profile.model is not None:
+        logger.info(
+            "Applying plan stage profile model: profile=%s model=%s effort=%s",
+            plan_profile.name,
+            plan_profile.model,
+            plan_profile.reasoning_effort,
+        )
+        model_id = plan_profile.model
+        profile_effort = plan_profile.reasoning_effort
 
     per_thread_model = configurable.get("agent_model_id")
     per_thread_effort = configurable.get("agent_effort")
@@ -944,11 +1008,14 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     # fresh run with nothing set starts out of plan mode. Installed
     # unconditionally and state-aware: it also restricts tools after a mid-run
     # `enter_plan_mode` call, not just when plan mode is set up front.
-    plan_mode = configurable.get("plan_mode") is True
     if plan_mode:
         logger.info("Plan mode enabled for thread %s", thread_id)
     plan_mode_middleware: list[Any] = [
-        PlanModeMiddleware(excluded=PLAN_MODE_EXCLUDED_TOOLS, initial=plan_mode)
+        PlanModeMiddleware(
+            excluded=PLAN_MODE_EXCLUDED_TOOLS,
+            allowed=frozenset(plan_profile.tools) if plan_profile.tools is not None else None,
+            initial=plan_mode,
+        )
     ]
 
     observability_tools = await _load_observability_tools(
@@ -1071,6 +1138,8 @@ async def get_agent(config: RunnableConfig) -> Pregel:
                     linear_issue_number=linear_issue_number,
                     create_prs=always_create_prs,
                     plan_mode=plan_mode,
+                    plan_profile_name=plan_profile.name,
+                    plan_profile_body=plan_profile.body,
                     corridor_enabled=bool(corridor_tools),
                     prepared_sandbox_backend=prepared_sandbox_backend,
                     prepared_work_dir=prepared_work_dir,

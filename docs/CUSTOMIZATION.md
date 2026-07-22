@@ -462,6 +462,29 @@ The system prompt is assembled in `agent/prompt.py` from modular sections. You c
 | `CODE_REVIEW_GUIDELINES_SECTION` | How the agent reviews code changes |
 | `COMMUNICATION_SECTION` | Formatting and messaging guidelines |
 
+### Stage profiles
+
+Plan and review behavior can be versioned as frontmatter Markdown under
+[`agent/profiles/`](../agent/profiles/):
+
+```text
+agent/profiles/
+├── plan/default.md
+└── review/default.md
+```
+
+The Markdown body is the stage instruction template. Frontmatter may set `model`,
+`reasoning_effort`, and `tools`. `tools` is an allowlist restriction and must be a
+subset of that stage's code-defined curated toolset; profiles cannot add tools,
+MCP servers, subagents, or other capabilities. Invalid selected profiles log an
+error and fall back to `default` without aborting graph construction.
+
+Workspace team settings select profiles with `plan_profile` and `review_profile`.
+An omitted value, `null`, or `default` selects the bundled default. The default
+profile bodies are byte-identical to the previous hardcoded plan and reviewer
+prompts, while omitted model, effort, and tools fields preserve the existing
+runtime defaults and full curated toolset.
+
 ### Default prompt file
 
 Open SWE supports a `default_prompt.md` file for org-level instructions that apply to **every** agent run, regardless of which repository is being worked on. This is the recommended way to set default repository preferences, org conventions, and shared guidelines.
