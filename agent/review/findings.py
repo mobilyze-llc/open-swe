@@ -531,6 +531,54 @@ async def update_finding_surface(
     return captured.get("finding")
 
 
+def pending_finding_reply_comment_ids(finding: Finding) -> set[int]:
+    """Return pending human-reply comment ids for one finding."""
+    interactions = finding.get("interactions")
+    if not isinstance(interactions, list):
+        return set()
+    return {
+        comment_id
+        for interaction in interactions
+        if isinstance(interaction, dict)
+        and interaction.get("kind") == "human_reply"
+        and interaction.get("needs_reassessment") is True
+        and isinstance((comment_id := interaction.get("github_comment_id")), int)
+    }
+
+
+async def mark_finding_replies_reassessed(
+    thread_id: str,
+    finding_id: str,
+    reply_comment_ids: set[int],
+) -> Finding | None:
+    """Mark a snapshot of pending human replies as reassessed."""
+    captured: dict[str, Finding] = {}
+
+    def _apply(findings: list[Finding]) -> bool:
+        for finding in findings:
+            if finding.get("id") != finding_id:
+                continue
+            captured["finding"] = finding
+            interactions = finding.get("interactions")
+            if not isinstance(interactions, list):
+                return False
+            updated = False
+            for interaction in interactions:
+                if (
+                    isinstance(interaction, dict)
+                    and interaction.get("kind") == "human_reply"
+                    and interaction.get("needs_reassessment") is True
+                    and interaction.get("github_comment_id") in reply_comment_ids
+                ):
+                    interaction["needs_reassessment"] = False
+                    updated = True
+            return updated
+        return False
+
+    await mutate_findings(thread_id, _apply)
+    return captured.get("finding")
+
+
 async def append_finding_interaction(
     thread_id: str,
     finding_id: str,

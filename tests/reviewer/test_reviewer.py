@@ -865,6 +865,23 @@ def test_build_first_review_context_omits_threads_section_when_empty() -> None:
     assert "## Pre-existing PR review threads" not in ctx
 
 
+def test_build_re_review_context_requires_reply_for_touched_or_outdated_keeps() -> None:
+    ctx = reviewer._build_re_review_context(
+        pr_url="https://example/pr",
+        repo_owner="acme",
+        repo_name="repo",
+        pr_number=1,
+        last_reviewed_sha="prev",
+        head_sha="head",
+        existing_findings_block="- [f1] finding",
+        existing_threads_block='<thread status="outdated">f1</thread>',
+    )
+
+    assert "touched a finding's anchor or its review thread is outdated" in ctx
+    assert "reply_to_finding_thread" in ctx
+    assert "why the change does not resolve it" in ctx
+
+
 def test_build_re_review_context_includes_existing_threads_block() -> None:
     ctx = reviewer._build_re_review_context(
         pr_url="https://example/pr",
@@ -968,6 +985,60 @@ def test_build_re_review_context_includes_pr_overview() -> None:
     )
     assert "PR title and description" in ctx
     assert "Add caching layer" in ctx
+
+
+def test_build_finding_reply_context_reassesses_all_pending_with_visible_outcomes() -> None:
+    ctx = reviewer._build_finding_reply_context(
+        pr_url="https://example/pr",
+        repo_owner="acme",
+        repo_name="repo",
+        pr_number=1,
+        finding_id="f2",
+        reply_author="octocat",
+        reply_body="Freshest reply",
+        existing_findings_block="- [f1] first\n- [f2] second",
+        pending_finding_replies={"f1": [101], "f2": [202]},
+    )
+
+    assert "finding_id: f2" in ctx
+    assert "Freshest reply" in ctx
+    assert (
+        "## Findings with pending human replies\n\n"
+        "- f1: reply_comment_ids=[101]\n- f2: reply_comment_ids=[202]"
+    ) in ctx
+    assert "Reassess every finding listed" in ctx
+    assert "resolve_finding_thread" in ctx
+    assert "update_finding" in ctx
+    assert "reply_to_finding_thread" in ctx
+    assert "Never complete a pending-reply reassessment silently" in ctx
+
+
+def test_pending_finding_replies_include_only_open_unprocessed_replies() -> None:
+    findings = [
+        {
+            "id": "f1",
+            "status": "open",
+            "interactions": [
+                {"kind": "human_reply", "github_comment_id": 101, "needs_reassessment": True}
+            ],
+        },
+        {
+            "id": "f2",
+            "status": "open",
+            "interactions": [
+                {"kind": "human_reply", "github_comment_id": 202, "needs_reassessment": False}
+            ],
+        },
+        {
+            "id": "f3",
+            "status": "resolved",
+            "interactions": [
+                {"kind": "human_reply", "github_comment_id": 303, "needs_reassessment": True}
+            ],
+        },
+    ]
+
+    assert reviewer._pending_finding_replies(findings) == {"f1": [101]}  # type: ignore[arg-type]
 
 
 def test_build_finding_reply_context_includes_pr_overview() -> None:

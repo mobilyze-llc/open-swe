@@ -74,6 +74,7 @@ from .review.diff import (
 from .review.findings import (
     REVIEW_FINDING_CAP,
     Finding,
+    pending_finding_reply_comment_ids,
 )
 from .review.findings import (
     list_findings as list_findings_async,
@@ -649,8 +650,11 @@ def _build_re_review_context(
         f"comment was invalid, verify that analysis, then call "
         f'`resolve_finding_thread(id, status="dismissed", note="...")` to close it. '
         f"The `note` is posted verbatim, so write it as the complete GitHub reply body. "
-        f"Reply only when directly asked or when a concise clarification is "
-        f"necessary. Then add any net-new findings introduced by the "
+        f"If the new diff touched a finding's anchor or its review thread is outdated and "
+        f"the finding stays open, post a brief `reply_to_finding_thread` explanation of why "
+        f"the change does not resolve it. When adjudicating a listed pending human reply, "
+        f"pass its exact comment ids as `reply_comment_ids`. Then add any net-new findings "
+        f"introduced by the "
         f"new diff — but skip anything already covered by an existing PR "
         f"review thread above (your own prior threads, another reviewer's, or "
         f"one a human has already replied to). Call `publish_review` once at "
@@ -668,6 +672,7 @@ def _build_finding_reply_context(
     reply_author: str,
     reply_body: str,
     existing_findings_block: str,
+    pending_finding_replies: dict[str, list[int]] | None = None,
     pr_title: str = "",
     pr_body: str = "",
     existing_threads_block: str = "",
@@ -681,6 +686,16 @@ def _build_finding_reply_context(
     )
     safe_author = _safe_login(reply_author)
     safe_reply_body = _escape_for_data_block(reply_body)
+    pending_replies = dict(pending_finding_replies or {})
+    if finding_id and finding_id not in pending_replies:
+        pending_replies[finding_id] = []
+    pending_block = (
+        "\n".join(
+            f"- {pending_id}: reply_comment_ids={comment_ids}"
+            for pending_id, comment_ids in pending_replies.items()
+        )
+        or "_(none)_"
+    )
     return (
         f"## User replied to an Open SWE review finding\n\n"
         f"- repo: {repo_owner}/{repo_name}\n"
@@ -698,14 +713,20 @@ def _build_finding_reply_context(
         "</body>\n"
         "</finding_reply>\n\n"
         f"## Existing findings\n\n{existing_findings_block}\n\n"
+        f"## Findings with pending human replies\n\n{pending_block}\n\n"
         f"{prior_threads_section}"
-        f"Reassess only this finding. If the reply proves the finding is invalid, "
-        f'call `resolve_finding_thread(id, status="dismissed", note="<full reply body>")`. If code now '
-        f'fixes the finding, call `update_finding(id, status="resolved", note="<full reply body>")`. '
-        f"The `note` is posted verbatim, so write it as the complete GitHub reply body. "
-        f"Use `reply_to_finding_thread` only when the user asked a direct "
-        f"question or a concise clarification is necessary. Call `publish_review` "
-        f"once at the end so pending GitHub thread state is reconciled."
+        f"Reassess every finding listed as having a pending human reply, not only the "
+        f"freshest triggering finding above. For each one, verify the code and reply, then "
+        f"produce an author-visible outcome: if the reply proves the finding invalid, call "
+        f'`resolve_finding_thread(id, status="dismissed", note="<full reply body>")`; if code now '
+        f'fixes it, call `update_finding(id, status="resolved", note="<full reply body>")`; '
+        f"otherwise keep it open and call `reply_to_finding_thread` with a brief explanation "
+        f"of why. Pass that finding's listed `reply_comment_ids` to whichever adjudication "
+        f"tool you call; never substitute ids read from newer live state. Never complete a "
+        f"pending-reply reassessment silently. The resolution `note` "
+        f"is posted verbatim, so write it as the complete GitHub reply body. Call "
+        f"`publish_review` once at the end after adjudicating all pending replies so GitHub "
+        f"thread and check state is reconciled."
     )
 
 
@@ -828,6 +849,18 @@ def _format_pr_review_threads(threads: list[dict]) -> str:
     return "\n".join(out)
 
 
+def _pending_finding_replies(findings: list[Finding]) -> dict[str, list[int]]:
+    pending: dict[str, list[int]] = {}
+    for finding in findings:
+        if finding.get("status") != "open":
+            continue
+        finding_id = finding.get("id")
+        comment_ids = sorted(pending_finding_reply_comment_ids(finding))
+        if isinstance(finding_id, str) and finding_id and comment_ids:
+            pending[finding_id] = comment_ids
+    return pending
+
+
 def _format_existing_findings(findings: list[Finding]) -> str:
     if not findings:
         return "_(none)_"
@@ -850,6 +883,9 @@ def _format_existing_findings(findings: list[Finding]) -> str:
         if isinstance(human_reply, str) and human_reply:
             author = f.get("last_human_reply_author") or "human"
             lines.append(f"  Human reply from {author}: {human_reply}")
+        pending_reply_ids = sorted(pending_finding_reply_comment_ids(f))
+        if pending_reply_ids:
+            lines.append(f"  Pending reply_comment_ids: {pending_reply_ids}")
     return "\n".join(lines) if lines else "_(no open findings)_"
 
 
@@ -1235,6 +1271,7 @@ class PrepareReviewerRunMiddleware(BasePrepareRunMiddleware):
                     reply_author=str(configurable.get("finding_reply_author", "") or ""),
                     reply_body=str(configurable.get("finding_reply_body", "") or ""),
                     existing_findings_block=_format_existing_findings(existing_findings),
+                    pending_finding_replies=_pending_finding_replies(existing_findings),
                     pr_title=pr_title,
                     pr_body=pr_body,
                     existing_threads_block=existing_threads_block,

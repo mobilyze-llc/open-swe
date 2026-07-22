@@ -10,6 +10,7 @@ import pytest
 
 from agent.tools.add_finding import add_finding
 from agent.tools.list_findings import list_findings
+from agent.tools.reply_to_finding_thread import _reply_to_finding_thread_async
 from agent.tools.resolve_finding_thread import resolve_finding_thread
 from agent.tools.update_finding import update_finding
 
@@ -299,6 +300,40 @@ async def test_update_finding_rejects_invalid_status() -> None:
     assert result["success"] is False
 
 
+async def test_reply_to_finding_thread_clears_only_context_observed_reply_ids() -> None:
+    finding = {"id": "f1", "status": "open", "github_review_comment_id": 11}
+    mark_reassessed = AsyncMock(return_value=finding)
+    with (
+        patch("agent.tools.reply_to_finding_thread.get_thread_id_from_runtime", return_value="tid"),
+        patch(
+            "agent.tools.reply_to_finding_thread.get_finding",
+            AsyncMock(return_value=finding),
+        ),
+        patch(
+            "agent.tools.reply_to_finding_thread.reply_to_review_comment",
+            AsyncMock(return_value={"id": 999}),
+        ),
+        patch("agent.tools.reply_to_finding_thread.update_finding_fields", AsyncMock()),
+        patch("agent.tools.reply_to_finding_thread.append_finding_interaction", AsyncMock()),
+        patch(
+            "agent.tools.reply_to_finding_thread.mark_finding_replies_reassessed",
+            mark_reassessed,
+        ),
+    ):
+        result = await _reply_to_finding_thread_async(
+            finding_id="f1",
+            body="This remains open because the guard is still missing.",
+            owner="o",
+            repo="r",
+            pr_number=7,
+            token="token",
+            reply_comment_ids=[101],
+        )
+
+    assert result["success"] is True
+    mark_reassessed.assert_awaited_once_with("tid", "f1", {101})
+
+
 async def test_resolve_finding_thread_resolves_all_known_threads() -> None:
     finding = {
         "id": "f1",
@@ -309,6 +344,7 @@ async def test_resolve_finding_thread_resolves_all_known_threads() -> None:
     update = AsyncMock(return_value={**finding, "status": "resolved"})
     resolve = AsyncMock(return_value=True)
     reply = AsyncMock(return_value={"id": 999})
+    mark_reassessed = AsyncMock(return_value={**finding, "status": "resolved"})
 
     with (
         patch(
@@ -322,9 +358,16 @@ async def test_resolve_finding_thread_resolves_all_known_threads() -> None:
         patch("agent.tools.resolve_finding_thread.reply_to_review_comment", reply),
         patch("agent.tools.resolve_finding_thread.update_finding_fields", update),
         patch("agent.tools.resolve_finding_thread.update_finding_surface", AsyncMock()),
+        patch(
+            "agent.tools.resolve_finding_thread.mark_finding_replies_reassessed",
+            mark_reassessed,
+        ),
     ):
         result = await resolve_finding_thread(
-            "f1", status="resolved", note="Fixed in the latest commit"
+            "f1",
+            status="resolved",
+            note="Fixed in the latest commit",
+            reply_comment_ids=[101],
         )
 
     assert result["success"] is True
@@ -343,6 +386,7 @@ async def test_resolve_finding_thread_resolves_all_known_threads() -> None:
     assert updates["github_resolved_thread_ids"] == ["THREAD_1", "THREAD_2"]
     assert updates["github_posted_resolution_comment_ids"] == [11, 12]
     assert updates["resolution_note"] == "Fixed in the latest commit"
+    mark_reassessed.assert_awaited_once_with("tid", "f1", {101})
 
 
 async def test_resolve_finding_thread_requires_note() -> None:
@@ -376,6 +420,7 @@ async def test_update_finding_updates_title() -> None:
         captured.append(updates)
         return {"id": finding_id, **updates}
 
+    mark_reassessed = AsyncMock()
     with (
         patch("agent.tools.update_finding.get_config", return_value=_config()),
         patch("agent.tools.update_finding.get_thread_id_from_runtime", return_value="tid-1"),
@@ -384,11 +429,19 @@ async def test_update_finding_updates_title() -> None:
             AsyncMock(return_value=[_existing_finding()]),
         ),
         patch("agent.tools.update_finding.update_finding_fields", side_effect=fake_update),
+        patch(
+            "agent.tools.update_finding.mark_finding_replies_reassessed",
+            mark_reassessed,
+        ),
     ):
-        result = await update_finding(finding_id="f_a", title="new generated title")
+        result = await update_finding(
+            finding_id="f_a", title="new generated title", reply_comment_ids=[101]
+        )
 
     assert result["success"] is True
     assert captured[0]["title"] == "new generated title"
+
+    mark_reassessed.assert_not_awaited()
 
 
 async def test_add_finding_drops_long_suggestion() -> None:
@@ -654,6 +707,7 @@ async def test_update_finding_resolves_hidden_finding_locally() -> None:
         return {"id": finding_id, **updates}
 
     cfg = _config(repo={"owner": "o", "name": "r"}, pr_number=7)
+    mark_reassessed = AsyncMock(return_value={"id": "f_a", "status": "resolved"})
     with (
         patch("agent.tools.update_finding.get_config", return_value=cfg),
         patch("agent.tools.update_finding.get_thread_id_from_runtime", return_value="tid-1"),
@@ -663,6 +717,10 @@ async def test_update_finding_resolves_hidden_finding_locally() -> None:
         ),
         patch("agent.tools.update_finding.update_finding_fields", side_effect=fake_update),
         patch(
+            "agent.tools.update_finding.mark_finding_replies_reassessed",
+            mark_reassessed,
+        ),
+        patch(
             "agent.tools.resolve_finding_thread._resolve_finding_thread_async",
             new_callable=AsyncMock,
         ) as resolve_async,
@@ -671,6 +729,7 @@ async def test_update_finding_resolves_hidden_finding_locally() -> None:
             finding_id="f_a",
             status="resolved",
             note="The latest commit adds the missing guard.",
+            reply_comment_ids=[101],
         )
 
     assert result["success"] is True
@@ -678,6 +737,8 @@ async def test_update_finding_resolves_hidden_finding_locally() -> None:
     assert updates["status"] == "resolved"
     assert updates["resolution_note"] == "The latest commit adds the missing guard."
     resolve_async.assert_not_awaited()
+
+    mark_reassessed.assert_awaited_once_with("tid-1", "f_a", {101})
 
 
 async def test_list_findings_filters_by_status() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -95,6 +96,34 @@ async def test_create_review_check_run_returns_none_on_http_error(
     )
 
     assert check_run_id is None
+
+
+async def test_create_completed_review_check_run_posts_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(github_checks.httpx, "AsyncClient", _FakeAsyncClient)
+
+    ok = await github_checks.create_completed_review_check_run(
+        owner="acme",
+        repo="widgets",
+        head_sha="abc123",
+        token="tok",
+        conclusion="failure",
+        title="Found 2 potential issues",
+        summary="standing findings remain",
+    )
+
+    assert ok is True
+    assert _FakeAsyncClient.last_post is not None
+    body = _FakeAsyncClient.last_post["json"]
+    assert body["name"] == github_checks.REVIEW_CHECK_RUN_NAME
+    assert body["head_sha"] == "abc123"
+    assert body["status"] == "completed"
+    assert body["conclusion"] == "failure"
+    assert body["output"] == {
+        "title": "Found 2 potential issues",
+        "summary": "standing findings remain",
+    }
 
 
 async def test_complete_review_check_run_patches_completed(
@@ -253,6 +282,67 @@ async def test_settle_review_check_run_noop_without_tracked_id(
     )
 
     assert completed == []
+
+
+@pytest.mark.parametrize("blocking", [False, True])
+async def test_settle_review_check_run_publish_path_creates_only_when_blocking(
+    monkeypatch: pytest.MonkeyPatch,
+    blocking: bool,
+) -> None:
+    monkeypatch.setenv("REVIEW_CHECK_BLOCKING", "true" if blocking else "false")
+    monkeypatch.setattr(reviewer_publish, "get_thread_metadata", AsyncMock(return_value={}))
+    create = AsyncMock(return_value=True)
+    monkeypatch.setattr(reviewer_publish, "create_completed_review_check_run", create)
+
+    await reviewer_publish.settle_review_check_run(
+        thread_id="t1",
+        owner="acme",
+        repo="widgets",
+        token="tok",
+        conclusion="success",
+        title="No issues found",
+        summary="standing ledger is clear",
+        head_sha="abc123",
+        create_if_missing=True,
+    )
+
+    if blocking:
+        create.assert_awaited_once_with(
+            owner="acme",
+            repo="widgets",
+            head_sha="abc123",
+            token="tok",
+            conclusion="success",
+            title="No issues found",
+            summary="standing ledger is clear",
+        )
+    else:
+        create.assert_not_awaited()
+
+
+async def test_settle_review_check_run_surfaces_replacement_creation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REVIEW_CHECK_BLOCKING", "true")
+    monkeypatch.setattr(reviewer_publish, "get_thread_metadata", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        reviewer_publish,
+        "create_completed_review_check_run",
+        AsyncMock(return_value=False),
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to create completed review check"):
+        await reviewer_publish.settle_review_check_run(
+            thread_id="t1",
+            owner="acme",
+            repo="widgets",
+            token="tok",
+            conclusion="success",
+            title="No issues found",
+            summary="standing ledger is clear",
+            head_sha="abc123",
+            create_if_missing=True,
+        )
 
 
 async def test_settle_review_check_run_completes_and_clears(
