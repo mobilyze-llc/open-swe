@@ -378,7 +378,12 @@ async def test_explicit_repo_persistence_updates_existing_thread() -> None:
         )
 
     client.threads.update.assert_awaited_once_with(
-        thread_id="thread-1", metadata={"repo": {"owner": "explicit", "name": "repo"}}
+        thread_id="thread-1",
+        metadata={
+            "repo": {"owner": "explicit", "name": "repo"},
+            "repo_owner": "explicit",
+            "repo_name": "repo",
+        },
     )
     client.threads.create.assert_not_awaited()
 
@@ -401,15 +406,20 @@ async def test_explicit_repo_persistence_creates_missing_thread() -> None:
     ):
         await linear_service.persist_linear_thread_repo_config("issue-456", repo_config)
 
+    metadata = {
+        "repo": repo_config,
+        "repo_owner": "explicit",
+        "repo_name": "repo",
+    }
     client.threads.create.assert_awaited_once_with(
         thread_id="thread-1",
         if_exists="do_nothing",
-        metadata={"repo": repo_config},
+        metadata=metadata,
     )
     assert client.threads.update.await_count == 2
     assert client.threads.update.await_args_list[-1].kwargs == {
         "thread_id": "thread-1",
-        "metadata": {"repo": repo_config},
+        "metadata": metadata,
     }
 
 

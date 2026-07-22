@@ -50,8 +50,13 @@ async def persist_linear_thread_repo_config(issue_id: str, repo_config: dict[str
     """Persist the resolved repository before scheduling the Linear run."""
     thread_id = common.generate_thread_id_from_issue(issue_id)
     client = common.get_client(url=common.LANGGRAPH_URL)
+    metadata = {
+        "repo": repo_config,
+        "repo_owner": repo_config["owner"],
+        "repo_name": repo_config["name"],
+    }
     try:
-        await client.threads.update(thread_id=thread_id, metadata={"repo": repo_config})
+        await client.threads.update(thread_id=thread_id, metadata=metadata)
     except Exception as exc:  # noqa: BLE001
         if not common._is_not_found_error(exc):
             common.logger.exception(
@@ -63,9 +68,9 @@ async def persist_linear_thread_repo_config(issue_id: str, repo_config: dict[str
             await client.threads.create(
                 thread_id=thread_id,
                 if_exists="do_nothing",
-                metadata={"repo": repo_config},
+                metadata=metadata,
             )
-            await client.threads.update(thread_id=thread_id, metadata={"repo": repo_config})
+            await client.threads.update(thread_id=thread_id, metadata=metadata)
         except Exception as create_exc:  # noqa: BLE001
             common.logger.exception(
                 "Failed to create Linear thread %s while persisting repo metadata",
