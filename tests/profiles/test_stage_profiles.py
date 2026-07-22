@@ -34,6 +34,15 @@ def _write_profile(root: Path, stage: str, name: str, frontmatter: str, body: st
 def test_default_plan_profile_is_byte_identical() -> None:
     profile = load_stage_profile("plan", "default", allowed_tools=PLAN_STAGE_TOOL_NAMES)
 
+    for body in (profile.body, PLAN_MODE_SECTION):
+        assert "\n### Challenge\n" in body
+        assert "\n### Unverified claims\n" in body
+        assert "\n### Questions\n" in body
+        normalized_body = " ".join(body.split())
+        assert (
+            "Do not narrate successful verifications anywhere — only refutations, "
+            "ambiguities, and unverifiables appear in the plan." in normalized_body
+        )
     assert profile.body == PLAN_MODE_SECTION
     assert construct_system_prompt(working_dir="/work", plan_mode=True) == construct_system_prompt(
         working_dir="/work",
