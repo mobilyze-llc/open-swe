@@ -108,6 +108,7 @@ from .tools import (
     web_search,
 )
 from .utils import ttl_cache
+from .utils.agent_definitions import _SubagentSystemPromptMiddleware
 from .utils.agents_md import fetch_agents_md, fetch_scoped_agents_md
 from .utils.api_standards_skill import fetch_api_standards_skill
 from .utils.deferred_model import make_deferred_error_model
@@ -375,11 +376,12 @@ def _reviewer_subagent(
             "Reviews one explicit, disjoint file partition and returns candidate "
             "defects for parent validation. Invoke at most once per review."
         ),
-        "system_prompt": REVIEWER_SUBAGENT_SYSTEM_PROMPT,
+        "system_prompt": "",
         "model": model,
+        "middleware": [_SubagentSystemPromptMiddleware(REVIEWER_SUBAGENT_SYSTEM_PROMPT)],
     }
     if allowed_tools is not None:
-        subagent["middleware"] = [ExcludeToolsMiddleware(allowed=allowed_tools)]
+        subagent["middleware"].insert(0, ExcludeToolsMiddleware(allowed=allowed_tools))
     return subagent
 
 
