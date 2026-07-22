@@ -89,6 +89,18 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
             repo_config["name"],
         )
     else:
+        try:
+            repo_config = await service.get_linear_thread_repo_config(issue_id)
+        except service.LinearThreadRepoError:
+            await service.post_linear_routing_failure(
+                issue_id,
+                data.get("id", ""),
+                "Couldn't safely read a repository from the existing thread. Retry or specify it "
+                "as `repo owner/name`.",
+            )
+            return {"status": "ignored", "reason": "Failed to access thread repository metadata"}
+
+    if not repo_config:
         comment_user_email = (data.get("user") or {}).get("email")
         try:
             profile_repo = await common.get_profile_default_repo(
@@ -130,6 +142,11 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
         repo_config = await common.get_team_default_repo()
 
     if not repo_config:
+        await service.post_linear_routing_failure(
+            issue_id,
+            data.get("id", ""),
+            "Couldn't determine the target repository. Specify it as `repo owner/name`.",
+        )
         return {"status": "ignored", "reason": "No default repository configured"}
 
     if not common._is_repo_allowed(repo_config):
@@ -138,7 +155,23 @@ async def linear_webhook(  # noqa: PLR0911, PLR0912, PLR0915
             repo_config.get("owner"),
             repo_config.get("name"),
         )
+        await service.post_linear_routing_failure(
+            issue_id,
+            data.get("id", ""),
+            f"The target repository `{repo_config['owner']}/{repo_config['name']}` is not enabled. "
+            "Specify an allowed repository as `repo owner/name`.",
+        )
         return {"status": "ignored", "reason": "Repository not in allowlist"}
+
+    try:
+        await service.persist_linear_thread_repo_config(issue_id, repo_config)
+    except service.LinearThreadRepoError:
+        await service.post_linear_routing_failure(
+            issue_id,
+            data.get("id", ""),
+            "Couldn't save the target repository due to a temporary service error. Please retry.",
+        )
+        return {"status": "ignored", "reason": "Failed to persist thread repository metadata"}
 
     repo_owner = repo_config["owner"]
     repo_name = repo_config["name"]
