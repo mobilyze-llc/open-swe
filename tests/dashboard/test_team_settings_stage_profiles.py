@@ -77,3 +77,33 @@ async def test_legacy_settings_surface_default_profile_selections(fake_store: _F
 
     assert settings["plan_profile"] is None
     assert settings["review_profile"] is None
+
+
+@pytest.mark.asyncio
+async def test_reviewer_routing_round_trips_and_survives_unrelated_save(
+    fake_store: _FakeStore,
+) -> None:
+    await ts.upsert_team_settings(ts.TeamSettingsUpdate(reviewer_routing=" reviewer_adversarial "))
+
+    settings = await ts.get_team_settings()
+    assert settings["reviewer_routing"] == "reviewer_adversarial"
+
+    await ts.upsert_team_settings(ts.TeamSettingsUpdate(org_guidelines="Flag unsafe changes."))
+    settings = await ts.get_team_settings()
+    assert settings["reviewer_routing"] == "reviewer_adversarial"
+
+    await ts.upsert_team_settings(ts.TeamSettingsUpdate(reviewer_routing=None))
+    settings = await ts.get_team_settings()
+    assert settings["reviewer_routing"] is None
+
+
+def test_reviewer_routing_rejects_unregistered_graph() -> None:
+    with pytest.raises(ValueError, match="unsupported reviewer_routing"):
+        ts.TeamSettingsUpdate(reviewer_routing="reviewer_experimental")
+
+
+@pytest.mark.asyncio
+async def test_legacy_settings_surface_stock_reviewer_routing(fake_store: _FakeStore) -> None:
+    settings = await ts.get_team_settings()
+
+    assert settings["reviewer_routing"] is None

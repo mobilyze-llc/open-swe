@@ -8,6 +8,7 @@ import json
 import logging
 from typing import cast
 
+import pytest
 from fastapi.testclient import TestClient
 from httpx import Response
 
@@ -384,6 +385,10 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
     async def fake_store_current_run_id(_thread_id: str, _run: object) -> None:
         return None
 
+    async def fake_reviewer_assistant_for_dispatch(**kwargs: object) -> str:
+        captured["selector"] = kwargs
+        return "reviewer"
+
     class _FakeRunsClient:
         async def create(self, thread_id: str, graph: str, **kwargs) -> dict[str, str]:
             captured["thread_id"] = thread_id
@@ -404,6 +409,11 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
     monkeypatch.setattr(webhook_common, "list_reviewer_findings", fake_list_findings)
     monkeypatch.setattr(webhook_common, "append_finding_interaction", fake_append_interaction)
     monkeypatch.setattr(webhook_common, "_store_current_reviewer_run_id", fake_store_current_run_id)
+    monkeypatch.setattr(
+        webhook_common,
+        "reviewer_assistant_for_dispatch",
+        fake_reviewer_assistant_for_dispatch,
+    )
     monkeypatch.setattr(webhook_common, "get_client", lambda url: _FakeLangGraphClient())
 
     asyncio.run(
@@ -433,6 +443,12 @@ def test_process_github_review_finding_reply_uses_rereview_config(monkeypatch) -
     assert config["reviewer_event"] == "finding_reply"
     assert config["re_review"] is True
     assert config["finding_reply_id"] == "f_1"
+    assert captured["graph"] == "reviewer"
+    assert captured["selector"] == {
+        "re_review": True,
+        "finding_reply": True,
+        "explicit_request": False,
+    }
 
 
 def test_process_github_review_finding_reply_dispatches_sanitized_reply_body(monkeypatch) -> None:
@@ -1117,7 +1133,26 @@ def test_process_github_pr_ready_creates_reviewer_run(monkeypatch) -> None:
     assert config["review_requested"] is True
 
 
-def test_trigger_pr_review_from_ref_creates_reviewer_run(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("thread_metadata", "expected_graph", "semantic_re_review"),
+    [
+        ({}, "reviewer_adversarial", False),
+        (
+            {
+                "kind": webhook_common.REVIEWER_THREAD_KIND,
+                "last_reviewed_sha": "previous-head",
+            },
+            "reviewer",
+            True,
+        ),
+    ],
+)
+def test_trigger_pr_review_from_ref_creates_reviewer_run(
+    monkeypatch,
+    thread_metadata: dict[str, object],
+    expected_graph: str,
+    semantic_re_review: bool,
+) -> None:
     captured: dict[str, object] = {}
     auto_review_checked = False
 
@@ -1167,6 +1202,18 @@ def test_trigger_pr_review_from_ref_creates_reviewer_run(monkeypatch) -> None:
         captured["set_metadata_thread_id"] = thread_id
         captured["set_metadata_kwargs"] = kwargs
 
+    async def fake_get_thread_metadata_safe(_thread_id: str) -> dict[str, object]:
+        return thread_metadata
+
+    async def fake_get_team_settings() -> dict[str, object]:
+        return {"reviewer_routing": "reviewer_adversarial"}
+
+    real_selector = webhook_common.reviewer_assistant_for_dispatch
+
+    async def capture_selector(**kwargs: bool) -> str:
+        captured["selector"] = kwargs
+        return await real_selector(**kwargs)
+
     monkeypatch.setattr(webhook_common, "_is_repo_auto_review_enabled", fake_auto_review_enabled)
     monkeypatch.setattr(
         webhook_common, "get_github_app_installation_token", fake_get_github_app_installation_token
@@ -1186,6 +1233,9 @@ def test_trigger_pr_review_from_ref_creates_reviewer_run(monkeypatch) -> None:
     monkeypatch.setattr(
         webhook_common, "set_reviewer_thread_metadata", fake_set_reviewer_thread_metadata
     )
+    monkeypatch.setattr(webhook_common, "_get_thread_metadata_safe", fake_get_thread_metadata_safe)
+    monkeypatch.setattr(webhook_common, "get_team_settings", fake_get_team_settings)
+    monkeypatch.setattr(webhook_common, "reviewer_assistant_for_dispatch", capture_selector)
     monkeypatch.setattr(
         webhook_common, "post_review_started_comment", fake_post_review_started_comment
     )
@@ -1211,7 +1261,7 @@ def test_trigger_pr_review_from_ref_creates_reviewer_run(monkeypatch) -> None:
     config = cast(dict[str, object], cast(dict[str, object], kwargs["config"])["configurable"])
     assert result["success"] is True
     assert auto_review_checked is False
-    assert captured["graph"] == "reviewer"
+    assert captured["graph"] == expected_graph
     assert captured["thread_create_kwargs"] == {
         "thread_id": captured["thread_id"],
         "if_exists": "do_nothing",
@@ -1223,6 +1273,12 @@ def test_trigger_pr_review_from_ref_creates_reviewer_run(monkeypatch) -> None:
     assert config["repo"] == {"owner": "langchain-ai", "name": "open-swe"}
     assert config["pr_number"] == 1244
     assert config["review_requested"] is True
+    assert config["re_review"] is False
+    assert captured["selector"] == {
+        "re_review": semantic_re_review,
+        "finding_reply": False,
+        "explicit_request": True,
+    }
     assert config["slack_thread"] == {
         "channel_id": "C123",
         "thread_ts": "1700000000.000100",

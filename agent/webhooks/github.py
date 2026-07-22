@@ -136,6 +136,14 @@ async def trigger_pr_review_from_ref(
     langgraph_client = common.get_client(url=common.LANGGRAPH_URL)
     if not await common._ensure_thread_exists_for_metadata(thread_id, langgraph_client):
         return {"success": False, "error": "Could not create reviewer thread"}
+    reviewer_metadata = await common._get_thread_metadata_safe(thread_id)
+    explicit_request_re_review = False
+    if (
+        reviewer_metadata is not None
+        and reviewer_metadata.get("kind") == common.REVIEWER_THREAD_KIND
+    ):
+        last_reviewed_sha = reviewer_metadata.get("last_reviewed_sha")
+        explicit_request_re_review = bool(isinstance(last_reviewed_sha, str) and last_reviewed_sha)
 
     pr_meta: ReviewerPRMeta = {
         "owner": pr_ref.owner,
@@ -179,6 +187,11 @@ async def trigger_pr_review_from_ref(
         slack_channel_id=slack_channel_id,
         slack_thread_ts=slack_thread_ts,
     )
+    assistant_id = await common.reviewer_assistant_for_dispatch(
+        re_review=explicit_request_re_review,
+        finding_reply=False,
+        explicit_request=True,
+    )
 
     common.logger.info(
         "Dispatching reviewer run for thread %s from %s PR review request", thread_id, source
@@ -188,7 +201,7 @@ async def trigger_pr_review_from_ref(
         prompt,
         configurable,
         source=source,
-        assistant_id="reviewer",
+        assistant_id=assistant_id,
         metadata=common._AGENT_VERSION_METADATA,
         client=langgraph_client,
     )
@@ -302,6 +315,11 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
         re_review=is_re_review,
         last_reviewed_sha=last_reviewed_sha,
     )
+    assistant_id = await common.reviewer_assistant_for_dispatch(
+        re_review=is_re_review,
+        finding_reply=False,
+        explicit_request=False,
+    )
 
     common.logger.info("Dispatching reviewer run for thread %s (source=%s)", thread_id, source)
     run = await common.dispatch_agent_run(
@@ -309,7 +327,7 @@ async def _dispatch_first_review_from_pr_payload(payload: dict[str, Any], *, sou
         prompt,
         configurable,
         source=source,
-        assistant_id="reviewer",
+        assistant_id=assistant_id,
         metadata=common._AGENT_VERSION_METADATA,
         client=langgraph_client,
     )
@@ -610,6 +628,11 @@ async def process_github_push_event(payload: dict[str, Any]) -> None:
         re_review=True,
         last_reviewed_sha=last_reviewed_sha if isinstance(last_reviewed_sha, str) else "",
     )
+    assistant_id = await common.reviewer_assistant_for_dispatch(
+        re_review=True,
+        finding_reply=False,
+        explicit_request=False,
+    )
 
     common.logger.info("Dispatching push re-review run for thread %s", thread_id)
     run = await common.dispatch_agent_run(
@@ -617,7 +640,7 @@ async def process_github_push_event(payload: dict[str, Any]) -> None:
         re_review_prompt,
         configurable,
         source="github_push",
-        assistant_id="reviewer",
+        assistant_id=assistant_id,
         metadata=common._AGENT_VERSION_METADATA,
         client=langgraph_client,
     )
@@ -848,6 +871,11 @@ async def process_github_review_finding_reply(payload: dict[str, Any]) -> None:
             "finding_reply_body": reply_body,
         }
     )
+    assistant_id = await common.reviewer_assistant_for_dispatch(
+        re_review=bool(configurable.get("re_review")),
+        finding_reply=configurable.get("reviewer_event") == "finding_reply",
+        explicit_request=False,
+    )
     finding_reply_prompt = common._build_queued_finding_reply_prompt(
         finding_id=finding_id,
         reply_author=reply_author,
@@ -860,7 +888,7 @@ async def process_github_review_finding_reply(payload: dict[str, Any]) -> None:
         finding_reply_prompt,
         configurable,
         source="github_review_reply",
-        assistant_id="reviewer",
+        assistant_id=assistant_id,
         metadata=common._AGENT_VERSION_METADATA,
         client=langgraph_client,
     )

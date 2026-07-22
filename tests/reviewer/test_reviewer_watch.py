@@ -233,6 +233,11 @@ async def test_push_event_triggers_re_review_run_when_watching() -> None:
             new_callable=AsyncMock,
             return_value=99,
         ) as create_check,
+        patch(
+            "agent.webhooks.common.reviewer_assistant_for_dispatch",
+            new_callable=AsyncMock,
+            return_value="reviewer",
+        ) as selector,
         patch("agent.webhooks.common.get_client", return_value=fake_client),
     ):
         await github_webhooks.process_github_push_event(payload)
@@ -245,6 +250,11 @@ async def test_push_event_triggers_re_review_run_when_watching() -> None:
     assert configurable["re_review"] is True
     assert configurable["last_reviewed_sha"] == "oldsha"
     assert configurable["head_sha"] == "newsha"
+    selector.assert_awaited_once_with(
+        re_review=True,
+        finding_reply=False,
+        explicit_request=False,
+    )
     # The live head is persisted to thread metadata so a re-review queued into
     # an in-flight run can resolve it despite the run's frozen config.
     head_sha_writes = [
