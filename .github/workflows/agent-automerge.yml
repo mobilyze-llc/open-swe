@@ -1,0 +1,57 @@
+# Interim agent auto-merge (operator decision 2026-07-22, OSWE-109).
+# Arms GitHub native auto-merge on agent-opened PRs (open-swe/* head branches
+# targeting the default branch) so merge-on-clean completes without a per-PR
+# operator action. The blocking "Open SWE Review" check and CI still gate the
+# actual merge via branch protection on the default branch; non-default bases
+# are excluded because their branches carry no required checks.
+#
+# Escape hatch: the `hold-merge` label is the pause switch, both directions —
+# adding it disarms an already-armed PR (the `labeled` event wakes this job),
+# removing it re-arms (`unlabeled`). `--disable-auto` alone is NOT durable —
+# a later push re-arms; use the label.
+# Draft semantics: a PR someone deliberately converted to draft stays draft
+# (detected via a convert_to_draft event in the PR timeline). A PR still in
+# its opening draft state — including one whose `opened` run was suppressed
+# by a merge conflict — is readied on the first event that reaches this job.
+#
+# REMOVE when OSWE-109 (auto_merge_mode team setting) lands — its acceptance
+# includes deleting this file.
+name: Agent auto-merge
+on:
+  pull_request:
+    types: [opened, ready_for_review, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  arm:
+    if: >-
+      startsWith(github.event.pull_request.head.ref, 'open-swe/') &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ready and arm auto-merge (squash)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          EVENT_ACTION: ${{ github.event.action }}
+          IS_DRAFT: ${{ github.event.pull_request.draft }}
+        run: |
+          if gh pr view "$PR" --repo "$REPO" --json labels --jq '.labels[].name' | grep -qx 'hold-merge'; then
+            gh pr merge "$PR" --repo "$REPO" --disable-auto 2>/dev/null || true
+            echo "hold-merge present; auto-merge disabled (or was not armed)"
+            exit 0
+          fi
+          if [ "$IS_DRAFT" = "true" ]; then
+            redrafts=$(gh api "repos/$REPO/issues/$PR/timeline" --paginate \
+              --jq '[.[] | select(.event == "convert_to_draft")] | length' | awk '{s+=$1} END {print s+0}')
+            if [ "$redrafts" -gt 0 ]; then
+              echo "draft PR with convert_to_draft history; leaving draft state alone"
+              exit 0
+            fi
+            gh pr ready "$PR" --repo "$REPO"
+          fi
+          gh pr merge "$PR" --repo "$REPO" --auto --squash
