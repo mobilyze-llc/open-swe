@@ -49,6 +49,12 @@ def test_default_plan_profile_is_byte_identical() -> None:
             "Do not narrate successful verifications anywhere — only refutations, "
             "ambiguities, and unverifiables appear in the plan." in normalized_body
         )
+        assert "Include the full plan Markdown when it fits" in normalized_body
+        assert "truncate the non-Challenge plan content to fit" in normalized_body
+        assert "include the Challenge section verbatim" in normalized_body
+        assert "explicit exception to the general Slack terseness rule" in normalized_body
+        assert "retain at least a one-line Challenge summary" in normalized_body
+        assert "post a brief completion message" not in normalized_body
     assert profile.body == PLAN_MODE_SECTION
     assert construct_system_prompt(working_dir="/work", plan_mode=True) == construct_system_prompt(
         working_dir="/work",
