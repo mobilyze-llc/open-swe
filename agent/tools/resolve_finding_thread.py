@@ -10,7 +10,6 @@ from ..review.findings import (
     get_finding,
     get_thread_id_from_runtime,
     mark_finding_replies_reassessed,
-    pending_finding_reply_comment_ids,
     thread_missing_tool_result,
     update_finding_fields,
     update_finding_surface,
@@ -38,12 +37,14 @@ async def resolve_finding_thread(
     finding_id: str,
     note: str,
     status: str = "dismissed",
+    reply_comment_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     """Resolve the GitHub review thread for a tracked Open SWE finding.
 
     Use ``status="resolved"`` when the code now fixes the issue. Use
     ``status="dismissed"`` when analysis shows the original review comment was
     not valid. ``note`` is required and is posted verbatim as the full GitHub reply body.
+    Pass only ``reply_comment_ids`` listed in the adjudicating run's context.
     """
     if status not in {"resolved", "dismissed"}:
         return {"success": False, "error": f"Invalid status: {status}"}
@@ -79,6 +80,7 @@ async def resolve_finding_thread(
             repo=str(repo_config["name"]),
             pr_number=pr_number,
             token=token,
+            reply_comment_ids=reply_comment_ids,
         )
     except ReviewerThreadMissingError as exc:
         return thread_missing_tool_result(exc)
@@ -102,6 +104,7 @@ async def _resolve_finding_thread_async(
     repo: str,
     pr_number: int,
     token: str,
+    reply_comment_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     thread_id = get_thread_id_from_runtime()
     finding = await _get_finding_with_pr_backfill(
@@ -115,7 +118,6 @@ async def _resolve_finding_thread_async(
     if finding is None:
         return {"success": False, "error": f"No finding found with id {finding_id}"}
 
-    pending_reply_ids = pending_finding_reply_comment_ids(finding)
     github_thread_ids = _thread_ids_for_finding(finding)
     for comment_id in _comment_ids_for_finding(finding):
         thread_node_id = await fetch_review_thread_id_for_comment(
@@ -184,7 +186,9 @@ async def _resolve_finding_thread_async(
         else "Not all GitHub threads resolved",
     }
     await update_finding_surface(thread_id, finding_id, surface_updates)
-    await mark_finding_replies_reassessed(thread_id, finding_id, pending_reply_ids)
+    observed_reply_ids = set(reply_comment_ids or [])
+    if observed_reply_ids:
+        await mark_finding_replies_reassessed(thread_id, finding_id, observed_reply_ids)
     updated = await get_finding(thread_id, finding_id)
     return {"success": True, "finding": updated, "resolved_thread_count": resolved_count}
 

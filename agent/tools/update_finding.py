@@ -16,7 +16,6 @@ from ..review.findings import (
     list_findings,
     mark_finding_replies_reassessed,
     normalize_finding_title,
-    pending_finding_reply_comment_ids,
     resolve_review_head_sha,
     thread_missing_tool_result,
     update_finding_fields,
@@ -61,6 +60,7 @@ async def update_finding(
     description: str | None = None,
     suggestion: str | None = None,
     note: str | None = None,
+    reply_comment_ids: list[int] | None = None,
 ) -> dict[str, Any]:
     """Update fields on an existing finding.
 
@@ -86,6 +86,8 @@ async def update_finding(
         note: Optional free-form note explaining the change. Required when
             resolving or dismissing because it is posted verbatim as the full
             GitHub reply body.
+        reply_comment_ids: Pending human-reply ids shown in the run context.
+            Pass them only when this call terminally adjudicates those replies.
 
     Returns:
         Dictionary with ``success`` and (on success) the updated ``finding``.
@@ -163,7 +165,6 @@ async def update_finding(
     if finding is None:
         return {"success": False, "error": f"No finding found with id {finding_id}"}
 
-    pending_reply_ids = pending_finding_reply_comment_ids(finding)
     delegated_resolution = False
     repo_config = configurable.get("repo") if isinstance(configurable, dict) else None
     pr_number = configurable.get("pr_number") if isinstance(configurable, dict) else None
@@ -181,7 +182,10 @@ async def update_finding(
         from .resolve_finding_thread import resolve_finding_thread
 
         resolve_result = await resolve_finding_thread(
-            finding_id, status=status, note=normalized_note or ""
+            finding_id,
+            status=status,
+            note=normalized_note or "",
+            reply_comment_ids=reply_comment_ids,
         )
         if not resolve_result.get("success"):
             return {
@@ -216,7 +220,9 @@ async def update_finding(
         return {"success": False, "error": f"No finding found with id {finding_id}"}
     if status in {"resolved", "dismissed"} and not delegated_resolution:
         emit_finding_status_outcome(updated, status, configurable=configurable, thread_id=thread_id)
-    updated = await mark_finding_replies_reassessed(thread_id, finding_id, pending_reply_ids)
+    observed_reply_ids = set(reply_comment_ids or [])
+    if status in {"resolved", "dismissed"} and not delegated_resolution and observed_reply_ids:
+        updated = await mark_finding_replies_reassessed(thread_id, finding_id, observed_reply_ids)
     result = {"success": True, "finding": updated}
     if suggestion_dropped:
         result["suggestion_dropped"] = True

@@ -997,12 +997,15 @@ def test_build_finding_reply_context_reassesses_all_pending_with_visible_outcome
         reply_author="octocat",
         reply_body="Freshest reply",
         existing_findings_block="- [f1] first\n- [f2] second",
-        pending_finding_ids=["f1", "f2"],
+        pending_finding_replies={"f1": [101], "f2": [202]},
     )
 
     assert "finding_id: f2" in ctx
     assert "Freshest reply" in ctx
-    assert "## Findings with pending human replies\n\n- f1\n- f2" in ctx
+    assert (
+        "## Findings with pending human replies\n\n"
+        "- f1: reply_comment_ids=[101]\n- f2: reply_comment_ids=[202]"
+    ) in ctx
     assert "Reassess every finding listed" in ctx
     assert "resolve_finding_thread" in ctx
     assert "update_finding" in ctx
@@ -1010,26 +1013,32 @@ def test_build_finding_reply_context_reassesses_all_pending_with_visible_outcome
     assert "Never complete a pending-reply reassessment silently" in ctx
 
 
-def test_pending_finding_reply_ids_include_only_open_unprocessed_replies() -> None:
+def test_pending_finding_replies_include_only_open_unprocessed_replies() -> None:
     findings = [
         {
             "id": "f1",
             "status": "open",
-            "interactions": [{"kind": "human_reply", "needs_reassessment": True}],
+            "interactions": [
+                {"kind": "human_reply", "github_comment_id": 101, "needs_reassessment": True}
+            ],
         },
         {
             "id": "f2",
             "status": "open",
-            "interactions": [{"kind": "human_reply", "needs_reassessment": False}],
+            "interactions": [
+                {"kind": "human_reply", "github_comment_id": 202, "needs_reassessment": False}
+            ],
         },
         {
             "id": "f3",
             "status": "resolved",
-            "interactions": [{"kind": "human_reply", "needs_reassessment": True}],
+            "interactions": [
+                {"kind": "human_reply", "github_comment_id": 303, "needs_reassessment": True}
+            ],
         },
     ]
 
-    assert reviewer._pending_finding_reply_ids(findings) == ["f1"]  # type: ignore[arg-type]
+    assert reviewer._pending_finding_replies(findings) == {"f1": [101]}  # type: ignore[arg-type]
 
 
 def test_build_finding_reply_context_includes_pr_overview() -> None:

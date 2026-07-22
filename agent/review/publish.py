@@ -473,7 +473,7 @@ async def settle_review_check_run(
             and review_check_blocking_enabled()
         ):
             return
-        await create_completed_review_check_run(
+        created = await create_completed_review_check_run(
             owner=owner,
             repo=repo,
             head_sha=head_sha,
@@ -482,6 +482,9 @@ async def settle_review_check_run(
             title=title,
             summary=summary,
         )
+        if not created:
+            msg = f"Failed to create completed review check for {owner}/{repo}@{head_sha}"
+            raise RuntimeError(msg)
         return
     ok = await complete_review_check_run(
         owner=owner,

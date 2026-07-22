@@ -320,6 +320,31 @@ async def test_settle_review_check_run_publish_path_creates_only_when_blocking(
         create.assert_not_awaited()
 
 
+async def test_settle_review_check_run_surfaces_replacement_creation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("REVIEW_CHECK_BLOCKING", "true")
+    monkeypatch.setattr(reviewer_publish, "get_thread_metadata", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        reviewer_publish,
+        "create_completed_review_check_run",
+        AsyncMock(return_value=False),
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to create completed review check"):
+        await reviewer_publish.settle_review_check_run(
+            thread_id="t1",
+            owner="acme",
+            repo="widgets",
+            token="tok",
+            conclusion="success",
+            title="No issues found",
+            summary="standing ledger is clear",
+            head_sha="abc123",
+            create_if_missing=True,
+        )
+
+
 async def test_settle_review_check_run_completes_and_clears(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
