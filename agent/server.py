@@ -12,6 +12,7 @@ import logging
 import os
 import warnings
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,7 @@ from .dashboard.team_settings import (
     get_team_default_model_pair,
     get_team_default_repo,
     get_team_fable_enabled,
+    get_team_require_plan_approval,
     get_team_stage_profile,
 )
 from .dashboard.user_mappings import email_for_login
@@ -719,6 +721,36 @@ async def _cached_fable_enabled() -> bool:
     )
 
 
+_REQUIRE_PLAN_APPROVAL_CACHE_KEY = "team:require-plan-approval"
+
+
+async def _cached_require_plan_approval() -> bool:
+    try:
+        return await ttl_cache.cached(
+            _REQUIRE_PLAN_APPROVAL_CACHE_KEY,
+            60,
+            get_team_require_plan_approval,
+        )
+    except Exception:
+        logger.warning(
+            "Plan approval policy unavailable with no known-good value; requiring approval",
+            exc_info=True,
+        )
+        ttl_cache.set_cached(_REQUIRE_PLAN_APPROVAL_CACHE_KEY, True, 60)
+        return True
+
+
+async def _record_plan_gate_bypass(thread_id: str, github_login: str | None) -> None:
+    """Audit a bypass; v1 leaves authorization to noop auth/single-operator deployment."""
+    actor = github_login or "unknown"
+    stamp = {"by": actor, "at": datetime.now(UTC).isoformat()}
+    logger.info("Plan gate bypass for thread %s by %s at %s", thread_id, actor, stamp["at"])
+    await client.threads.update(
+        thread_id=thread_id,
+        metadata={"plan_gate_bypass": stamp, "plan_gate_forced": False},
+    )
+
+
 async def _cached_profile(profile_login: str | None):
     if not profile_login:
         return None
@@ -755,6 +787,7 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
         linear_issue_number: str,
         create_prs: bool,
         plan_mode: bool,
+        plan_gate_forced: bool,
         plan_profile_name: str,
         plan_profile_body: str,
         corridor_enabled: bool,
@@ -772,6 +805,7 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
         self._linear_issue_number = linear_issue_number
         self._create_prs = create_prs
         self._plan_mode = plan_mode
+        self._plan_gate_forced = plan_gate_forced
         self._plan_profile_name = plan_profile_name
         self._plan_profile_body = plan_profile_body
         self._corridor_enabled = corridor_enabled
@@ -786,6 +820,7 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
             "source": self._source,
             "repo": configurable.get("repo"),
             "plan_mode": self._plan_mode,
+            "plan_gate_forced": self._plan_gate_forced,
             "plan_profile": self._plan_profile_name,
             "model": self._model_id,
             "effort": self._effort,
@@ -824,6 +859,7 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
                     "effort": self._effort,
                     "source": self._source,
                     "plan_mode": self._plan_mode,
+                    "plan_gate_forced": self._plan_gate_forced,
                     "plan_profile": self._plan_profile_name,
                 },
             )
@@ -877,13 +913,37 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     profile_login = resolve_github_login(as_json_object(config))
     # Team/profile settings are accepted stale for a short TTL so graph factories
     # stay off the critical path during worker load and retry storms.
-    team_defaults, use_gateway, profile, fable_enabled, plan_profile_name = await asyncio.gather(
+    (
+        team_defaults,
+        use_gateway,
+        profile,
+        fable_enabled,
+        plan_profile_name,
+        require_plan_approval,
+    ) = await asyncio.gather(
         _cached_team_default_model_pair("agent"),
         _cached_gateway_enabled(),
         _cached_profile(profile_login),
         _cached_fable_enabled(),
         _cached_stage_profile_name("plan"),
+        _cached_require_plan_approval(),
     )
+    plan_gate_bypass = configurable.get("plan_gate_bypass") is True
+    plan_mode_forced = configurable.get("plan_gate_forced") is True
+    plan_gate_bypassed = plan_gate_bypass and (
+        plan_mode_forced or (require_plan_approval and not plan_mode)
+    )
+    if plan_gate_bypassed:
+        plan_mode_forced = False
+        configurable["plan_gate_forced"] = False
+        await _record_plan_gate_bypass(thread_id, profile_login)
+    elif plan_mode_forced or (require_plan_approval and not plan_mode):
+        plan_mode = True
+        plan_mode_forced = True
+        configurable["plan_mode"] = True
+        configurable["plan_gate_forced"] = True
+        logger.info("Plan approval policy forced plan mode for thread %s", thread_id)
+
     plan_profile = resolve_stage_profile(
         "plan",
         plan_profile_name,
@@ -1091,9 +1151,12 @@ async def get_agent(config: RunnableConfig) -> Pregel:
         if plan_model_id == model_id and plan_effort == profile_effort
         else _make_model_or_defer(plan_model_id, use_gateway=use_gateway, **plan_model_kwargs)
     )
+    plan_mode_excluded_tools = PLAN_MODE_EXCLUDED_TOOLS
+    if plan_mode_forced:
+        plan_mode_excluded_tools = plan_mode_excluded_tools | {"approve_plan"}
     plan_mode_middleware: list[Any] = [
         PlanModeMiddleware(
-            excluded=PLAN_MODE_EXCLUDED_TOOLS,
+            excluded=plan_mode_excluded_tools,
             allowed=frozenset(plan_profile.tools) if plan_profile.tools is not None else None,
             model=plan_model if plan_profile.model is not None else None,
             base_model=main_model,
@@ -1160,6 +1223,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
                     linear_issue_number=linear_issue_number,
                     create_prs=always_create_prs,
                     plan_mode=plan_mode,
+                    plan_gate_forced=plan_mode_forced,
                     plan_profile_name=plan_profile.name,
                     plan_profile_body=plan_profile.body,
                     corridor_enabled=bool(corridor_tools),

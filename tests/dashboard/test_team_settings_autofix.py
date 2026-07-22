@@ -7,6 +7,7 @@ import pytest
 from agent.dashboard.team_settings import (
     TeamSettingsUpdate,
     get_team_autofix_settings,
+    get_team_require_plan_approval,
     upsert_team_settings,
 )
 
@@ -110,3 +111,81 @@ async def test_upsert_sets_autofix_fields_explicitly() -> None:
 def test_update_rejects_unknown_threshold() -> None:
     with pytest.raises(ValueError):
         TeamSettingsUpdate(autofix_severity_threshold="extreme")  # type: ignore[arg-type]
+
+
+# --- plan approval policy: same tri-state persistence contract as autofix ---
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_defaults_off_when_absent() -> None:
+    with patch(
+        "agent.dashboard.team_settings.get_team_settings",
+        new_callable=AsyncMock,
+        return_value={},
+    ):
+        assert await get_team_require_plan_approval() is False
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_invalid_value_fails_closed() -> None:
+    with patch(
+        "agent.dashboard.team_settings.get_team_settings",
+        new_callable=AsyncMock,
+        return_value={"require_plan_approval": "true"},
+    ):
+        assert await get_team_require_plan_approval() is False
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_survives_team_settings_scrub() -> None:
+    with patch(
+        "agent.dashboard.team_settings._get_stored_team_settings",
+        new_callable=AsyncMock,
+        return_value={"require_plan_approval": True},
+    ):
+        assert await get_team_require_plan_approval() is True
+
+
+@pytest.mark.asyncio
+async def test_upsert_without_plan_approval_preserves_stored_policy() -> None:
+    client, put = _put_capture()
+    with (
+        patch(
+            "agent.dashboard.team_settings._get_stored_team_settings",
+            new_callable=AsyncMock,
+            return_value={"require_plan_approval": True},
+        ),
+        patch("agent.dashboard.team_settings._client", return_value=client),
+    ):
+        value = await upsert_team_settings(TeamSettingsUpdate())
+
+    put.assert_awaited_once()
+    assert value["require_plan_approval"] is True
+
+
+@pytest.mark.asyncio
+async def test_upsert_sets_plan_approval_policy_explicitly() -> None:
+    client, put = _put_capture()
+    with (
+        patch(
+            "agent.dashboard.team_settings._get_stored_team_settings",
+            new_callable=AsyncMock,
+            return_value={"require_plan_approval": True},
+        ),
+        patch("agent.dashboard.team_settings._client", return_value=client),
+    ):
+        value = await upsert_team_settings(TeamSettingsUpdate(require_plan_approval=False))
+
+    put.assert_awaited_once()
+    assert value["require_plan_approval"] is False
+
+
+@pytest.mark.asyncio
+async def test_plan_approval_lookup_failure_propagates_to_policy_cache() -> None:
+    with patch(
+        "agent.dashboard.team_settings._get_stored_team_settings",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("store unavailable"),
+    ):
+        with pytest.raises(RuntimeError, match="store unavailable"):
+            await get_team_require_plan_approval()

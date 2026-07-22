@@ -705,9 +705,14 @@ async def test_approve_plan_dispatches_published_markdown(
         return None
 
     async def fake_dispatch(
-        thread_id: str, metadata: dict[str, Any], text: str, *, plan_mode: bool
+        thread_id: str,
+        metadata: dict[str, Any],
+        text: str,
+        *,
+        plan_mode: bool,
+        plan_gate_bypass: bool = False,
     ) -> None:
-        dispatched.update(text=text, plan_mode=plan_mode)
+        dispatched.update(text=text, plan_mode=plan_mode, plan_gate_bypass=plan_gate_bypass)
 
     monkeypatch.setattr(plan_api, "_thread_metadata", fake_meta)
     monkeypatch.setattr(plan_api, "_user_owns_thread", lambda *a, **k: True)
@@ -722,6 +727,7 @@ async def test_approve_plan_dispatches_published_markdown(
     assert "# Edited plan" in dispatched["text"]
     assert "use snake_case" in dispatched["text"]
     assert dispatched["plan_mode"] is False
+    assert dispatched["plan_gate_bypass"] is True
 
 
 async def test_approve_plan_posts_slack_approval_notice(
@@ -755,9 +761,14 @@ async def test_approve_plan_posts_slack_approval_notice(
         return True
 
     async def fake_dispatch(
-        thread_id: str, metadata: dict[str, Any], text: str, *, plan_mode: bool
+        thread_id: str,
+        metadata: dict[str, Any],
+        text: str,
+        *,
+        plan_mode: bool,
+        plan_gate_bypass: bool = False,
     ) -> None:
-        dispatched.update(text=text, plan_mode=plan_mode)
+        dispatched.update(text=text, plan_mode=plan_mode, plan_gate_bypass=plan_gate_bypass)
 
     monkeypatch.setattr(plan_api, "_thread_metadata", fake_meta)
     monkeypatch.setattr(plan_api, "_user_owns_thread", lambda *a, **k: True)
@@ -778,6 +789,7 @@ async def test_approve_plan_posts_slack_approval_notice(
         "text": "Plan approved with 2 comments by Alice Example\nbeginning implementation",
     }
     assert dispatched["plan_mode"] is False
+    assert dispatched["plan_gate_bypass"] is True
 
 
 async def test_approve_plan_aborts_when_plan_read_fails(
@@ -868,3 +880,45 @@ async def test_reject_plan_rejects_shared_content(
         await plan_api.reject_plan("t1", session={"sub": "a", "email": None})
     assert exc.value.status_code == 409
     assert dispatched == []
+
+
+@pytest.mark.parametrize("plan_gate_bypass", [False, True])
+async def test_plan_decision_followup_sets_only_explicit_bypass(
+    monkeypatch: pytest.MonkeyPatch,
+    plan_gate_bypass: bool,
+) -> None:
+    from agent.dashboard import plan_api
+
+    dispatched: dict[str, Any] = {}
+
+    async def fake_dispatch(
+        thread_id: str,
+        text: str,
+        configurable: dict[str, Any],
+        *,
+        source: str,
+    ) -> None:
+        dispatched.update(
+            thread_id=thread_id,
+            text=text,
+            configurable=configurable,
+            source=source,
+        )
+
+    monkeypatch.setattr(plan_api, "dispatch_agent_run", fake_dispatch)
+    await plan_api._dispatch_followup(
+        "thread-1",
+        {
+            "source": "dashboard",
+            "github_login": "octocat",
+            "plan_gate_forced": True,
+        },
+        "continue",
+        plan_mode=False,
+        plan_gate_bypass=plan_gate_bypass,
+    )
+
+    configurable = dispatched["configurable"]
+    assert configurable["plan_mode"] is False
+    assert configurable["plan_gate_forced"] is True
+    assert (configurable.get("plan_gate_bypass") is True) is plan_gate_bypass
