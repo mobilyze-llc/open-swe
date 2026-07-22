@@ -137,13 +137,15 @@ async def trigger_pr_review_from_ref(
     if not await common._ensure_thread_exists_for_metadata(thread_id, langgraph_client):
         return {"success": False, "error": "Could not create reviewer thread"}
     reviewer_metadata = await common._get_thread_metadata_safe(thread_id)
-    explicit_request_re_review = False
+    explicit_request_requires_stock = reviewer_metadata is None
     if (
         reviewer_metadata is not None
         and reviewer_metadata.get("kind") == common.REVIEWER_THREAD_KIND
     ):
         last_reviewed_sha = reviewer_metadata.get("last_reviewed_sha")
-        explicit_request_re_review = bool(isinstance(last_reviewed_sha, str) and last_reviewed_sha)
+        explicit_request_requires_stock = bool(
+            isinstance(last_reviewed_sha, str) and last_reviewed_sha
+        )
 
     pr_meta: ReviewerPRMeta = {
         "owner": pr_ref.owner,
@@ -188,7 +190,7 @@ async def trigger_pr_review_from_ref(
         slack_thread_ts=slack_thread_ts,
     )
     assistant_id = await common.reviewer_assistant_for_dispatch(
-        re_review=explicit_request_re_review,
+        re_review=explicit_request_requires_stock,
         finding_reply=False,
         explicit_request=True,
     )

@@ -1137,6 +1137,7 @@ def test_process_github_pr_ready_creates_reviewer_run(monkeypatch) -> None:
     ("thread_metadata", "expected_graph", "semantic_re_review"),
     [
         ({}, "reviewer_adversarial", False),
+        (None, "reviewer", True),
         (
             {
                 "kind": webhook_common.REVIEWER_THREAD_KIND,
@@ -1149,7 +1150,7 @@ def test_process_github_pr_ready_creates_reviewer_run(monkeypatch) -> None:
 )
 def test_trigger_pr_review_from_ref_creates_reviewer_run(
     monkeypatch,
-    thread_metadata: dict[str, object],
+    thread_metadata: dict[str, object] | None,
     expected_graph: str,
     semantic_re_review: bool,
 ) -> None:
@@ -1202,7 +1203,7 @@ def test_trigger_pr_review_from_ref_creates_reviewer_run(
         captured["set_metadata_thread_id"] = thread_id
         captured["set_metadata_kwargs"] = kwargs
 
-    async def fake_get_thread_metadata_safe(_thread_id: str) -> dict[str, object]:
+    async def fake_get_thread_metadata_safe(_thread_id: str) -> dict[str, object] | None:
         return thread_metadata
 
     async def fake_get_team_settings() -> dict[str, object]:
