@@ -9,12 +9,10 @@
 # adding it disarms an already-armed PR (the `labeled` event wakes this job),
 # removing it re-arms (`unlabeled`). `--disable-auto` alone is NOT durable —
 # a later push re-arms; use the label.
-# A PR converted to draft after opening stays draft (pushes don't re-ready it).
-# Known accepted limitation (interim): an agent PR that opens BOTH draft AND
-# merge-conflicted never auto-readies (the opened run is suppressed by the
-# conflict; later synchronize runs deliberately leave draft state alone).
-# Recovery is one command: `gh pr ready <n>`. Not worth state-tracking in a
-# file that OSWE-109 deletes.
+# Draft semantics: a PR someone deliberately converted to draft stays draft
+# (detected via a convert_to_draft event in the PR timeline). A PR still in
+# its opening draft state — including one whose `opened` run was suppressed
+# by a merge conflict — is readied on the first event that reaches this job.
 #
 # REMOVE when OSWE-109 (auto_merge_mode team setting) lands — its acceptance
 # includes deleting this file.
@@ -48,11 +46,12 @@ jobs:
             exit 0
           fi
           if [ "$IS_DRAFT" = "true" ]; then
-            if [ "$EVENT_ACTION" = "opened" ]; then
-              gh pr ready "$PR" --repo "$REPO"
-            else
-              echo "draft PR on $EVENT_ACTION; leaving draft state alone"
+            redrafts=$(gh api "repos/$REPO/issues/$PR/timeline" --paginate \
+              --jq '[.[] | select(.event == "convert_to_draft")] | length' | awk '{s+=$1} END {print s+0}')
+            if [ "$redrafts" -gt 0 ]; then
+              echo "draft PR with convert_to_draft history; leaving draft state alone"
               exit 0
             fi
+            gh pr ready "$PR" --repo "$REPO"
           fi
           gh pr merge "$PR" --repo "$REPO" --auto --squash
