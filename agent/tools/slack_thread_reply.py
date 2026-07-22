@@ -31,17 +31,22 @@ async def slack_thread_reply(
     specific to Slack tool messages, not normal web UI assistant messages.
     Always end the run with a terse final outcome.
 
-    Format messages using Slack's mrkdwn format, NOT standard Markdown.
-    Key differences: *bold*, _italic_, ~strikethrough~, <url|link text>,
-    bullet lists with "• ", ```code blocks```, > blockquotes.
-    Do NOT use **bold**, [link](url), or other standard Markdown syntax.
+    Except when relaying saved plan Markdown in plan mode, format messages using
+    Slack's mrkdwn format, NOT standard Markdown. Key differences: *bold*,
+    _italic_, ~strikethrough~, <url|link text>, bullet lists with "• ",
+    ```code blocks```, > blockquotes. Do NOT use **bold**, [link](url), or other
+    standard Markdown syntax outside that plan-mode exception.
 
     To ask a user to choose from predefined options, pass `options`. Slack will
     render interactive buttons and the web UI will render the same choices.
     The user can still reply manually in the Slack thread.
 
-    When a plan is ready, post a plain-text summary with the dashboard review link
-    and ask the user to reply naturally in the thread to approve it or request changes.
+    When a plan is ready in plan mode, its completion message is an exception to
+    the terseness rule: post the full plan Markdown with the dashboard review link
+    when it fits, or a truncated plan head plus the link when it does not. Preserve
+    Challenge content as directed by the active plan profile, use message text rather
+    than Block Kit, and ask the user to reply naturally in the thread to approve it
+    or request changes.
 
     To mention/tag a user, use Slack's mention format: <@USER_ID>.
     You can find user IDs in the conversation context (e.g. @Name(U06KD8BFY95)).

@@ -11,9 +11,17 @@ from agent.prompt import construct_system_prompt
 
 
 def test_plan_mode_prompt_included_when_enabled() -> None:
-    prompt = construct_system_prompt(working_dir="/work", plan_mode=True)
+    prompt = construct_system_prompt(
+        working_dir="/work",
+        plan_mode=True,
+        plan_url="https://plans.example/7",
+    )
     assert "Plan Mode (ACTIVE)" in prompt
     assert "read-only research-and-planning phase" in prompt
+    assert "Include the full plan Markdown when it fits" in prompt
+    assert "include the Challenge section verbatim" in prompt
+    assert "explicit exception to the general Slack terseness rule" in prompt
+    assert "https://plans.example/7" in prompt
 
 
 def test_plan_mode_prompt_absent_by_default() -> None:

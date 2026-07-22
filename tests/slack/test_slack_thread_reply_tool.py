@@ -27,6 +27,13 @@ def test_slack_thread_reply_prompt_requires_slack_only_terseness() -> None:
     assert "specific to Slack tool messages" in prompt
     assert "not normal web UI assistant messages" in prompt
     assert "reply naturally" in prompt
+    assert "exception to" in prompt
+    assert "relaying saved plan Markdown in plan mode" in prompt
+    assert "full plan Markdown" in prompt
+    assert "truncated plan head plus the link" in prompt
+    assert "Challenge content" in prompt
+    assert "use message text" in prompt
+    assert "Block Kit" in prompt
     assert "plan_approval" not in prompt
 
 
