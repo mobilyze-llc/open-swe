@@ -58,14 +58,26 @@ async def test_pr_ready_non_draft_triggers_run(monkeypatch: pytest.MonkeyPatch) 
     fake_client = MagicMock()
     fake_client.runs.create = AsyncMock()
     _patch_dispatch_deps(monkeypatch, fake_client)
+    selector = AsyncMock(wraps=webhook_common.reviewer_assistant_for_dispatch)
+    monkeypatch.setattr(webhook_common, "reviewer_assistant_for_dispatch", selector)
     monkeypatch.setattr(webhook_common, "get_profile", AsyncMock(return_value=None))
-    monkeypatch.setattr(webhook_common, "get_team_settings", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        webhook_common,
+        "get_team_settings",
+        AsyncMock(return_value={"reviewer_routing": "reviewer_adversarial"}),
+    )
 
     await github_webhooks.process_github_pr_ready(_pr_payload(action="opened", draft=False))
 
     fake_client.runs.create.assert_awaited_once()
     assert fake_client.runs.create.await_args is not None
-    _, kwargs = fake_client.runs.create.await_args
+    args, kwargs = fake_client.runs.create.await_args
+    assert args[1] == "reviewer_adversarial"
+    selector.assert_awaited_once_with(
+        re_review=False,
+        finding_reply=False,
+        explicit_request=False,
+    )
     assert kwargs["config"]["configurable"]["source"] == "github"
     assert kwargs["config"]["configurable"]["pr_number"] == 7
 
@@ -184,6 +196,8 @@ async def test_pr_ready_for_review_uses_re_review_after_previous_review(
     fake_client = MagicMock()
     fake_client.runs.create = AsyncMock()
     set_metadata = _patch_dispatch_deps(monkeypatch, fake_client)
+    selector = AsyncMock(wraps=webhook_common.reviewer_assistant_for_dispatch)
+    monkeypatch.setattr(webhook_common, "reviewer_assistant_for_dispatch", selector)
     monkeypatch.setattr(
         webhook_common,
         "_get_thread_metadata_safe",
@@ -196,7 +210,11 @@ async def test_pr_ready_for_review_uses_re_review_after_previous_review(
         ),
     )
     monkeypatch.setattr(webhook_common, "get_profile", AsyncMock(return_value=None))
-    monkeypatch.setattr(webhook_common, "get_team_settings", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        webhook_common,
+        "get_team_settings",
+        AsyncMock(return_value={"reviewer_routing": "reviewer_adversarial"}),
+    )
 
     await github_webhooks.process_github_pr_ready(
         _pr_payload(action="ready_for_review", draft=False)
@@ -204,7 +222,13 @@ async def test_pr_ready_for_review_uses_re_review_after_previous_review(
 
     fake_client.runs.create.assert_awaited_once()
     assert fake_client.runs.create.await_args is not None
-    _, kwargs = fake_client.runs.create.await_args
+    args, kwargs = fake_client.runs.create.await_args
+    assert args[1] == "reviewer"
+    selector.assert_awaited_once_with(
+        re_review=True,
+        finding_reply=False,
+        explicit_request=False,
+    )
     configurable = kwargs["config"]["configurable"]
     assert configurable["re_review"] is True
     assert configurable["last_reviewed_sha"] == "oldsha"

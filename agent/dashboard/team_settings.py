@@ -34,6 +34,7 @@ TEAM_SETTINGS_KEY = "default"
 # prompt. Generous enough for a detailed policy, small enough to stay bounded.
 ORG_GUIDELINES_MAX_CHARS = 10_000
 REVIEW_TRACING_PROJECT_MAX_CHARS = 256
+REVIEWER_ROUTING_VALUES = frozenset({"reviewer", "reviewer_adversarial"})
 
 
 class TeamSettingsUpdate(BaseModel):
@@ -66,6 +67,7 @@ class TeamSettingsUpdate(BaseModel):
     default_chat_reasoning_effort: str | None = None
     plan_profile: str | None = None
     review_profile: str | None = None
+    reviewer_routing: str | None = None
 
     @field_validator("plan_profile", "review_profile", mode="before")
     @classmethod
@@ -75,6 +77,20 @@ class TeamSettingsUpdate(BaseModel):
         if not isinstance(v, str):
             raise ValueError("stage profile must be a string")
         return v.strip() or None
+
+    @field_validator("reviewer_routing", mode="before")
+    @classmethod
+    def _normalize_reviewer_routing(cls, v: object) -> str | None:
+        if v is None:
+            return None
+        if not isinstance(v, str):
+            raise ValueError("reviewer_routing must be a string")
+        value = v.strip()
+        if not value:
+            return None
+        if value not in REVIEWER_ROUTING_VALUES:
+            raise ValueError(f"unsupported reviewer_routing: {value}")
+        return value
 
     @field_validator("org_guidelines", mode="before")
     @classmethod
@@ -286,6 +302,7 @@ def _default_settings() -> dict[str, Any]:
         "default_chat_reasoning_effort": None,
         "plan_profile": None,
         "review_profile": None,
+        "reviewer_routing": None,
         "updated_at": None,
     }
 
@@ -373,6 +390,11 @@ async def upsert_team_settings(update: TeamSettingsUpdate) -> dict[str, Any]:
             update.review_profile
             if "review_profile" in update.model_fields_set
             else stored.get("review_profile")
+        ),
+        "reviewer_routing": (
+            update.reviewer_routing
+            if "reviewer_routing" in update.model_fields_set
+            else stored.get("reviewer_routing")
         ),
         "updated_at": datetime.now(UTC).isoformat(),
     }

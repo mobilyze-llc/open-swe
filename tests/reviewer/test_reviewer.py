@@ -865,6 +865,23 @@ def test_build_first_review_context_omits_threads_section_when_empty() -> None:
     assert "## Pre-existing PR review threads" not in ctx
 
 
+def test_build_first_review_context_defers_to_configured_workflow() -> None:
+    ctx = reviewer._build_first_review_context(
+        pr_url="https://example/pr",
+        repo_owner="acme",
+        repo_name="repo",
+        pr_number=1,
+        base_sha="b",
+        head_sha="h",
+    )
+    assert "Follow the review workflow in your instructions." in ctx
+    assert "ordered passes" not in ctx
+    assert "mechanical" + " grep" not in ctx
+    assert "Call `fetch_review_diff`" in ctx
+    assert "Record net-new issues with `add_finding`" in ctx
+    assert "`publish_review` once at the end" in ctx
+
+
 def test_build_re_review_context_requires_reply_for_touched_or_outdated_keeps() -> None:
     ctx = reviewer._build_re_review_context(
         pr_url="https://example/pr",
