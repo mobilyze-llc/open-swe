@@ -29,6 +29,7 @@ from ..dashboard.profiles import (  # noqa: F401
     has_access_token_record,
 )
 from ..dashboard.team_settings import (
+    REVIEWER_ROUTING_VALUES,
     get_team_default_repo,
     get_team_settings,
 )
@@ -244,6 +245,7 @@ __all__ = [
     "resolve_agent_model_id",
     "resolve_login_from_email_async",
     "resolve_slack_links_in_context",
+    "reviewer_assistant_for_dispatch",
     "sanitize_github_comment_body",
     "select_slack_context_messages",
     "set_reviewer_thread_metadata",
@@ -1159,6 +1161,54 @@ def _build_reviewer_configurable(
             "thread_ts": slack_thread_ts,
         }
     return configurable
+
+
+async def reviewer_assistant_for_dispatch(
+    *,
+    re_review: bool,
+    finding_reply: bool,
+    explicit_request: bool,
+) -> str:
+    """Resolve the reviewer graph for a computed webhook dispatch kind."""
+    try:
+        settings = await get_team_settings()
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to load reviewer routing team setting", exc_info=True)
+        settings = {}
+
+    configured: object = settings.get("reviewer_routing")
+    source = "team setting"
+    if configured is None:
+        configured = os.environ.get("REVIEWER_ROUTING_DEFAULT")
+        source = "REVIEWER_ROUTING_DEFAULT"
+
+    if configured is None:
+        assistant_id = "reviewer"
+    elif not isinstance(configured, str) or configured.strip() not in REVIEWER_ROUTING_VALUES:
+        logger.warning(
+            "Invalid reviewer routing %r from %s; falling back to reviewer",
+            configured,
+            source,
+        )
+        assistant_id = "reviewer"
+    else:
+        assistant_id = configured.strip()
+
+    if re_review or finding_reply:
+        if assistant_id == "reviewer_adversarial":
+            if finding_reply:
+                dispatch_kind = "finding reply"
+            elif explicit_request:
+                dispatch_kind = "explicit re-request"
+            else:
+                dispatch_kind = "re-review"
+            logger.warning(
+                "Reviewer routing requested reviewer_adversarial for %s dispatch; forcing reviewer",
+                dispatch_kind,
+            )
+        return "reviewer"
+
+    return assistant_id
 
 
 async def _draft_review_enabled_for_author(author_login: str) -> bool:
