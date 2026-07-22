@@ -12,10 +12,17 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph.state import RunnableConfig
 from langgraph.runtime import Runtime
 
-from agent.reviewer import REVIEW_STAGE_TOOL_NAMES, REVIEWER_PROMPT_TEMPLATE
+from agent.middleware import ExcludeToolsMiddleware
+from agent.reviewer import (
+    REVIEW_STAGE_TOOL_NAMES,
+    REVIEWER_EVAL_PROMPT_SUFFIX,
+    REVIEWER_PROMPT_TEMPLATE,
+    _repo_checkout_note,
+)
 from agent.reviewer_adversarial import (
     RESERVED_SUBAGENT_TOOLS,
     PrepareAdversarialReviewerRunMiddleware,
+    _render_parent_prompt,
     get_reviewer_adversarial_agent,
 )
 from agent.utils.agent_definitions import (
@@ -23,7 +30,7 @@ from agent.utils.agent_definitions import (
     list_agent_definitions,
     load_agent_definition,
 )
-from agent.utils.stage_profiles import load_stage_profile
+from agent.utils.stage_profiles import StageProfile, load_stage_profile
 
 
 def test_registered_in_langgraph_json_and_importable() -> None:
@@ -122,6 +129,61 @@ async def _run_prepare(
 
 
 @pytest.mark.asyncio
+async def test_prepare_default_profile_matches_definition_prompt() -> None:
+    config = cast(
+        RunnableConfig,
+        {
+            "configurable": {
+                "thread_id": "adversarial-thread",
+                "repo": {"owner": "test-owner", "name": "test-repo"},
+            }
+        },
+    )
+    middleware = PrepareAdversarialReviewerRunMiddleware(
+        thread_id="adversarial-thread",
+        config=config,
+        use_gateway=False,
+        review_profile_name="default",
+        review_profile_body=REVIEWER_PROMPT_TEMPLATE,
+    )
+
+    with (
+        patch(
+            "agent.reviewer_adversarial._ensure_reviewer_sandbox_for_thread",
+            new_callable=AsyncMock,
+            return_value=(MagicMock(), None),
+        ),
+        patch(
+            "agent.reviewer_adversarial.aresolve_sandbox_work_dir",
+            new_callable=AsyncMock,
+            return_value="/workspace",
+        ),
+        patch(
+            "agent.reviewer_adversarial.prepare_review_repo",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+    ):
+        updates = await _run_prepare(middleware)
+
+    checkout_note = _repo_checkout_note(
+        repo_ready=True,
+        working_dir="/workspace/test-repo",
+        repo_owner="test-owner",
+        repo_name="test-repo",
+        pr_number="",
+        head_sha="",
+    )
+    assert updates["rendered_system_prompt"] == _render_parent_prompt(
+        working_dir="/workspace/test-repo",
+        repo_owner="test-owner",
+        repo_name="test-repo",
+        pr_number="",
+        repo_checkout_note=checkout_note,
+    )
+
+
+@pytest.mark.asyncio
 async def test_prepare_renders_definition_prompt(tmp_path: Path) -> None:
     profile_dir = tmp_path / "review"
     profile_dir.mkdir()
@@ -200,7 +262,7 @@ async def test_prepare_renders_definition_prompt(tmp_path: Path) -> None:
         updates = await prepare()
         prompt = cast(str, updates["rendered_system_prompt"])
         assert "A finding is a claim about a concrete failure" in prompt
-        assert "ADVERSARIAL PROFILE MARKER test-owner/test-repo" in prompt
+        assert "ADVERSARIAL PROFILE MARKER test-owner/test-repo" not in prompt
         assert "Independent finder pass" in prompt
         assert "test-owner/test-repo#7" in prompt
         assert "/workspace/test-repo" in prompt
@@ -210,7 +272,8 @@ async def test_prepare_renders_definition_prompt(tmp_path: Path) -> None:
 
         eval_updates = await prepare({"reviewer_eval": True})
         eval_prompt = cast(str, eval_updates["rendered_system_prompt"])
-        assert "Eval mode — calibration" in eval_prompt
+        assert REVIEWER_EVAL_PROMPT_SUFFIX in eval_prompt
+        assert "ADVERSARIAL PROFILE MARKER test-owner/test-repo" not in eval_prompt
         assert "Pre-existing PR review threads" not in eval_prompt
 
         rejected_configs: tuple[dict[str, object], ...] = (
@@ -371,3 +434,99 @@ async def test_model_key_resolution() -> None:
                 "reviewer_model_id": "E",
             }
         ) == ["X", "X"]
+
+
+@pytest.mark.asyncio
+async def test_custom_profile_applies_pins_while_body_is_ignored(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    requested: list[str] = []
+    fake = MagicMock()
+    fake.with_config = MagicMock(return_value=fake)
+    subagent: dict[str, Any] = {}
+    profile = StageProfile(
+        stage="review",
+        name="custom-review",
+        body="CUSTOM REVIEW PROFILE BODY",
+        model="profile-model",
+        reasoning_effort="high",
+        tools=("fetch_review_diff",),
+    )
+
+    def make_model(model_id: str, **kwargs: object) -> MagicMock:
+        del kwargs
+        requested.append(model_id)
+        return MagicMock()
+
+    config = cast(
+        RunnableConfig,
+        {
+            "configurable": {
+                "thread_id": "adversarial-thread",
+                "__is_for_execution__": True,
+            }
+        },
+    )
+    caplog.set_level("INFO", logger="agent.reviewer_adversarial")
+
+    with (
+        patch("agent.reviewer_adversarial.create_deep_agent", return_value=fake) as create_agent,
+        patch("agent.reviewer_adversarial._make_model_or_defer", side_effect=make_model),
+        patch(
+            "agent.reviewer_adversarial._cached_reviewer_team_defaults",
+            new_callable=AsyncMock,
+            return_value=(("team-main", "low"), ("team-sub", "low")),
+        ),
+        patch(
+            "agent.reviewer_adversarial._cached_review_profile_name",
+            new_callable=AsyncMock,
+            return_value=profile.name,
+        ),
+        patch("agent.reviewer_adversarial.resolve_stage_profile", return_value=profile),
+        patch(
+            "agent.reviewer_adversarial._cached_gateway_enabled",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "agent.reviewer_adversarial.get_team_fable_enabled",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("agent.reviewer_adversarial.build_subagents", return_value=[subagent]),
+    ):
+        await get_reviewer_adversarial_agent(config)
+
+    assert requested == ["profile-model", "profile-model"]
+    assert "Ignoring review profile body 'custom-review'" in caplog.text
+
+    kwargs = create_agent.call_args.kwargs
+    middleware = cast(list[object], kwargs["middleware"])
+    prepare = cast(PrepareAdversarialReviewerRunMiddleware, middleware[0])
+    assert prepare._prepare_config_fingerprint()["review_profile"] == profile.name
+    with (
+        patch(
+            "agent.reviewer_adversarial._ensure_reviewer_sandbox_for_thread",
+            new_callable=AsyncMock,
+            return_value=(MagicMock(), None),
+        ),
+        patch(
+            "agent.reviewer_adversarial.aresolve_sandbox_work_dir",
+            new_callable=AsyncMock,
+            return_value="/workspace",
+        ),
+        patch(
+            "agent.reviewer_adversarial.prepare_review_repo",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+    ):
+        updates = await _run_prepare(prepare)
+    assert profile.body not in cast(str, updates["rendered_system_prompt"])
+    assert profile.tools is not None
+    expected_tools = frozenset(profile.tools)
+    parent_filter = next(item for item in middleware if isinstance(item, ExcludeToolsMiddleware))
+    assert cast(Any, parent_filter)._allowed == expected_tools
+    subagent_filter = cast(list[object], subagent["middleware"])[-1]
+    assert isinstance(subagent_filter, ExcludeToolsMiddleware)
+    assert cast(Any, subagent_filter)._allowed == expected_tools
