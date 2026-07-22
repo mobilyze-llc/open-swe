@@ -44,6 +44,7 @@ import agent.tools as agent_tools
 from .dashboard.options import gate_fable_model
 from .dashboard.team_settings import get_team_fable_enabled
 from .middleware import (
+    ExcludeToolsMiddleware,
     RepairOrphanedToolCallsMiddleware,
     SanitizeFireworksMessagesMiddleware,
     SanitizeThinkingBlocksMiddleware,
@@ -65,10 +66,13 @@ from .review.diff import (
 )
 from .review.findings import REVIEW_FINDING_CAP
 from .reviewer import (
+    REVIEW_STAGE_TOOL_NAMES,
     REVIEWER_EVAL_PROMPT_SUFFIX,
+    REVIEWER_PROMPT_TEMPLATE,
     PrepareReviewerRunMiddleware,
     _build_first_review_context,
     _cached_gateway_enabled,
+    _cached_review_profile_name,
     _cached_reviewer_team_defaults,
     _ensure_reviewer_sandbox_for_thread,
     _make_model_or_defer,
@@ -85,6 +89,7 @@ from .utils.agent_definitions import build_subagents, load_agent_definition
 from .utils.model import DEFAULT_LLM_REASONING, provider_model_kwargs
 from .utils.repo_prep import prepare_review_repo
 from .utils.sandbox_paths import aresolve_sandbox_work_dir
+from .utils.stage_profiles import resolve_stage_profile
 from .utils.tracing import REVIEW_TRACING_PROJECT, traced_graph_factory
 
 logger = logging.getLogger(__name__)
@@ -280,6 +285,13 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
         return create_deep_agent(system_prompt="", tools=[]).with_config(config)
 
     is_eval = configurable.get("reviewer_eval") is True or configurable.get("eval") is True
+    review_profile_name = await _cached_review_profile_name()
+    review_profile = resolve_stage_profile(
+        "review",
+        review_profile_name,
+        allowed_tools=REVIEW_STAGE_TOOL_NAMES,
+        fallback_body=REVIEWER_PROMPT_TEMPLATE,
+    )
 
     def _configured_pair(namespaced: str, eval_fallback: str) -> tuple[str, str | None] | None:
         model_key = configurable.get(namespaced + "_model_id")
@@ -302,6 +314,11 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
             (model_id, reasoning_effort),
             (subagent_model_id, subagent_effort),
         ) = await _cached_reviewer_team_defaults()
+        if review_profile.model is not None:
+            model_id = review_profile.model
+            reasoning_effort = review_profile.reasoning_effort
+            subagent_model_id = review_profile.model
+            subagent_effort = review_profile.reasoning_effort
 
     configured_subagent = _configured_pair("reviewer_adversarial_subagent", "reviewer_subagent")
     if configured_subagent is not None:
@@ -364,6 +381,8 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
                     thread_id=thread_id,
                     config=config,
                     use_gateway=use_gateway,
+                    review_profile_name=review_profile.name,
+                    review_profile_body=review_profile.body,
                 ),
                 SanitizeToolInputsMiddleware(),
                 ModelCallLimitMiddleware(
@@ -375,6 +394,11 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
                 check_message_queue_before_model,
                 SlackAssistantStatusMiddleware(),
                 TimeoutWrapupMiddleware(),
+                *(
+                    [ExcludeToolsMiddleware(allowed=frozenset(review_profile.tools))]
+                    if review_profile.tools is not None
+                    else []
+                ),
                 SanitizeFireworksMessagesMiddleware(),
                 SanitizeThinkingBlocksMiddleware(),
                 RepairOrphanedToolCallsMiddleware(),

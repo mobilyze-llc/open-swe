@@ -12,6 +12,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph.state import RunnableConfig
 from langgraph.runtime import Runtime
 
+from agent.reviewer import REVIEWER_PROMPT_TEMPLATE
 from agent.reviewer_adversarial import (
     RESERVED_SUBAGENT_TOOLS,
     PrepareAdversarialReviewerRunMiddleware,
@@ -146,6 +147,8 @@ async def test_prepare_renders_definition_prompt() -> None:
             thread_id="adversarial-thread",
             config=config,
             use_gateway=False,
+            review_profile_name="default",
+            review_profile_body=REVIEWER_PROMPT_TEMPLATE,
         )
         return await _run_prepare(middleware)
 
@@ -233,6 +236,8 @@ async def test_prepare_materializes_diff_without_api_token() -> None:
         thread_id="adversarial-thread",
         config=config,
         use_gateway=False,
+        review_profile_name="default",
+        review_profile_body=REVIEWER_PROMPT_TEMPLATE,
     )
 
     with (
@@ -308,6 +313,11 @@ async def test_model_key_resolution() -> None:
             "agent.reviewer_adversarial._cached_reviewer_team_defaults",
             new_callable=AsyncMock,
             return_value=(("team-main", "low"), ("team-sub", "high")),
+        ),
+        patch(
+            "agent.reviewer_adversarial._cached_review_profile_name",
+            new_callable=AsyncMock,
+            return_value=None,
         ),
         patch(
             "agent.reviewer_adversarial._cached_gateway_enabled",
