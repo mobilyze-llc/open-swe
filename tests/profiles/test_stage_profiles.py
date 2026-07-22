@@ -5,8 +5,10 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
+from deepagents import create_deep_agent
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage
+from langgraph.prebuilt import ToolNode
 
 from agent.middleware.exclude_tools import ExcludeToolsMiddleware
 from agent.middleware.plan_mode import PlanModeMiddleware
@@ -18,8 +20,11 @@ from agent.reviewer import (
     _reviewer_system_prompt,
 )
 from agent.server import PLAN_STAGE_TOOL_NAMES
+from agent.utils.deferred_model import DeferredErrorModel
 from agent.utils.stage_profiles import (
+    DEEP_AGENT_TOOL_NAMES,
     StageProfileError,
+    load_bundled_stage_profile_body,
     load_stage_profile,
     resolve_stage_profile,
 )
@@ -34,6 +39,7 @@ def _write_profile(root: Path, stage: str, name: str, frontmatter: str, body: st
 def test_default_plan_profile_is_byte_identical() -> None:
     profile = load_stage_profile("plan", "default", allowed_tools=PLAN_STAGE_TOOL_NAMES)
 
+    assert PLAN_MODE_SECTION == load_bundled_stage_profile_body("plan")
     for body in (profile.body, PLAN_MODE_SECTION):
         assert "\n### Challenge\n" in body
         assert "\n### Unverified claims\n" in body
@@ -54,6 +60,7 @@ def test_default_plan_profile_is_byte_identical() -> None:
 def test_default_review_profile_is_byte_identical() -> None:
     profile = load_stage_profile("review", "default", allowed_tools=REVIEW_STAGE_TOOL_NAMES)
 
+    assert REVIEWER_PROMPT_TEMPLATE == load_bundled_stage_profile_body("review")
     assert profile.body == REVIEWER_PROMPT_TEMPLATE
     expected = _reviewer_system_prompt(
         "/work/repo", repo_owner="acme", repo_name="repo", pr_number=7
@@ -66,6 +73,39 @@ def test_default_review_profile_is_byte_identical() -> None:
         profile_body=profile.body,
     )
     assert actual == expected
+
+
+def test_deep_agent_tool_names_match_constructed_agent() -> None:
+    graph = create_deep_agent(
+        model=DeferredErrorModel(error_message="unused"),
+        system_prompt="",
+        tools=[],
+    )
+    tool_node = cast(ToolNode, graph.nodes["tools"].bound)
+
+    assert frozenset(tool_node.tools_by_name) == DEEP_AGENT_TOOL_NAMES
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("model: openai:gpt-5.6-sol\nBody.\n", "missing opening frontmatter delimiter"),
+        ("---\nmodel: openai:gpt-5.6-sol\n", "unterminated frontmatter block"),
+        ("---\nmodel: [\n---\nBody.\n", "invalid YAML"),
+        ("---\n- model\n---\nBody.\n", "frontmatter must be a mapping"),
+    ],
+)
+def test_stage_profile_reports_shared_frontmatter_errors(
+    tmp_path: Path,
+    content: str,
+    expected: str,
+) -> None:
+    path = tmp_path / "plan" / "broken.md"
+    path.parent.mkdir()
+    path.write_text(content, encoding="utf-8")
+
+    with pytest.raises(StageProfileError, match=expected):
+        load_stage_profile("plan", "broken", allowed_tools=PLAN_STAGE_TOOL_NAMES, root=tmp_path)
 
 
 def test_non_default_profile_changes_assembled_prompt(tmp_path: Path) -> None:
