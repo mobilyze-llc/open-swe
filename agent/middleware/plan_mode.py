@@ -20,6 +20,8 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
 )
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import SystemMessage
 from langchain_core.tools import BaseTool
 
 
@@ -42,8 +44,21 @@ class PlanModeMiddleware(AgentMiddleware):
 
     state_schema = PlanModeState
 
-    def __init__(self, *, excluded: frozenset[str], initial: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        excluded: frozenset[str],
+        allowed: frozenset[str] | None = None,
+        model: BaseChatModel | None = None,
+        base_model: BaseChatModel | None = None,
+        prompt: str | None = None,
+        initial: bool = False,
+    ) -> None:
         self._excluded = excluded
+        self._allowed = allowed
+        self._model = model
+        self._base_model = base_model
+        self._prompt = prompt
         self._initial = initial
 
     def before_agent(self, state: Any, runtime: Any) -> dict[str, Any] | None:  # noqa: ARG002
@@ -66,16 +81,37 @@ class PlanModeMiddleware(AgentMiddleware):
         return self._initial
 
     def _filter(self, request: ModelRequest) -> ModelRequest:
-        if not self._excluded or not self._active(request):
+        if not self._active(request):
             return request
-        filtered = [t for t in request.tools if _tool_name(t) not in self._excluded]
+        filtered = [
+            tool
+            for tool in request.tools
+            if _tool_name(tool) not in self._excluded
+            and (self._allowed is None or _tool_name(tool) in self._allowed)
+        ]
         if len(filtered) == len(request.tools):
             return request
         return request.override(tools=filtered)
+
+    def _apply_profile(self, request: ModelRequest) -> ModelRequest:
+        request = self._filter(request)
+        if not self._active(request):
+            return request
+        if self._model is not None and (
+            self._base_model is None
+            or request.model is self._base_model
+            or request.model is self._model
+        ):
+            request = request.override(model=self._model)
+        if self._prompt is not None and not self._initial:
+            existing = request.system_message.text if request.system_message is not None else ""
+            content = f"{self._prompt}\n\n{existing}" if existing else self._prompt
+            request = request.override(system_message=SystemMessage(content=content))
+        return request
 
     async def awrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        return await handler(self._filter(request))
+        return await handler(self._apply_profile(request))

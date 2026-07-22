@@ -39,13 +39,24 @@ class ExcludeToolsMiddleware(AgentMiddleware):
 
     state_schema = AgentState
 
-    def __init__(self, *, excluded: frozenset[str]) -> None:
+    def __init__(
+        self,
+        *,
+        excluded: frozenset[str] = frozenset(),
+        allowed: frozenset[str] | None = None,
+    ) -> None:
         self._excluded = excluded
+        self._allowed = allowed
 
     def _filter(self, request: ModelRequest) -> ModelRequest:
-        if not self._excluded:
+        if not self._excluded and self._allowed is None:
             return request
-        filtered = [t for t in request.tools if _tool_name(t) not in self._excluded]
+        filtered = [
+            tool
+            for tool in request.tools
+            if _tool_name(tool) not in self._excluded
+            and (self._allowed is None or _tool_name(tool) in self._allowed)
+        ]
         if len(filtered) == len(request.tools):
             return request
         return request.override(tools=filtered)

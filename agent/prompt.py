@@ -360,6 +360,7 @@ def construct_system_prompt(
     default_repo: dict[str, str] | None = None,
     plan_mode: bool = False,
     plan_url: str | None = None,
+    plan_profile_body: str = PLAN_MODE_SECTION,
     repo_custom_instructions: str | None = None,
     thread_url: str | None = None,
     corridor_enabled: bool = False,
@@ -385,7 +386,7 @@ def construct_system_prompt(
         linear_issue_number=linear_issue_number or "<ISSUE_NUMBER>",
         plan_review_url=plan_url or "(the dashboard plan-review page)",
         plan_mode_section=(
-            PLAN_MODE_SECTION.format(plan_url=plan_url or "(plan-review link unavailable)")
+            plan_profile_body.format(plan_url=plan_url or "(plan-review link unavailable)")
             if plan_mode
             else ""
         ),
