@@ -327,10 +327,12 @@ async def test_cached_plan_policy_cold_read_failure_fails_closed(
             "agent.dashboard.team_settings._get_stored_team_settings",
             new_callable=AsyncMock,
             side_effect=RuntimeError("store unavailable"),
-        ):
+        ) as stored:
             caplog.set_level(logging.WARNING, logger="agent.server")
             assert await server._cached_require_plan_approval() is True
+            assert await server._cached_require_plan_approval() is True
 
+        stored.assert_awaited_once()
         assert "no known-good value; requiring approval" in caplog.text
     finally:
         server.ttl_cache.clear()

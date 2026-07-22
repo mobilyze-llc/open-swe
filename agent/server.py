@@ -736,6 +736,7 @@ async def _cached_require_plan_approval() -> bool:
             "Plan approval policy unavailable with no known-good value; requiring approval",
             exc_info=True,
         )
+        ttl_cache.set_cached(_REQUIRE_PLAN_APPROVAL_CACHE_KEY, True, 60)
         return True
 
 
