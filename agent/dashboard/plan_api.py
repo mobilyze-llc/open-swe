@@ -331,6 +331,8 @@ async def _dispatch_followup(
     # Carry the decision to the follow-up run: approve continues out of plan
     # mode (implement), reject stays in plan mode (revise the plan).
     configurable["plan_mode"] = plan_mode
+    if not plan_mode:
+        configurable["plan_gate_bypass"] = True
 
     await dispatch_agent_run(
         thread_id,

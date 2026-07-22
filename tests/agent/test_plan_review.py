@@ -868,3 +868,43 @@ async def test_reject_plan_rejects_shared_content(
         await plan_api.reject_plan("t1", session={"sub": "a", "email": None})
     assert exc.value.status_code == 409
     assert dispatched == []
+
+
+@pytest.mark.parametrize(
+    ("plan_mode", "expected_bypass"),
+    [(False, True), (True, False)],
+)
+async def test_plan_decision_followup_sets_bypass_only_for_approval(
+    monkeypatch: pytest.MonkeyPatch,
+    plan_mode: bool,
+    expected_bypass: bool,
+) -> None:
+    from agent.dashboard import plan_api
+
+    dispatched: dict[str, Any] = {}
+
+    async def fake_dispatch(
+        thread_id: str,
+        text: str,
+        configurable: dict[str, Any],
+        *,
+        source: str,
+    ) -> None:
+        dispatched.update(
+            thread_id=thread_id,
+            text=text,
+            configurable=configurable,
+            source=source,
+        )
+
+    monkeypatch.setattr(plan_api, "dispatch_agent_run", fake_dispatch)
+    await plan_api._dispatch_followup(
+        "thread-1",
+        {"source": "dashboard", "github_login": "octocat"},
+        "continue",
+        plan_mode=plan_mode,
+    )
+
+    configurable = dispatched["configurable"]
+    assert configurable["plan_mode"] is plan_mode
+    assert (configurable.get("plan_gate_bypass") is True) is expected_bypass

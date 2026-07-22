@@ -43,11 +43,11 @@ class TeamSettingsUpdate(BaseModel):
     # Tri-state LLM Gateway toggle: True/False is authoritative, None inherits the
     # LANGSMITH_GATEWAY_ENABLED deployment default.
     gateway_enabled: bool | None = None
-    # Review auto-fix opt-in. Tri-state like gateway_enabled: None preserves the
-    # stored value, so a client that doesn't render these fields cannot silently
-    # erase the opt-in by saving unrelated settings.
+    # Review auto-fix and plan-gate opt-ins. None preserves the stored value, so
+    # clients that do not render these fields cannot erase them on unrelated saves.
     autofix_enabled: bool | None = None
     autofix_severity_threshold: Literal["low", "medium", "high", "critical"] | None = None
+    require_plan_approval: bool | None = None
     fable_enabled: bool = False
     review_tracing_project: str | None = None
     org_guidelines: str | None = None
@@ -264,6 +264,7 @@ def _default_settings() -> dict[str, Any]:
         "gateway_enabled": None,
         "autofix_enabled": False,
         "autofix_severity_threshold": "medium",
+        "require_plan_approval": False,
         "fable_enabled": False,
         "review_tracing_project": None,
         "org_guidelines": None,
@@ -306,9 +307,8 @@ async def get_team_settings() -> dict[str, Any]:
     # selection) still surface the hardcoded default instead of a null.
     overlay = {k: v for k, v in value.items() if v is not None}
     merged = {**defaults, **overlay}
-    # autofix_enabled / autofix_severity_threshold were in this stale-field
-    # purge from an older settings shape; they are supported typed settings
-    # again (review auto-fix opt-in) and must survive the response.
+    # These current opt-in fields were in the stale-field purge from older
+    # settings shapes and must survive the response.
     for stale_field in (
         "trigger_mode",
         "autofix_mode",
@@ -336,6 +336,11 @@ async def upsert_team_settings(update: TeamSettingsUpdate) -> dict[str, Any]:
             update.autofix_severity_threshold
             if update.autofix_severity_threshold is not None
             else stored.get("autofix_severity_threshold")
+        ),
+        "require_plan_approval": (
+            update.require_plan_approval
+            if update.require_plan_approval is not None
+            else stored.get("require_plan_approval")
         ),
         "fable_enabled": update.fable_enabled,
         "review_tracing_project": update.review_tracing_project,
@@ -476,6 +481,12 @@ async def get_team_autofix_settings() -> tuple[bool, str]:
     if threshold not in ("low", "medium", "high", "critical"):
         threshold = "medium"
     return settings.get("autofix_enabled") is True, threshold
+
+
+async def get_team_require_plan_approval() -> bool:
+    """Return whether every enrolled agent dispatch requires plan approval."""
+    settings = await get_team_settings()
+    return settings.get("require_plan_approval") is True
 
 
 async def get_team_review_trace_links_enabled() -> bool:
