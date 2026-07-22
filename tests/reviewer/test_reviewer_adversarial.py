@@ -267,6 +267,9 @@ async def test_prepare_renders_definition_prompt(tmp_path: Path) -> None:
         assert "test-owner/test-repo#7" in prompt
         assert "/workspace/test-repo" in prompt
         assert "This is a first review" in prompt
+        assert "Follow the review workflow in your instructions." in prompt
+        assert "Review using the ordered passes" not in prompt
+        assert "mechanical" + " grep" not in prompt
         assert updates["diff_text"] == diff
         assert updates["diff_line_set"] is not None
 
