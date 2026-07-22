@@ -1,0 +1,35 @@
+# Interim agent auto-merge (operator decision 2026-07-22, OSWE-109).
+# Arms GitHub native auto-merge on agent-opened PRs (open-swe/* head branches)
+# so merge-on-clean completes without a per-PR operator action. The blocking
+# "Open SWE Review" check and CI still gate the actual merge via branch
+# protection. Escape hatch: add the `hold-merge` label before/at open, or run
+# `gh pr merge <n> --disable-auto` after arming.
+#
+# REMOVE when OSWE-109 (auto_merge_mode team setting) lands — its acceptance
+# includes deleting this file.
+name: Agent auto-merge
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  arm:
+    if: >-
+      startsWith(github.event.pull_request.head.ref, 'open-swe/') &&
+      !contains(github.event.pull_request.labels.*.name, 'hold-merge')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ready and arm auto-merge (squash)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ "${{ github.event.pull_request.draft }}" = "true" ]; then
+            gh pr ready "$PR" --repo "$REPO"
+          fi
+          gh pr merge "$PR" --repo "$REPO" --auto --squash
