@@ -10,6 +10,11 @@
 # removing it re-arms (`unlabeled`). `--disable-auto` alone is NOT durable —
 # a later push re-arms; use the label.
 # A PR converted to draft after opening stays draft (pushes don't re-ready it).
+# Known accepted limitation (interim): an agent PR that opens BOTH draft AND
+# merge-conflicted never auto-readies (the opened run is suppressed by the
+# conflict; later synchronize runs deliberately leave draft state alone).
+# Recovery is one command: `gh pr ready <n>`. Not worth state-tracking in a
+# file that OSWE-109 deletes.
 #
 # REMOVE when OSWE-109 (auto_merge_mode team setting) lands — its acceptance
 # includes deleting this file.
