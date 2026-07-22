@@ -207,25 +207,45 @@ def test_review_profile_tool_restriction_is_applied_at_model_request() -> None:
     assert [tool["name"] for tool in filtered.tools] == ["read_file", "add_finding"]
 
 
-def test_plan_profile_applies_prompt_and_model_after_mid_run_entry() -> None:
-    model = cast(BaseChatModel, MagicMock())
+@pytest.mark.asyncio
+async def test_plan_profile_applies_after_mid_run_enter_plan_mode() -> None:
+    base_model = cast(BaseChatModel, MagicMock(name="base_model"))
+    plan_model = cast(BaseChatModel, MagicMock(name="plan_model"))
     middleware = PlanModeMiddleware(
         excluded=frozenset(),
-        model=model,
+        model=plan_model,
+        base_model=base_model,
         prompt="CUSTOM PLAN PROFILE",
         initial=False,
     )
-    request = _Request(
+    captured: list[_Request] = []
+
+    async def handler(request: Any) -> Any:
+        captured.append(cast(_Request, request))
+        return MagicMock()
+
+    before_entry = _Request(
+        [{"name": "read_file"}],
+        {"plan_mode": False},
+        model=base_model,
+        system_message=SystemMessage(content="BASE PROMPT"),
+    )
+    after_entry = _Request(
         [{"name": "read_file"}],
         {"plan_mode": True},
+        model=base_model,
         system_message=SystemMessage(content="BASE PROMPT"),
     )
 
-    filtered = cast(_Request, middleware._apply_profile(cast(Any, request)))
+    await middleware.awrap_model_call(cast(Any, before_entry), handler)
+    await middleware.awrap_model_call(cast(Any, after_entry), handler)
 
-    assert filtered.model is model
-    assert filtered.system_message is not None
-    assert filtered.system_message.text == "CUSTOM PLAN PROFILE\n\nBASE PROMPT"
+    assert captured[0].model is base_model
+    assert captured[0].system_message is not None
+    assert captured[0].system_message.text == "BASE PROMPT"
+    assert captured[1].model is plan_model
+    assert captured[1].system_message is not None
+    assert captured[1].system_message.text == "CUSTOM PLAN PROFILE\n\nBASE PROMPT"
 
 
 def test_reviewer_subagent_uses_profile_tool_restriction() -> None:

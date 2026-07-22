@@ -12,7 +12,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph.state import RunnableConfig
 from langgraph.runtime import Runtime
 
-from agent.reviewer import REVIEWER_PROMPT_TEMPLATE
+from agent.reviewer import REVIEW_STAGE_TOOL_NAMES, REVIEWER_PROMPT_TEMPLATE
 from agent.reviewer_adversarial import (
     RESERVED_SUBAGENT_TOOLS,
     PrepareAdversarialReviewerRunMiddleware,
@@ -23,6 +23,7 @@ from agent.utils.agent_definitions import (
     list_agent_definitions,
     load_agent_definition,
 )
+from agent.utils.stage_profiles import load_stage_profile
 
 
 def test_registered_in_langgraph_json_and_importable() -> None:
@@ -121,7 +122,19 @@ async def _run_prepare(
 
 
 @pytest.mark.asyncio
-async def test_prepare_renders_definition_prompt() -> None:
+async def test_prepare_renders_definition_prompt(tmp_path: Path) -> None:
+    profile_dir = tmp_path / "review"
+    profile_dir.mkdir()
+    (profile_dir / "adversarial-marker.md").write_text(
+        "---\n{}\n---\nADVERSARIAL PROFILE MARKER {repo_owner}/{repo_name}",
+        encoding="utf-8",
+    )
+    review_profile = load_stage_profile(
+        "review",
+        "adversarial-marker",
+        allowed_tools=REVIEW_STAGE_TOOL_NAMES,
+        root=tmp_path,
+    )
     diff = (
         "diff --git a/example.py b/example.py\n"
         "--- a/example.py\n"
@@ -147,8 +160,8 @@ async def test_prepare_renders_definition_prompt() -> None:
             thread_id="adversarial-thread",
             config=config,
             use_gateway=False,
-            review_profile_name="custom",
-            review_profile_body="CUSTOM REVIEW PROFILE {repo_owner}/{repo_name}",
+            review_profile_name=review_profile.name,
+            review_profile_body=review_profile.body,
         )
         return await _run_prepare(middleware)
 
@@ -187,7 +200,7 @@ async def test_prepare_renders_definition_prompt() -> None:
         updates = await prepare()
         prompt = cast(str, updates["rendered_system_prompt"])
         assert "A finding is a claim about a concrete failure" in prompt
-        assert "CUSTOM REVIEW PROFILE test-owner/test-repo" in prompt
+        assert "ADVERSARIAL PROFILE MARKER test-owner/test-repo" in prompt
         assert "Independent finder pass" in prompt
         assert "test-owner/test-repo#7" in prompt
         assert "/workspace/test-repo" in prompt
