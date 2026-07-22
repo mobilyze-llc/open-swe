@@ -14,13 +14,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import yaml
 from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT, SubAgent
 from langchain.agents.middleware.types import AgentMiddleware, ModelRequest, ModelResponse
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import SystemMessage
 
 import agent.tools as agent_tools
+from agent.utils.stage_profiles import FrontmatterError, parse_frontmatter_file
 
 _FRONTMATTER_KEYS = frozenset({"description", "tools"})
 _CURATED_TOOL_NAMES = frozenset(agent_tools.__all__)
@@ -217,28 +217,11 @@ def _load_prompt_file(
     relative: str,
     errors: list[str],
 ) -> tuple[str, tuple[str, ...], str] | None:
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    if not lines or lines[0].rstrip("\r\n") != "---":
-        errors.append(f"{relative}: missing opening frontmatter delimiter")
-        return None
-    closing = next(
-        (index for index, line in enumerate(lines[1:], 1) if line.rstrip("\r\n") == "---"),
-        None,
-    )
-    if closing is None:
-        errors.append(f"{relative}: unterminated frontmatter block")
-        return None
     try:
-        frontmatter = yaml.safe_load("".join(lines[1:closing]))
-    except yaml.YAMLError as exc:
-        problem = getattr(exc, "problem", None)
-        detail = f": {problem}" if isinstance(problem, str) and problem else ""
-        errors.append(f"{relative}: invalid YAML{detail}")
+        frontmatter, body = parse_frontmatter_file(path)
+    except FrontmatterError as exc:
+        errors.append(f"{relative}: {exc}")
         return None
-    if not isinstance(frontmatter, dict):
-        errors.append(f"{relative}: frontmatter must be a mapping")
-        return None
-    body = "".join(lines[closing + 1 :])
 
     valid = True
     for key in sorted((key for key in frontmatter if key not in _FRONTMATTER_KEYS), key=repr):
