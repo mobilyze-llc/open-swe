@@ -54,7 +54,10 @@ targeted base and head fetches each `2>/dev/null || true`; a fork-PR fallback fe
 --force` because a reused sandbox can hold a dirty worktree that would silently block checkout; and
 a hard `[ "$(git rev-parse HEAD)" = <head_sha> ]` verification so a failed checkout fails the prep
 rather than leaving a stale tree that looks prepped. 240 s timeout, `shlex.quote` on every
-interpolation, repo-name regex validation. On failure the system prompt flips to the recovery note.
+interpolation. (Correction, PR #29 review: repo-name *regex* validation is tool-side —
+`_REPO_NAME_RE` in `fetch_review_diff` — not in `prepare_review_repo`, which only rejects empty
+owner/name; `_valid_repo_component` guards only the main-agent skills path.) On failure the system
+prompt flips to the recovery note.
 
 **Shared — the recovery note** (`_REPO_NOT_READY_NOTE`, `agent/reviewer.py:388`). When prep fails,
 the prompt embeds an exact re-prep script (clone-or-cd, sha fetch with pull-ref fallback, forced
@@ -343,7 +346,12 @@ stock procedure — "delegate at most one review pass", the nine-pass workflow �
 whose whole point is fan-out/adjudicate orchestration. OSWE-82 (Triage, P0-marked-high, filed from
 the operator's post-merge review) carries the fix spec: append only when a non-default profile is
 selected, default = definition alone byte-identical to pre-OSWE-76, plus the missing
-adversarial-assembly identity test. The eval-suffix handling also moved inside
+adversarial-assembly identity test. (Amended per the PR #29 review: "append only non-default"
+still collides — a review `StageProfile.body` is a *complete* stage prompt the stock reviewer
+renders in place, so appending any full body onto the definition yields two instruction sets. The
+clean semantics: the adversarial graph applies a profile's model/effort/tools pins but never
+appends its body; if the adversarial prompt ever needs profile-tuning, that is the dedicated
+adversarial stage OSWE-82 already names as the deferred alternative. Flagged on OSWE-82.) The eval-suffix handling also moved inside
 `_reviewer_system_prompt`, so the adversarial graph now inherits it through the appended profile
 prompt rather than appending `REVIEWER_EVAL_PROMPT_SUFFIX` itself — the OSWE-82 fix must preserve
 eval-mode calibration when it stops appending the profile body.
@@ -368,10 +376,14 @@ drift from deepagents' actual builtin set — both already tracked as OSWE-83.
   `af768adc` per OSWE-82's operator evidence ("Deployed defect (release af768adc)", filed
   2026-07-22); the 2026-07-21 handoff confirms the mechanism and that no webhook routing change has
   ever shipped. Not verified by touching the host — corroborated three ways instead.
-- **Dispatch-site → event map** (for the eventual flip):
+- **Dispatch-site → event map** (for the eventual flip; corrected per the PR #29 review — sites
+  are not one-to-one with dispatch kinds):
   - `trigger_pr_review_from_ref` (`github.py:191`) — explicit review request.
-  - `_dispatch_first_review_from_pr_payload` (`github.py:312`) — auto first review on
-    `opened`/`ready_for_review`.
+  - `_dispatch_first_review_from_pr_payload` (`github.py:312`) — `opened`/`ready_for_review`, BUT
+    it computes `is_re_review = bool(last_reviewed_sha)` and dispatches `re_review=True` when the
+    canonical thread was reviewed before (draft→ready, reopen). Routing must key on the *computed
+    dispatch kind* (`re_review`/`reviewer_event` in the assembled configurable), not on the
+    webhook handler.
   - `process_github_push_event` (`github.py:620`) — re-review on push.
   - `process_github_review_finding_reply` (`github.py:863`) — finding-reply reassessment.
 - **Flip design note:** findings, watch state, `last_reviewed_sha`, and check-run ids all live on
@@ -503,9 +515,14 @@ must mirror upstream by hand.
    `agent_definitions.py` frontmatter parse, and `DEEP_AGENT_TOOL_NAMES` can drift from deepagents'
    real builtin set. Filed as OSWE-83; nothing new to add.
 4. **Webhook assistant selector.** Replace the four hardcoded `assistant_id="reviewer"` sites with
-   one `reviewer_assistant_for_event(event) -> str` helper (team-setting- or env-driven, same shape
-   as `review_profile`). Makes the §11 flip a config change, keeps the four sites from drifting,
-   and encodes the per-event split (first-review/request → adversarial; push/reply → stock).
+   one selector helper keyed on the *computed dispatch kind*, not the webhook event — per the
+   PR #29 review, the `opened`/`ready_for_review` handler also dispatches re-reviews when
+   `last_reviewed_sha` exists, so the selector signature is
+   `reviewer_assistant_for_dispatch(*, re_review, finding_reply, explicit_request) -> str`
+   (team-setting- or env-driven, same shape as `review_profile`), called after each site assembles
+   its configurable. Makes the §11 flip a config change, keeps the four sites from drifting, and
+   encodes the split (fresh first reviews / explicit requests → adversarial; any
+   `re_review`/finding-reply dispatch → stock). Spec updated on OSWE-87.
 5. **Shared eval-suffix handling.** OSWE-76 moved `REVIEWER_EVAL_PROMPT_SUFFIX` inside
    `_reviewer_system_prompt`; the OSWE-82 fix (stop appending the profile prompt by default) must
    re-attach eval calibration for the adversarial graph — do it by calling one shared append
