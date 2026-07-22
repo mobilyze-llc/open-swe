@@ -1,0 +1,51 @@
+# Some required checks only ever report on PR head SHAs — the "Open SWE
+# Review" App check run and CodeQL default-setup "Analyze (…)" checks
+# (github/codeql-action#1537) — so on the merge queue's temporary commits
+# they would never appear and every queue entry would time out. Queue entry
+# already requires each of them to pass on the PR head; these jobs re-assert
+# that entry-time result on the merge group commit by reading the real
+# PR-head conclusion — never by blind success.
+name: Merge Group Bridge
+
+permissions:
+  checks: read
+  pull-requests: read
+
+on:
+  merge_group:
+
+jobs:
+  mirror:
+    strategy:
+      fail-fast: false
+      matrix:
+        context:
+          - Open SWE Review
+          - Analyze (actions)
+          - Analyze (javascript-typescript)
+          - Analyze (python)
+    name: ${{ matrix.context }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirror PR-head conclusion
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CONTEXT: ${{ matrix.context }}
+          HEAD_REF: ${{ github.event.merge_group.head_ref }}
+        run: |
+          set -euo pipefail
+          pr="$(sed -E 's|.*/pr-([0-9]+)-.*|\1|' <<<"$HEAD_REF")"
+          pr_head="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq .head.sha)"
+          runs_json="$(gh api -X GET "repos/$GITHUB_REPOSITORY/commits/$pr_head/check-runs" \
+            -f check_name="$CONTEXT" -f per_page=100)"
+          latest="$(jq -c '[.check_runs[]] | sort_by(.started_at) | last' <<<"$runs_json")"
+          conclusion="$(jq -r '.conclusion // "missing"' <<<"$latest")"
+          status="$(jq -r '.status // "absent"' <<<"$latest")"
+          echo "PR #$pr head $pr_head — '$CONTEXT': status=$status conclusion=$conclusion"
+          case "$conclusion" in
+            success|neutral|skipped) exit 0 ;;
+            *)
+              echo "::error::'$CONTEXT' has not passed on PR #$pr head ($pr_head): status=$status conclusion=$conclusion"
+              exit 1
+              ;;
+          esac
