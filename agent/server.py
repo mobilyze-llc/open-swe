@@ -1096,6 +1096,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
             excluded=PLAN_MODE_EXCLUDED_TOOLS,
             allowed=frozenset(plan_profile.tools) if plan_profile.tools is not None else None,
             model=plan_model if plan_profile.model is not None else None,
+            base_model=main_model,
             prompt=plan_profile.body.format(
                 plan_url=dashboard_plan_url(thread_id) or "(plan-review link unavailable)"
             ),

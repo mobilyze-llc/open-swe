@@ -66,9 +66,7 @@ from .review.diff import (
 )
 from .review.findings import REVIEW_FINDING_CAP
 from .reviewer import (
-    HISTORICAL_REVIEW_GUIDANCE,
     REVIEW_STAGE_TOOL_NAMES,
-    REVIEWER_EVAL_PROMPT_SUFFIX,
     REVIEWER_PROMPT_TEMPLATE,
     PrepareReviewerRunMiddleware,
     _build_first_review_context,
@@ -78,6 +76,7 @@ from .reviewer import (
     _ensure_reviewer_sandbox_for_thread,
     _make_model_or_defer,
     _repo_checkout_note,
+    _reviewer_system_prompt,
 )
 from .runtime import (
     DEFAULT_LLM_MAX_TOKENS,
@@ -261,18 +260,17 @@ class PrepareAdversarialReviewerRunMiddleware(PrepareReviewerRunMiddleware):
             pr_number=pr_number if isinstance(pr_number, int) else "",
             repo_checkout_note=checkout_note,
         )
-        profile_prompt = self._review_profile_body.format(
-            working_dir=working_dir,
-            repo_owner=repo_owner or "<owner>",
-            repo_name=repo_name or "<repo>",
-            pr_number=pr_number if isinstance(pr_number, int) else "<pr_number>",
-            review_finding_cap=REVIEW_FINDING_CAP,
-            historical_review_guidance=("" if reviewer_eval else HISTORICAL_REVIEW_GUIDANCE),
-            repo_checkout_note=checkout_note,
+        profile_prompt = _reviewer_system_prompt(
+            working_dir,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            pr_number=pr_number if isinstance(pr_number, int) else "",
+            repo_ready=repo_ready,
+            head_sha=head_sha,
+            reviewer_eval=reviewer_eval,
+            profile_body=self._review_profile_body,
         )
         system_prompt = f"{system_prompt}\n\n{profile_prompt}"
-        if reviewer_eval:
-            system_prompt = f"{system_prompt}\n{REVIEWER_EVAL_PROMPT_SUFFIX}"
         if review_context:
             system_prompt = f"{system_prompt}\n\n{review_context}"
 

@@ -16,6 +16,7 @@ from agent.middleware.model_fallback import (
     ModelFallbackMiddleware,
     _should_fallback,
 )
+from agent.middleware.plan_mode import PlanModeMiddleware
 
 
 def _anthropic_overloaded() -> anthropic.APIStatusError:
@@ -217,3 +218,39 @@ class TestModelFallbackMiddleware:
             await middleware.awrap_model_call(_make_request(), handler)
 
         assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_plan_profile_does_not_override_fallback_attempt() -> None:
+    primary_model = MagicMock(name="primary_model")
+    plan_model = MagicMock(name="plan_model")
+    fallback_model = MagicMock(name="fallback_model")
+    request = ModelRequest(
+        model=primary_model,
+        messages=[],
+        tools=[],
+        state=cast(Any, {"plan_mode": True}),
+    )
+    plan_middleware = PlanModeMiddleware(
+        excluded=frozenset(),
+        model=plan_model,
+        base_model=primary_model,
+        initial=True,
+    )
+    fallback_middleware = ModelFallbackMiddleware(fallback_model, backoff_schedule=(0.0,))
+    attempted_models: list[object] = []
+    response = cast(ModelResponse[Any], MagicMock())
+
+    async def model_handler(attempt: ModelRequest[None]) -> ModelResponse[Any]:
+        attempted_models.append(attempt.model)
+        if len(attempted_models) == 1:
+            raise _anthropic_overloaded()
+        return response
+
+    async def profile_handler(attempt: ModelRequest[None]) -> ModelResponse[Any]:
+        return await plan_middleware.awrap_model_call(attempt, model_handler)
+
+    result = await fallback_middleware.awrap_model_call(request, profile_handler)
+
+    assert result is response
+    assert attempted_models == [plan_model, fallback_model]

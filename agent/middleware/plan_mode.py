@@ -50,12 +50,14 @@ class PlanModeMiddleware(AgentMiddleware):
         excluded: frozenset[str],
         allowed: frozenset[str] | None = None,
         model: BaseChatModel | None = None,
+        base_model: BaseChatModel | None = None,
         prompt: str | None = None,
         initial: bool = False,
     ) -> None:
         self._excluded = excluded
         self._allowed = allowed
         self._model = model
+        self._base_model = base_model
         self._prompt = prompt
         self._initial = initial
 
@@ -95,7 +97,11 @@ class PlanModeMiddleware(AgentMiddleware):
         request = self._filter(request)
         if not self._active(request):
             return request
-        if self._model is not None:
+        if self._model is not None and (
+            self._base_model is None
+            or request.model is self._base_model
+            or request.model is self._model
+        ):
             request = request.override(model=self._model)
         if self._prompt is not None and not self._initial:
             existing = request.system_message.text if request.system_message is not None else ""
