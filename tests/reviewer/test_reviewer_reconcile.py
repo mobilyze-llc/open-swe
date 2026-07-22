@@ -129,6 +129,42 @@ async def test_reconcile_backfills_marker_from_graphql_app_login() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reconcile_only_outdated_unresolved_thread_stays_open() -> None:
+    findings = [
+        {
+            "id": "f1",
+            "status": "open",
+            "github_review_comment_id": 11,
+            "surface": {"state": "surfaced"},
+        }
+    ]
+    replace = AsyncMock()
+
+    with (
+        patch("agent.review.reconcile.list_findings", AsyncMock(return_value=findings)),
+        patch("agent.review.reconcile.replace_findings", replace),
+    ):
+        result = await reconcile_findings_with_review_threads(
+            "tid",
+            [
+                {
+                    "id": "THREAD_OLD",
+                    "is_resolved": False,
+                    "is_outdated": True,
+                    "comments": [{"id": 11, "author": "open-swe[bot]", "body": "bug"}],
+                }
+            ],
+        )
+
+    assert result[0]["status"] == "open"
+    surface = result[0].get("surface")
+    assert isinstance(surface, dict)
+    assert surface.get("state") == "surfaced"
+    assert result[0].get("github_thread_resolved") is not True
+    replace.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_reconcile_duplicate_markers_require_all_threads_terminal() -> None:
     findings = [
         {

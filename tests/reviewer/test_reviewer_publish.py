@@ -827,6 +827,27 @@ async def test_publish_review_skips_post_on_re_review_with_no_new_findings() -> 
     autofix.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_blocking_count_includes_outdated_unresolved_surfaced_finding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent.tools.publish_review import _review_check_finding_count
+
+    monkeypatch.setenv("REVIEW_CHECK_BLOCKING", "true")
+    finding = _f(id="f_outdated", status="open")
+    surface = finding["surface"]
+    assert surface is not None
+    surface["state"] = "surfaced"
+    finding["github_review_thread_id"] = "THREAD_OLD"
+    with patch(
+        "agent.tools.publish_review.list_findings_async",
+        AsyncMock(return_value=[finding]),
+    ):
+        count = await _review_check_finding_count("tid", 0)
+
+    assert count == 1
+
+
 @pytest.mark.parametrize(
     ("status", "flag", "expected"),
     [
@@ -930,6 +951,8 @@ async def test_publish_review_check_counts_standing_findings(
         call.kwargs["title"],
         call.kwargs["summary"],
     ) == expected
+    assert call.kwargs["head_sha"] == "newsha"
+    assert call.kwargs["create_if_missing"] is True
     assert result["surfaced_count"] == 0
 
 
@@ -1046,6 +1069,7 @@ async def test_publish_review_uses_resolved_head_sha_for_commit_and_last_reviewe
     finding = _f(id="f_new", file="b.py", start_line=2, end_line=2)
     post_review = AsyncMock(return_value={"id": 4242})
     set_metadata = AsyncMock()
+    settle = AsyncMock()
 
     with (
         patch("agent.tools.publish_review.get_thread_id_from_runtime", return_value="tid"),
@@ -1062,6 +1086,7 @@ async def test_publish_review_uses_resolved_head_sha_for_commit_and_last_reviewe
             return_value=0,
         ),
         patch("agent.tools.publish_review.set_reviewer_thread_metadata", set_metadata),
+        patch("agent.tools.publish_review.settle_review_check_run", settle),
         patch(
             "agent.tools.publish_review._maybe_post_slack_completion_reply",
             new_callable=AsyncMock,
@@ -1085,6 +1110,11 @@ async def test_publish_review_uses_resolved_head_sha_for_commit_and_last_reviewe
     final = set_metadata.await_args_list[-1]
     assert final.args[0] == "tid"
     assert final.kwargs["last_reviewed_sha"] == "freshhead"
+    settle.assert_awaited_once()
+    settle_call = settle.await_args
+    assert settle_call is not None
+    assert settle_call.kwargs["head_sha"] == "freshhead"
+    assert settle_call.kwargs["create_if_missing"] is True
 
 
 @pytest.mark.asyncio

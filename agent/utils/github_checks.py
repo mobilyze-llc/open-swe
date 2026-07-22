@@ -85,6 +85,40 @@ async def create_review_check_run(
     return check_run_id if isinstance(check_run_id, int) else None
 
 
+async def create_completed_review_check_run(
+    *,
+    owner: str,
+    repo: str,
+    head_sha: str,
+    token: str,
+    conclusion: CheckConclusion,
+    title: str,
+    summary: str,
+) -> bool:
+    """Create an already-completed ``Open SWE Review`` check run."""
+    now = _utc_now_iso()
+    payload = {
+        "name": REVIEW_CHECK_RUN_NAME,
+        "head_sha": head_sha,
+        "status": "completed",
+        "conclusion": conclusion,
+        "started_at": now,
+        "completed_at": now,
+        "output": {"title": title, "summary": summary},
+    }
+    url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/check-runs"
+    try:
+        async with github_client(token=token) as client:
+            response = await github_request(client, "POST", url, json=payload)
+            response.raise_for_status()
+    except httpx.HTTPError:
+        logger.exception(
+            "Failed to create completed review check run for %s/%s@%s", owner, repo, head_sha
+        )
+        return False
+    return True
+
+
 async def complete_review_check_run(
     *,
     owner: str,

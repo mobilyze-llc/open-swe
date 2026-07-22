@@ -392,6 +392,8 @@ async def _publish_review_async(
             conclusion=conclusion,
             title=check_title,
             summary=check_summary,
+            head_sha=head_sha,
+            create_if_missing=True,
         )
         return {
             "success": True,
@@ -579,6 +581,8 @@ async def _publish_review_async(
         conclusion=conclusion,
         title=check_title,
         summary=check_summary,
+        head_sha=head_sha,
+        create_if_missing=True,
     )
     if review_id is not None and eligible_with_payload:
         await _maybe_dispatch_review_autofix(

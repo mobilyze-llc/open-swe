@@ -9,6 +9,8 @@ from ..review.findings import (
     ReviewerThreadMissingError,
     get_finding,
     get_thread_id_from_runtime,
+    mark_finding_replies_reassessed,
+    pending_finding_reply_comment_ids,
     thread_missing_tool_result,
     update_finding_fields,
     update_finding_surface,
@@ -113,6 +115,7 @@ async def _resolve_finding_thread_async(
     if finding is None:
         return {"success": False, "error": f"No finding found with id {finding_id}"}
 
+    pending_reply_ids = pending_finding_reply_comment_ids(finding)
     github_thread_ids = _thread_ids_for_finding(finding)
     for comment_id in _comment_ids_for_finding(finding):
         thread_node_id = await fetch_review_thread_id_for_comment(
@@ -181,6 +184,7 @@ async def _resolve_finding_thread_async(
         else "Not all GitHub threads resolved",
     }
     await update_finding_surface(thread_id, finding_id, surface_updates)
+    await mark_finding_replies_reassessed(thread_id, finding_id, pending_reply_ids)
     updated = await get_finding(thread_id, finding_id)
     return {"success": True, "finding": updated, "resolved_thread_count": resolved_count}
 

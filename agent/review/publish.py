@@ -26,7 +26,12 @@ from typing import Any, TypedDict
 import httpx
 
 from ..utils.dashboard_links import dashboard_thread_url
-from ..utils.github_checks import CheckConclusion, complete_review_check_run
+from ..utils.github_checks import (
+    CheckConclusion,
+    complete_review_check_run,
+    create_completed_review_check_run,
+    review_check_blocking_enabled,
+)
 from ..utils.github_http import (
     GITHUB_API_BASE,
     GITHUB_GRAPHQL,
@@ -443,11 +448,14 @@ async def settle_review_check_run(
     conclusion: CheckConclusion,
     title: str,
     summary: str,
+    head_sha: str | None = None,
+    create_if_missing: bool = False,
 ) -> None:
-    """Complete the tracked ``Open SWE Review`` check run, if one is open.
+    """Settle the tracked review check, optionally creating a completed one.
 
     The dispatching webhook stores ``review_check_run_id`` in reviewer thread
-    metadata when it creates the check. No-op when none is tracked. The id is
+    metadata when it creates the check. Publish callers may opt into creating a
+    completed check on ``head_sha`` when blocking mode has no tracked id. The id is
     only cleared after a successful PATCH so a transient failure (timeout,
     5xx, rate limit) leaves it in place for the after-agent hook or a later
     publish to retry — otherwise the check would hang in-progress forever.
@@ -458,6 +466,22 @@ async def settle_review_check_run(
     metadata = await get_thread_metadata(thread_id)
     check_run_id = metadata.get("review_check_run_id")
     if not isinstance(check_run_id, int):
+        if not (
+            create_if_missing
+            and isinstance(head_sha, str)
+            and head_sha
+            and review_check_blocking_enabled()
+        ):
+            return
+        await create_completed_review_check_run(
+            owner=owner,
+            repo=repo,
+            head_sha=head_sha,
+            token=token,
+            conclusion=conclusion,
+            title=title,
+            summary=summary,
+        )
         return
     ok = await complete_review_check_run(
         owner=owner,

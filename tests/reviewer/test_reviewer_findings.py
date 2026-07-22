@@ -16,9 +16,11 @@ from agent.review.findings import (
     append_finding,
     filter_findings_for_publish,
     list_findings,
+    mark_finding_replies_reassessed,
     mutate_findings,
     new_finding,
     new_finding_id,
+    pending_finding_reply_comment_ids,
     replace_findings,
     resolve_review_head_sha,
     set_reviewer_thread_metadata,
@@ -310,6 +312,44 @@ async def test_update_finding_fields_returns_none_for_unknown_id() -> None:
         result = await update_finding_fields("tid", "f_missing", {"status": "resolved"})
     assert result is None
     fake_client.threads.update.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_mark_finding_replies_reassessed_clears_only_target_finding() -> None:
+    findings = [
+        _f(
+            id="f_a",
+            interactions=[
+                {"kind": "human_reply", "github_comment_id": 1, "needs_reassessment": True},
+                {"kind": "human_reply", "github_comment_id": 2, "needs_reassessment": True},
+            ],
+        ),
+        _f(
+            id="f_b",
+            interactions=[
+                {"kind": "human_reply", "github_comment_id": 3, "needs_reassessment": True}
+            ],
+        ),
+    ]
+
+    async def fake_mutate(thread_id: str, mutator: Any) -> list[Finding]:
+        assert thread_id == "tid"
+        mutator(findings)
+        return findings
+
+    pending_ids = pending_finding_reply_comment_ids(findings[0])
+    assert pending_ids == {1, 2}
+    findings[0]["interactions"].append(
+        {"kind": "human_reply", "github_comment_id": 4, "needs_reassessment": True}
+    )
+    with patch("agent.review.findings.mutate_findings", side_effect=fake_mutate):
+        updated = await mark_finding_replies_reassessed("tid", "f_a", pending_ids)
+
+    assert updated is findings[0]
+    assert findings[0]["interactions"][0].get("needs_reassessment") is False
+    assert findings[0]["interactions"][1].get("needs_reassessment") is False
+    assert findings[0]["interactions"][2].get("needs_reassessment") is True
+    assert findings[1]["interactions"][0].get("needs_reassessment") is True
 
 
 @pytest.mark.asyncio

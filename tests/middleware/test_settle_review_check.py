@@ -76,3 +76,32 @@ async def test_unpublished_review_settle_mapping(
         call.kwargs["title"],
         call.kwargs["summary"],
     ) == expected
+
+
+@pytest.mark.asyncio
+async def test_settle_review_check_on_exit_skips_without_tracked_id() -> None:
+    state: AgentState = {"messages": []}
+    with (
+        patch(
+            "agent.middleware.settle_review_check.get_config",
+            return_value={
+                "configurable": {
+                    "thread_id": "thread-1",
+                    "repo": {"owner": "acme", "name": "widgets"},
+                }
+            },
+        ),
+        patch(
+            "agent.middleware.settle_review_check.get_thread_metadata",
+            new_callable=AsyncMock,
+            return_value={"review_check_run_id": None},
+        ),
+        patch(
+            "agent.middleware.settle_review_check.settle_review_check_run",
+            new_callable=AsyncMock,
+        ) as settle,
+    ):
+        result = await settle_review_check_on_exit.aafter_agent(state, MagicMock())
+
+    assert result is None
+    settle.assert_not_awaited()

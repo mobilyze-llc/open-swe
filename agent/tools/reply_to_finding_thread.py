@@ -10,6 +10,8 @@ from ..review.findings import (
     append_finding_interaction,
     get_finding,
     get_thread_id_from_runtime,
+    mark_finding_replies_reassessed,
+    pending_finding_reply_comment_ids,
     thread_missing_tool_result,
     update_finding_fields,
 )
@@ -65,6 +67,7 @@ async def _reply_to_finding_thread_async(
     if finding is None:
         return {"success": False, "error": f"No finding found with id {finding_id}"}
 
+    pending_reply_ids = pending_finding_reply_comment_ids(finding)
     comment_id = finding.get("github_review_comment_id")
     if not isinstance(comment_id, int):
         return {"success": False, "error": "Finding has no GitHub review comment mapping"}
@@ -94,5 +97,6 @@ async def _reply_to_finding_thread_async(
         "created_at": "",
         "needs_reassessment": False,
     }
-    updated = await append_finding_interaction(thread_id, finding_id, interaction)
+    await append_finding_interaction(thread_id, finding_id, interaction)
+    updated = await mark_finding_replies_reassessed(thread_id, finding_id, pending_reply_ids)
     return {"success": True, "finding": updated, "reply_id": reply_id}
