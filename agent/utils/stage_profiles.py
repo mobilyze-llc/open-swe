@@ -19,6 +19,7 @@ Stage = Literal["plan", "review"]
 
 DEEP_AGENT_TOOL_NAMES = frozenset(
     {
+        "delete",
         "edit_file",
         "execute",
         "glob",
@@ -49,6 +50,10 @@ _TEMPLATE_FIELDS: dict[Stage, frozenset[str]] = {
 _PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
+class FrontmatterError(ValueError):
+    """A frontmatter document could not be parsed."""
+
+
 class StageProfileError(ValueError):
     """A stage profile could not be parsed or validated."""
 
@@ -72,9 +77,36 @@ class StageProfile:
     tools: tuple[str, ...] | None = None
 
 
+def parse_frontmatter_file(path: Path) -> tuple[dict[Any, Any], str]:
+    """Parse YAML frontmatter and return it with the body."""
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    if not lines or lines[0].rstrip("\r\n") != "---":
+        raise FrontmatterError("missing opening frontmatter delimiter")
+    closing = next(
+        (index for index, line in enumerate(lines[1:], 1) if line.rstrip("\r\n") == "---"),
+        None,
+    )
+    if closing is None:
+        raise FrontmatterError("unterminated frontmatter block")
+    try:
+        frontmatter = yaml.safe_load("".join(lines[1:closing]))
+    except yaml.YAMLError as exc:
+        problem = getattr(exc, "problem", None)
+        detail = f": {problem}" if isinstance(problem, str) and problem else ""
+        raise FrontmatterError(f"invalid YAML{detail}") from exc
+    if not isinstance(frontmatter, dict):
+        raise FrontmatterError("frontmatter must be a mapping")
+    return frontmatter, "".join(lines[closing + 1 :])
+
+
 def profiles_root() -> Path:
     """Return the bundled stage-profile directory."""
     return Path(__file__).resolve().parent.parent / "profiles"
+
+
+def load_bundled_stage_profile_body(stage: Stage) -> str:
+    """Load a bundled default stage-profile body."""
+    return parse_frontmatter_file(profiles_root() / stage / "default.md")[1]
 
 
 def load_stage_profile(
@@ -93,31 +125,16 @@ def load_stage_profile(
     if not path.is_file():
         raise StageProfileError(stage, name, [f"profile file does not exist: {path}"])
 
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    if not lines or lines[0].rstrip("\r\n") != "---":
-        raise StageProfileError(stage, name, ["missing opening frontmatter delimiter"])
-    closing = next(
-        (index for index, line in enumerate(lines[1:], 1) if line.rstrip("\r\n") == "---"),
-        None,
-    )
-    if closing is None:
-        raise StageProfileError(stage, name, ["unterminated frontmatter block"])
-
     try:
-        frontmatter = yaml.safe_load("".join(lines[1:closing]))
-    except yaml.YAMLError as exc:
-        problem = getattr(exc, "problem", None)
-        detail = f": {problem}" if isinstance(problem, str) and problem else ""
-        raise StageProfileError(stage, name, [f"invalid YAML{detail}"]) from exc
-    if not isinstance(frontmatter, dict):
-        raise StageProfileError(stage, name, ["frontmatter must be a mapping"])
+        frontmatter, body = parse_frontmatter_file(path)
+    except FrontmatterError as exc:
+        raise StageProfileError(stage, name, [str(exc)]) from exc
 
     for key in sorted((key for key in frontmatter if key not in _FRONTMATTER_KEYS), key=repr):
         errors.append(
             f"unknown frontmatter key {key!r}; stage profiles cannot declare capabilities"
         )
 
-    body = "".join(lines[closing + 1 :])
     if not body.strip():
         errors.append("body must be non-empty")
     else:
