@@ -147,8 +147,8 @@ async def test_prepare_renders_definition_prompt() -> None:
             thread_id="adversarial-thread",
             config=config,
             use_gateway=False,
-            review_profile_name="default",
-            review_profile_body=REVIEWER_PROMPT_TEMPLATE,
+            review_profile_name="custom",
+            review_profile_body="CUSTOM REVIEW PROFILE {repo_owner}/{repo_name}",
         )
         return await _run_prepare(middleware)
 
@@ -187,6 +187,7 @@ async def test_prepare_renders_definition_prompt() -> None:
         updates = await prepare()
         prompt = cast(str, updates["rendered_system_prompt"])
         assert "A finding is a claim about a concrete failure" in prompt
+        assert "CUSTOM REVIEW PROFILE test-owner/test-repo" in prompt
         assert "Independent finder pass" in prompt
         assert "test-owner/test-repo#7" in prompt
         assert "/workspace/test-repo" in prompt

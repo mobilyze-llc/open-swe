@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import SystemMessage
 
 from agent.middleware.exclude_tools import ExcludeToolsMiddleware
 from agent.middleware.plan_mode import PlanModeMiddleware
@@ -11,6 +14,7 @@ from agent.prompt import PLAN_MODE_SECTION, construct_system_prompt
 from agent.reviewer import (
     REVIEW_STAGE_TOOL_NAMES,
     REVIEWER_PROMPT_TEMPLATE,
+    _reviewer_subagent,
     _reviewer_system_prompt,
 )
 from agent.server import PLAN_STAGE_TOOL_NAMES
@@ -109,6 +113,19 @@ def test_profile_rejects_additive_tool(tmp_path: Path) -> None:
         load_stage_profile("plan", "additive", allowed_tools=PLAN_STAGE_TOOL_NAMES, root=tmp_path)
 
 
+@pytest.mark.parametrize(
+    "body",
+    ["Review {repo_owner:{missing}}.", "Review {repo_owner!x}."],
+)
+def test_profile_rejects_unrenderable_template(body: str, tmp_path: Path) -> None:
+    _write_profile(tmp_path, "review", "broken-format", "{}", body)
+
+    with pytest.raises(StageProfileError, match="cannot be rendered safely"):
+        load_stage_profile(
+            "review", "broken-format", allowed_tools=REVIEW_STAGE_TOOL_NAMES, root=tmp_path
+        )
+
+
 def test_profile_rejects_unknown_capability_fields(tmp_path: Path) -> None:
     _write_profile(
         tmp_path,
@@ -148,12 +165,26 @@ def test_invalid_selection_falls_back_to_default(
 
 
 class _Request:
-    def __init__(self, tools: list[dict[str, str]], state: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        tools: list[dict[str, str]],
+        state: dict[str, Any] | None = None,
+        *,
+        model: object | None = None,
+        system_message: SystemMessage | None = None,
+    ) -> None:
         self.tools = tools
         self.state = state or {}
+        self.model = model
+        self.system_message = system_message
 
     def override(self, **kwargs: Any) -> _Request:
-        return _Request(kwargs.get("tools", self.tools), self.state)
+        return _Request(
+            kwargs.get("tools", self.tools),
+            self.state,
+            model=kwargs.get("model", self.model),
+            system_message=kwargs.get("system_message", self.system_message),
+        )
 
 
 def test_plan_profile_tool_restriction_is_applied_at_model_request() -> None:
@@ -174,3 +205,38 @@ def test_review_profile_tool_restriction_is_applied_at_model_request() -> None:
     filtered = cast(_Request, middleware._filter(cast(Any, request)))
 
     assert [tool["name"] for tool in filtered.tools] == ["read_file", "add_finding"]
+
+
+def test_plan_profile_applies_prompt_and_model_after_mid_run_entry() -> None:
+    model = cast(BaseChatModel, MagicMock())
+    middleware = PlanModeMiddleware(
+        excluded=frozenset(),
+        model=model,
+        prompt="CUSTOM PLAN PROFILE",
+        initial=False,
+    )
+    request = _Request(
+        [{"name": "read_file"}],
+        {"plan_mode": True},
+        system_message=SystemMessage(content="BASE PROMPT"),
+    )
+
+    filtered = cast(_Request, middleware._apply_profile(cast(Any, request)))
+
+    assert filtered.model is model
+    assert filtered.system_message is not None
+    assert filtered.system_message.text == "CUSTOM PLAN PROFILE\n\nBASE PROMPT"
+
+
+def test_reviewer_subagent_uses_profile_tool_restriction() -> None:
+    subagent = _reviewer_subagent(
+        cast(BaseChatModel, MagicMock()), allowed_tools=frozenset({"read_file"})
+    )
+    middleware = subagent.get("middleware", [])
+    assert middleware
+    restriction = cast(ExcludeToolsMiddleware, middleware[0])
+    request = _Request([{"name": "read_file"}, {"name": "execute"}])
+
+    filtered = cast(_Request, restriction._filter(cast(Any, request)))
+
+    assert [tool["name"] for tool in filtered.tools] == ["read_file"]

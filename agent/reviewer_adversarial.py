@@ -66,6 +66,7 @@ from .review.diff import (
 )
 from .review.findings import REVIEW_FINDING_CAP
 from .reviewer import (
+    HISTORICAL_REVIEW_GUIDANCE,
     REVIEW_STAGE_TOOL_NAMES,
     REVIEWER_EVAL_PROMPT_SUFFIX,
     REVIEWER_PROMPT_TEMPLATE,
@@ -245,20 +246,31 @@ class PrepareAdversarialReviewerRunMiddleware(PrepareReviewerRunMiddleware):
             )
 
         working_dir = f"{work_dir}/{repo_name}" if repo_name else work_dir
+        checkout_note = _repo_checkout_note(
+            repo_ready=repo_ready,
+            working_dir=working_dir,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            pr_number=pr_number,
+            head_sha=head_sha,
+        )
         system_prompt = _render_parent_prompt(
             working_dir=working_dir,
             repo_owner=repo_owner,
             repo_name=repo_name,
             pr_number=pr_number if isinstance(pr_number, int) else "",
-            repo_checkout_note=_repo_checkout_note(
-                repo_ready=repo_ready,
-                working_dir=working_dir,
-                repo_owner=repo_owner,
-                repo_name=repo_name,
-                pr_number=pr_number,
-                head_sha=head_sha,
-            ),
+            repo_checkout_note=checkout_note,
         )
+        profile_prompt = self._review_profile_body.format(
+            working_dir=working_dir,
+            repo_owner=repo_owner or "<owner>",
+            repo_name=repo_name or "<repo>",
+            pr_number=pr_number if isinstance(pr_number, int) else "<pr_number>",
+            review_finding_cap=REVIEW_FINDING_CAP,
+            historical_review_guidance=("" if reviewer_eval else HISTORICAL_REVIEW_GUIDANCE),
+            repo_checkout_note=checkout_note,
+        )
+        system_prompt = f"{system_prompt}\n\n{profile_prompt}"
         if reviewer_eval:
             system_prompt = f"{system_prompt}\n{REVIEWER_EVAL_PROMPT_SUFFIX}"
         if review_context:
@@ -364,15 +376,25 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
     def backend_factory(_runtime: object, _thread_id: str = thread_id):
         return get_cached_sandbox_backend(_thread_id, reconnect=reconnect_backend)
 
+    subagents = build_subagents(
+        _DEFINITION,
+        model=subagent_model,
+        reserved_tools=RESERVED_SUBAGENT_TOOLS,
+    )
+    if review_profile.tools is not None:
+        allowed_tools = frozenset(review_profile.tools)
+        for subagent in subagents:
+            middleware = list(subagent.get("middleware", []))
+            subagent["middleware"] = [
+                *middleware,
+                ExcludeToolsMiddleware(allowed=allowed_tools),
+            ]
+
     return create_deep_agent(
         model=parent_model,
         system_prompt="",
         tools=_PARENT_TOOLS,
-        subagents=build_subagents(
-            _DEFINITION,
-            model=subagent_model,
-            reserved_tools=RESERVED_SUBAGENT_TOOLS,
-        ),
+        subagents=subagents,
         backend=backend_factory,
         middleware=cast(
             list[AgentMiddleware[Any, Any, Any]],

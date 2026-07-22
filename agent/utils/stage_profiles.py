@@ -195,6 +195,12 @@ def _validate_template(stage: Stage, body: str) -> list[str]:
     for field in fields:
         if field not in _TEMPLATE_FIELDS[stage]:
             errors.append(f"body uses unsupported template field {field!r}")
+    if errors:
+        return errors
+    try:
+        body.format(**dict.fromkeys(_TEMPLATE_FIELDS[stage], "value"))
+    except (AttributeError, IndexError, KeyError, ValueError) as exc:
+        errors.append(f"body cannot be rendered safely: {exc}")
     return errors
 
 

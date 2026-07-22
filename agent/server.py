@@ -972,6 +972,13 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     subagent_model_id, subagent_effort = gate_fable_model(
         subagent_model_id, subagent_effort, fable_enabled=fable_enabled
     )
+    plan_model_id, plan_effort = model_id, profile_effort
+    if not plan_mode and plan_profile.model is not None:
+        plan_model_id, plan_effort = gate_fable_model(
+            plan_profile.model,
+            plan_profile.reasoning_effort,
+            fable_enabled=fable_enabled,
+        )
 
     model_kwargs = provider_model_kwargs(
         model_id,
@@ -981,6 +988,11 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     subagent_model_kwargs = provider_model_kwargs(
         subagent_model_id,
         subagent_effort,
+        max_tokens=DEFAULT_LLM_MAX_TOKENS,
+    )
+    plan_model_kwargs = provider_model_kwargs(
+        plan_model_id,
+        plan_effort,
         max_tokens=DEFAULT_LLM_MAX_TOKENS,
     )
 
@@ -1010,13 +1022,6 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     # `enter_plan_mode` call, not just when plan mode is set up front.
     if plan_mode:
         logger.info("Plan mode enabled for thread %s", thread_id)
-    plan_mode_middleware: list[Any] = [
-        PlanModeMiddleware(
-            excluded=PLAN_MODE_EXCLUDED_TOOLS,
-            allowed=frozenset(plan_profile.tools) if plan_profile.tools is not None else None,
-            initial=plan_mode,
-        )
-    ]
 
     observability_tools = await _load_observability_tools(
         await _observability_authorized(config, profile_login)
@@ -1081,6 +1086,22 @@ async def get_agent(config: RunnableConfig) -> Pregel:
         use_gateway=use_gateway,
         **subagent_model_kwargs,
     )
+    plan_model = (
+        main_model
+        if plan_model_id == model_id and plan_effort == profile_effort
+        else _make_model_or_defer(plan_model_id, use_gateway=use_gateway, **plan_model_kwargs)
+    )
+    plan_mode_middleware: list[Any] = [
+        PlanModeMiddleware(
+            excluded=PLAN_MODE_EXCLUDED_TOOLS,
+            allowed=frozenset(plan_profile.tools) if plan_profile.tools is not None else None,
+            model=plan_model if plan_profile.model is not None else None,
+            prompt=plan_profile.body.format(
+                plan_url=dashboard_plan_url(thread_id) or "(plan-review link unavailable)"
+            ),
+            initial=plan_mode,
+        )
+    ]
     return create_deep_agent(
         model=main_model,
         system_prompt="",

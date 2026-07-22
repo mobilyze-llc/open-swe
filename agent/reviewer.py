@@ -365,8 +365,10 @@ file, changed-line anchor, and concrete failure mode; return an empty list when
 none pass the bar."""
 
 
-def _reviewer_subagent(model: BaseChatModel) -> SubAgent:
-    return {
+def _reviewer_subagent(
+    model: BaseChatModel, *, allowed_tools: frozenset[str] | None = None
+) -> SubAgent:
+    subagent: SubAgent = {
         "name": "reviewer",
         "description": (
             "Reviews one explicit, disjoint file partition and returns candidate "
@@ -375,6 +377,9 @@ def _reviewer_subagent(model: BaseChatModel) -> SubAgent:
         "system_prompt": REVIEWER_SUBAGENT_SYSTEM_PROMPT,
         "model": model,
     }
+    if allowed_tools is not None:
+        subagent["middleware"] = [ExcludeToolsMiddleware(allowed=allowed_tools)]
+    return subagent
 
 
 _REPO_READY_NOTE = """The repo is already cloned and checked out at the PR head in
@@ -1449,7 +1454,14 @@ async def get_reviewer_agent(config: RunnableConfig) -> Pregel:
             fetch_url,
             http_request,
         ],
-        subagents=[_reviewer_subagent(reviewer_subagent_model)],
+        subagents=[
+            _reviewer_subagent(
+                reviewer_subagent_model,
+                allowed_tools=(
+                    frozenset(review_profile.tools) if review_profile.tools is not None else None
+                ),
+            )
+        ],
         backend=backend_factory,
         middleware=cast(
             list[AgentMiddleware[Any, Any, Any]],
