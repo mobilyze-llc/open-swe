@@ -779,12 +779,12 @@ def _auto_merge_eligible(
     return mode == AUTO_MERGE_ON_PLAN_APPROVAL and require_plan_approval and plan_approved
 
 
-async def _persisted_merge_hold_requested(thread_id: str) -> bool:
+async def _persisted_merge_hold_requested(thread_id: str) -> bool | None:
     try:
         thread = await client.threads.get(thread_id)
     except Exception:
         logger.warning("Could not verify persisted merge hold; auto-merge disabled", exc_info=True)
-        return True
+        return None
     metadata = (
         thread.get("metadata") if isinstance(thread, dict) else getattr(thread, "metadata", None)
     )
@@ -849,6 +849,7 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
         auto_merge_mode: AutoMergeMode,
         auto_merge_eligible: bool,
         merge_hold_requested: bool,
+        merge_hold_known: bool,
         plan_mode: bool,
         plan_gate_forced: bool,
         plan_profile_name: str,
@@ -870,6 +871,7 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
         self._auto_merge_mode = auto_merge_mode
         self._auto_merge_eligible = auto_merge_eligible
         self._merge_hold_requested = merge_hold_requested
+        self._merge_hold_known = merge_hold_known
         self._plan_mode = plan_mode
         self._plan_gate_forced = plan_gate_forced
         self._plan_profile_name = plan_profile_name
@@ -890,6 +892,7 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
             "auto_merge_mode": self._auto_merge_mode,
             "auto_merge_eligible": self._auto_merge_eligible,
             "merge_hold_requested": self._merge_hold_requested,
+            "merge_hold_known": self._merge_hold_known,
             "plan_profile": self._plan_profile_name,
             "model": self._model_id,
             "effort": self._effort,
@@ -899,9 +902,11 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
         messages = state.get("messages")
         latest = messages[-1] if isinstance(messages, list) and messages else None
         latest_content = getattr(latest, "content", latest)
-        merge_hold_requested = self._merge_hold_requested or (
-            isinstance(latest_content, (str, list)) and content_requests_merge_hold(latest_content)
-        )
+        message_requests_hold = isinstance(
+            latest_content, (str, list)
+        ) and content_requests_merge_hold(latest_content)
+        merge_hold_requested = self._merge_hold_requested or message_requests_hold
+        merge_hold_known = self._merge_hold_known or message_requests_hold
         auto_merge_eligible = self._auto_merge_eligible and not merge_hold_requested
         github_token, _expires_at = await resolve_github_token(self._config, self._thread_id)
         configurable = (self._config or {}).get("configurable") or {}
@@ -927,21 +932,20 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
         repo_custom_instructions = await _resolve_repo_custom_instructions(prompt_default_repo)
 
         try:
-            await client.threads.update(
-                thread_id=self._thread_id,
-                metadata={
-                    "agent_kind": "agent",
-                    "model": self._model_id,
-                    "effort": self._effort,
-                    "source": self._source,
-                    "plan_mode": self._plan_mode,
-                    "plan_gate_forced": self._plan_gate_forced,
-                    "plan_profile": self._plan_profile_name,
-                    "auto_merge_mode": self._auto_merge_mode,
-                    "auto_merge_eligible": auto_merge_eligible,
-                    "merge_hold_requested": merge_hold_requested,
-                },
-            )
+            metadata_update = {
+                "agent_kind": "agent",
+                "model": self._model_id,
+                "effort": self._effort,
+                "source": self._source,
+                "plan_mode": self._plan_mode,
+                "plan_gate_forced": self._plan_gate_forced,
+                "plan_profile": self._plan_profile_name,
+                "auto_merge_mode": self._auto_merge_mode,
+                "auto_merge_eligible": auto_merge_eligible,
+            }
+            if merge_hold_known:
+                metadata_update["merge_hold_requested"] = merge_hold_requested
+            await client.threads.update(thread_id=self._thread_id, metadata=metadata_update)
             await record_agent_thread_usage(
                 thread_id=self._thread_id,
                 github_login=self._profile_login,
@@ -1027,9 +1031,11 @@ async def get_agent(config: RunnableConfig) -> Pregel:
         configurable["plan_gate_forced"] = True
         logger.info("Plan approval policy forced plan mode for thread %s", thread_id)
 
-    merge_hold_requested = configurable.get(
-        "merge_hold_requested"
-    ) is True or await _persisted_merge_hold_requested(thread_id)
+    configured_merge_hold = configurable.get("merge_hold_requested") is True
+    persisted_merge_hold = await _persisted_merge_hold_requested(thread_id)
+    merge_hold_requested = configured_merge_hold or persisted_merge_hold is True
+    merge_hold_known = configured_merge_hold or persisted_merge_hold is not None
+    merge_hold_fail_closed = not merge_hold_known
     plan_approved = (
         await _plan_was_approved(thread_id)
         if auto_merge_mode == AUTO_MERGE_ON_PLAN_APPROVAL
@@ -1039,7 +1045,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
         auto_merge_mode,
         require_plan_approval=require_plan_approval,
         plan_approved=plan_approved,
-        hold_merge=merge_hold_requested,
+        hold_merge=merge_hold_requested or merge_hold_fail_closed,
     )
     configurable["auto_merge_mode"] = auto_merge_mode
     configurable["require_plan_approval"] = require_plan_approval
@@ -1331,6 +1337,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
                     auto_merge_mode=auto_merge_mode,
                     auto_merge_eligible=merge_eligible,
                     merge_hold_requested=merge_hold_requested,
+                    merge_hold_known=merge_hold_known,
                     plan_mode=plan_mode,
                     plan_gate_forced=plan_mode_forced,
                     plan_profile_name=plan_profile.name,

@@ -41,7 +41,8 @@ def _base_config() -> RunnableConfig:
 async def _capture_create_deep_agent_kwargs(
     *,
     require_plan_approval: bool = False,
-    persisted_merge_hold: bool = False,
+    persisted_merge_hold: bool | None = False,
+    auto_merge_mode: server.AutoMergeMode = server.AUTO_MERGE_NEVER,
     configurable: dict[str, object] | None = None,
 ) -> dict[str, object]:
     captured: dict[str, object] = {}
@@ -104,7 +105,7 @@ async def _capture_create_deep_agent_kwargs(
         patch(
             "agent.server._cached_auto_merge_mode",
             new_callable=AsyncMock,
-            return_value=server.AUTO_MERGE_NEVER,
+            return_value=auto_merge_mode,
         ),
         patch(
             "agent.server._persisted_merge_hold_requested",
@@ -513,4 +514,22 @@ async def test_persisted_merge_hold_survives_followup_config() -> None:
     assert isinstance(bound_config, dict)
     assert bound_config["configurable"]["merge_hold_requested"] is True
     assert prepare_run._merge_hold_requested is True
+    assert prepare_run._merge_hold_known is True
+    assert prepare_run._auto_merge_eligible is False
+
+
+@pytest.mark.asyncio
+async def test_merge_hold_read_failure_is_current_run_only() -> None:
+    captured = await _capture_create_deep_agent_kwargs(
+        persisted_merge_hold=None,
+        auto_merge_mode=server.AUTO_MERGE_ALWAYS,
+    )
+
+    prepare_run = _prepare_run_middleware(captured)
+    bound_config = captured["bound_config"]
+    assert isinstance(bound_config, dict)
+    assert bound_config["configurable"]["merge_hold_requested"] is False
+    assert bound_config["configurable"]["auto_merge_eligible"] is False
+    assert prepare_run._merge_hold_requested is False
+    assert prepare_run._merge_hold_known is False
     assert prepare_run._auto_merge_eligible is False

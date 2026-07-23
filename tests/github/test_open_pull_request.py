@@ -634,6 +634,7 @@ def test_auto_merge_eligible_forces_non_draft_and_reports_tracking(
             "source": "dashboard",
             "thread_id": "thread-1",
             "auto_merge_mode": "always",
+            "auto_merge_eligible": True,
             "require_plan_approval": False,
         },
     )
@@ -662,6 +663,7 @@ def test_auto_merge_hold_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None
             "source": "dashboard",
             "thread_id": "thread-1",
             "auto_merge_mode": "always",
+            "auto_merge_eligible": True,
             "merge_hold_requested": True,
         },
     )
@@ -689,6 +691,7 @@ async def test_on_plan_approval_requires_gate_and_approved_plan(
         {
             "thread_id": "t1",
             "auto_merge_mode": "on_plan_approval",
+            "auto_merge_eligible": True,
             "require_plan_approval": True,
         }
     )
@@ -696,6 +699,7 @@ async def test_on_plan_approval_requires_gate_and_approved_plan(
         {
             "thread_id": "t1",
             "auto_merge_mode": "on_plan_approval",
+            "auto_merge_eligible": True,
             "require_plan_approval": False,
         }
     )
@@ -704,7 +708,12 @@ async def test_on_plan_approval_requires_gate_and_approved_plan(
 def test_auto_merge_non_default_base_remains_draft(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_config(
         monkeypatch,
-        {"source": "dashboard", "thread_id": "thread-1", "auto_merge_mode": "always"},
+        {
+            "source": "dashboard",
+            "thread_id": "thread-1",
+            "auto_merge_mode": "always",
+            "auto_merge_eligible": True,
+        },
     )
     _stub_token(monkeypatch)
     monkeypatch.setattr(opr, "_thread_has_active_auto_merge", lambda *_a: _coro(False))
