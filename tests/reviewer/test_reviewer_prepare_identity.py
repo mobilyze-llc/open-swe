@@ -349,6 +349,45 @@ async def test_gather_review_context_returns_shared_parent_inputs() -> None:
 
 
 @pytest.mark.asyncio
+async def test_gather_review_context_fetches_both_rename_scopes() -> None:
+    config = cast(dict[str, Any], _config(eval_mode=False).get("configurable") or {})
+    rename_diff = (
+        "diff --git a/legacy/foo.py b/src/foo.py\n"
+        "--- a/legacy/foo.py\n"
+        "+++ b/src/foo.py\n"
+        "@@ -1 +1 @@\n"
+        "-old = 1\n"
+        "+new = 2\n"
+    )
+
+    with ExitStack() as stack:
+        _common_patches(stack)
+        stack.enter_context(
+            patch(
+                "agent.reviewer.materialize_review_diff",
+                new_callable=AsyncMock,
+                return_value=MagicMock(diff_text=rename_diff),
+            )
+        )
+        fetch_scoped = stack.enter_context(
+            patch(
+                "agent.reviewer.fetch_scoped_agents_md",
+                new_callable=AsyncMock,
+                return_value={},
+            )
+        )
+        await reviewer.gather_review_context("reviewer-thread", config, diff_mode="adversarial")
+
+    fetch_scoped.assert_awaited_once_with(
+        "test-owner",
+        "test-repo",
+        "a" * 40,
+        ["legacy/foo.py", "src/foo.py"],
+        token="token",
+    )
+
+
+@pytest.mark.asyncio
 async def test_gather_review_context_preserves_diff_policy_split() -> None:
     config = cast(dict[str, Any], _config(eval_mode=False).get("configurable") or {})
     backend = MagicMock()

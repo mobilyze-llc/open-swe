@@ -354,12 +354,15 @@ async def materialize_review_diff(
     )
 
 
-def changed_files(diff_text: str) -> list[str]:
+def changed_files(diff_text: str, *, include_old_paths: bool = False) -> list[str]:
     """Return changed paths from a unified diff without exposing its body."""
     paths = (
-        match.group("b")
+        path
         for line in diff_text.splitlines()
         if (match := _DIFF_FILE_HEADER_RE.match(line))
+        for path in (
+            (match.group("a"), match.group("b")) if include_old_paths else (match.group("b"),)
+        )
     )
     return list(dict.fromkeys(paths))
 

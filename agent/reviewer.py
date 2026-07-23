@@ -1135,7 +1135,7 @@ async def gather_review_context(
             repo_owner,
             repo_name,
             base_sha,
-            changed_files(diff_text),
+            changed_files(diff_text, include_old_paths=True),
             token=github_token,
         )
     )
