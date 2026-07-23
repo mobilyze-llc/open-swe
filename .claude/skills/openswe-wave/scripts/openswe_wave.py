@@ -332,6 +332,12 @@ def assign_poll_id(events: Sequence[dict[str, Any]], poll_id: str) -> list[dict[
     return [{**event, "poll_id": poll_id} for event in events]
 
 
+def event_fingerprint(event: dict[str, Any]) -> str:
+    """Fingerprint a persistent condition independently of its observation poll."""
+    payload = {key: value for key, value in event.items() if key != "poll_id"}
+    return json.dumps(payload, sort_keys=True, default=str)
+
+
 def replay_events(events: Sequence[dict[str, Any]], session_user_id: str) -> dict[str, Any]:
     """Replay recorded observations with self suppression and per-poll coalescing."""
     grouped: dict[str, list[dict[str, Any]]] = {}
@@ -1201,15 +1207,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
             poll_id = str(current.get("observed_at") or f"poll-{iterations}")
             events = assign_poll_id(events, poll_id)
             current_unhandled = {
-                json.dumps(event, sort_keys=True, default=str)
-                for event in events
-                if event.get("kind") == "unhandled"
+                event_fingerprint(event) for event in events if event.get("kind") == "unhandled"
             }
             events = [
                 event
                 for event in events
                 if event.get("kind") != "unhandled"
-                or json.dumps(event, sort_keys=True, default=str) not in active_unhandled
+                or event_fingerprint(event) not in active_unhandled
             ]
             active_unhandled = current_unhandled
             result = replay_events(events, viewer_id)

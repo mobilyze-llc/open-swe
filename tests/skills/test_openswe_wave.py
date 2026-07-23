@@ -95,6 +95,18 @@ def test_live_poll_assigns_one_id_to_every_observation() -> None:
     assert result["wakes"][0]["wake_node"] == "terminal_run_error"
 
 
+def test_persistent_unhandled_fingerprint_ignores_poll_id() -> None:
+    first = {
+        "kind": "unhandled",
+        "source": "langgraph",
+        "summary": "busy thread has no recent activity",
+        "poll_id": "poll-1",
+    }
+    second = {**first, "poll_id": "poll-2"}
+
+    assert wave.event_fingerprint(first) == wave.event_fingerprint(second)
+
+
 def test_transition_detection_uses_new_thread_and_error_ids() -> None:
     previous = {
         "pr": {"state": "OPEN"},
