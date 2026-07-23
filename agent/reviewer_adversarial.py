@@ -1,43 +1,21 @@
-"""File-defined adversarial reviewer graph.
-
-This is the first consumer of the ``agent/<name>/`` file-based definition
-convention and is additive beside the stock reviewer rather than replacing it.
-The parent template lives in ``agent/reviewer-adversarial/agent.md``; this
-module renders its per-run repository and PR context. It deliberately imports
-the shared ``gather_review_context`` seam and private reviewer helpers
-``_build_first_review_context``, ``_cached_gateway_enabled``,
-``_cached_review_profile_name``, ``_cached_reviewer_team_defaults``,
-``_make_model_or_defer``, and ``_repo_checkout_note`` so an upstream rename
-breaks this module's import loudly instead of allowing behavior to drift. The definition is loaded at
-import time so malformed markdown fails the process at boot, not at the first
-review. Version one accepts first-review dispatch only — configs carrying
-``re_review``, ``reviewer_event``, or ``last_reviewed_sha`` are rejected at run
-preparation, because the shared findings tools read those keys themselves and
-would apply re-review semantics the rendered prompt does not. It also
-deliberately omits the stock reviewer's extra context inputs (org guidelines,
-repo review style, AGENTS.md conventions, API-standards skill, PR trace
-context, repo skills) so the topology experiment runs on the definition files
-alone. In eval mode the harness's ``reviewer_model_id`` /
-``reviewer_subagent_model_id`` pins are honored when no
-``reviewer_adversarial_*`` key is set, so ``REVIEWER_EVAL_MODEL_ID`` works
-through ``evals/reviewer``; outside eval mode the stock reviewer keys are
-ignored. Production webhook routing remains on the stock reviewer. Reach this graph through evals with
-``REVIEWER_ASSISTANT_ID=reviewer_adversarial`` or by direct LangGraph API
-dispatch.
-"""
-
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from deepagents import create_deep_agent
 from deepagents.backends.protocol import SandboxBackendProtocol
-from langchain.agents.middleware import ModelCallLimitMiddleware
+from langchain.agents.middleware import AgentState, ModelCallLimitMiddleware
 from langchain.agents.middleware.types import AgentMiddleware
+from langchain.agents.structured_output import ToolStrategy
+from langchain_core.language_models.chat_models import BaseChatModel
+from langgraph.constants import Send
+from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import RunnableConfig
 from langgraph.pregel import Pregel
 from langgraph.runtime import Runtime
+from pydantic import BaseModel
 
 import agent.tools as agent_tools
 
@@ -57,7 +35,24 @@ from .middleware import (
     settle_review_check_on_exit,
 )
 from .middleware.prepare_run import PrepareRunState
-from .review.findings import REVIEW_FINDING_CAP
+from .review.adversarial import (
+    AdversarialState,
+    FinderOutput,
+    FinderRun,
+    GateOutput,
+    VerdictBatch,
+    apply_independence,
+    configured_model_pair,
+    dedupe_candidates,
+    finding_description,
+    gate_triggers,
+    merge_kept_candidates,
+    publication_blocker,
+    reset_run_state,
+    validate_verdicts,
+)
+from .review.diff import materialize_review_diff
+from .review.findings import REVIEW_FINDING_CAP, SEVERITY_ORDER, Severity
 from .reviewer import (
     REVIEW_STAGE_TOOL_NAMES,
     REVIEWER_EVAL_PROMPT_SUFFIX,
@@ -85,9 +80,6 @@ from .utils.stage_profiles import resolve_stage_profile
 from .utils.tracing import REVIEW_TRACING_PROJECT, traced_graph_factory
 
 logger = logging.getLogger(__name__)
-
-DEFINITION_NAME = "reviewer-adversarial"
-
 RESERVED_SUBAGENT_TOOLS = frozenset(
     {
         "add_finding",
@@ -97,9 +89,12 @@ RESERVED_SUBAGENT_TOOLS = frozenset(
         "reply_to_finding_thread",
     }
 )
-
-_DEFINITION = load_agent_definition(DEFINITION_NAME)
-_PARENT_TOOLS = [getattr(agent_tools, name) for name in _DEFINITION.tools]
+_DEFINITION = load_agent_definition("reviewer-adversarial")
+_STAGE_TOOLS = [
+    getattr(agent_tools, name)
+    for name in _DEFINITION.tools
+    if name in {"web_search", "fetch_url", "http_request"}
+]
 
 
 def _render_parent_prompt(
@@ -122,230 +117,515 @@ def _render_parent_prompt(
 
 
 _ = _render_parent_prompt(
-    working_dir="/tmp",
-    repo_owner="o",
-    repo_name="r",
-    pr_number=1,
-    repo_checkout_note="note",
+    working_dir="", repo_owner="", repo_name="", pr_number=0, repo_checkout_note=""
 )
+
+
+async def _prepare_context(
+    thread_id: str, configurable: dict[str, Any], *, materialize_path: bool = False
+) -> dict[str, Any]:
+    if (
+        configurable.get("re_review")
+        or configurable.get("reviewer_event")
+        or configurable.get("last_reviewed_sha")
+    ):
+        raise RuntimeError(
+            "reviewer_adversarial v1 handles first reviews only; re-review and "
+            "finding-reply dispatch belong to the stock reviewer"
+        )
+    bundle = await gather_review_context(thread_id, configurable, diff_mode="adversarial")
+    review_context = ""
+    if isinstance(bundle.pr_number, int):
+        review_context = _build_first_review_context(
+            pr_url=bundle.pr_url,
+            repo_owner=bundle.repo_owner,
+            repo_name=bundle.repo_name,
+            pr_number=bundle.pr_number,
+            base_sha=bundle.base_sha,
+            head_sha=bundle.head_sha,
+            pr_title=bundle.pr_title,
+            pr_body=bundle.pr_body,
+            existing_threads_block="",
+            include_historical_guidance=False,
+        )
+    working_dir = f"{bundle.work_dir}/{bundle.repo_name}" if bundle.repo_name else bundle.work_dir
+    checkout_note = _repo_checkout_note(
+        repo_ready=bundle.repo_ready,
+        working_dir=working_dir,
+        repo_owner=bundle.repo_owner,
+        repo_name=bundle.repo_name,
+        pr_number=bundle.pr_number,
+        head_sha=bundle.head_sha,
+    )
+    prompt = _render_parent_prompt(
+        working_dir=working_dir,
+        repo_owner=bundle.repo_owner,
+        repo_name=bundle.repo_name,
+        pr_number=bundle.pr_number,
+        repo_checkout_note=checkout_note,
+    )
+    context_parts = [checkout_note]
+    if bundle.reviewer_eval:
+        prompt = f"{prompt}\n{REVIEWER_EVAL_PROMPT_SUFFIX}"
+        context_parts.append(REVIEWER_EVAL_PROMPT_SUFFIX)
+    if review_context:
+        prompt = f"{prompt}\n\n{review_context}"
+        context_parts.append(review_context)
+    prepared = {
+        "work_dir": bundle.work_dir,
+        "working_dir": working_dir,
+        "rendered_system_prompt": prompt,
+        "stage_context": "\n\n".join(context_parts),
+        "diff_text": bundle.diff_text,
+        "diff_line_set": bundle.diff_line_set,
+        "pr_title": bundle.pr_title,
+    }
+    if materialize_path:
+        materialized = await materialize_review_diff(
+            bundle.sandbox_backend,
+            work_dir=working_dir,
+            base_ref=bundle.base_sha or "base",
+            head_ref=bundle.head_sha or "head",
+            merge_base=True,
+            diff_text=bundle.diff_text,
+        )
+        prepared["diff_path"] = materialized.path
+    return prepared
 
 
 class PrepareAdversarialReviewerRunMiddleware(PrepareReviewerRunMiddleware):
     async def _prepare(self, state: PrepareRunState, runtime: Runtime) -> dict[str, Any]:
-        configurable = self._config.get("configurable") or {}
-        if (
-            configurable.get("re_review")
-            or configurable.get("reviewer_event")
-            or configurable.get("last_reviewed_sha")
-        ):
-            raise RuntimeError(
-                "reviewer_adversarial v1 handles first reviews only; re-review and "
-                "finding-reply dispatch belong to the stock reviewer"
-            )
-        review_bundle = await gather_review_context(
-            self._thread_id, configurable, diff_mode="adversarial"
-        )
-        review_context = ""
-        if isinstance(review_bundle.pr_number, int):
-            review_context = _build_first_review_context(
-                pr_url=review_bundle.pr_url,
-                repo_owner=review_bundle.repo_owner,
-                repo_name=review_bundle.repo_name,
-                pr_number=review_bundle.pr_number,
-                base_sha=review_bundle.base_sha,
-                head_sha=review_bundle.head_sha,
-                pr_title=review_bundle.pr_title,
-                pr_body=review_bundle.pr_body,
-                existing_threads_block="",
-                include_historical_guidance=False,
-            )
-
-        working_dir = (
-            f"{review_bundle.work_dir}/{review_bundle.repo_name}"
-            if review_bundle.repo_name
-            else review_bundle.work_dir
-        )
-        checkout_note = _repo_checkout_note(
-            repo_ready=review_bundle.repo_ready,
-            working_dir=working_dir,
-            repo_owner=review_bundle.repo_owner,
-            repo_name=review_bundle.repo_name,
-            pr_number=review_bundle.pr_number,
-            head_sha=review_bundle.head_sha,
-        )
-        system_prompt = _render_parent_prompt(
-            working_dir=working_dir,
-            repo_owner=review_bundle.repo_owner,
-            repo_name=review_bundle.repo_name,
-            pr_number=review_bundle.pr_number,
-            repo_checkout_note=checkout_note,
-        )
-        if review_bundle.reviewer_eval:
-            system_prompt = f"{system_prompt}\n{REVIEWER_EVAL_PROMPT_SUFFIX}"
-        if review_context:
-            system_prompt = f"{system_prompt}\n\n{review_context}"
-
+        del state, runtime
+        prepared = await _prepare_context(self._thread_id, self._config.get("configurable") or {})
         return {
-            "work_dir": review_bundle.work_dir,
-            "rendered_system_prompt": system_prompt,
-            "diff_text": review_bundle.diff_text,
-            "diff_line_set": review_bundle.diff_line_set,
+            key: prepared[key]
+            for key in ("work_dir", "rendered_system_prompt", "diff_text", "diff_line_set")
         }
 
 
+async def _run_stage(
+    graph: Pregel,
+    prompt: str,
+    config: RunnableConfig,
+    timeout: float = 50 * 60,
+) -> BaseModel:
+    result = await asyncio.wait_for(
+        graph.ainvoke({"messages": [{"role": "user", "content": prompt}]}, config=config),
+        timeout=timeout,
+    )
+    structured = result.get("structured_response") if isinstance(result, dict) else None
+    if not isinstance(structured, BaseModel):
+        raise RuntimeError("bounded reviewer stage returned no structured response")
+    return structured
+
+
+def _stage_middleware(extra: list[AgentMiddleware[Any, Any, Any]] | None = None):
+    return [
+        *(extra or []),
+        SanitizeToolInputsMiddleware(),
+        ModelCallLimitMiddleware(run_limit=MODEL_CALL_RECURSION_LIMIT, exit_behavior="end"),
+        ToolErrorMiddleware(),
+        refresh_github_proxy_before_model,
+        check_message_queue_before_model,
+        SlackAssistantStatusMiddleware(),
+        TimeoutWrapupMiddleware(),
+        SanitizeFireworksMessagesMiddleware(),
+        SanitizeThinkingBlocksMiddleware(),
+        RepairOrphanedToolCallsMiddleware(),
+    ]
+
+
+def _bounded_agent(
+    *,
+    model: BaseChatModel,
+    response_format: type[BaseModel],
+    backend: Any,
+    prompt: str = "",
+    tools: list[Any] | None = None,
+    middleware: list[AgentMiddleware[Any, Any, Any]] | None = None,
+) -> Pregel:
+    return create_deep_agent(
+        model=model,
+        system_prompt=prompt,
+        tools=tools or [],
+        backend=backend,
+        response_format=ToolStrategy(response_format),
+        middleware=cast(list[AgentMiddleware[Any, Any, Any]], _stage_middleware(middleware)),
+    )
+
+
 async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
-    """Get the file-defined adversarial reviewer with checkpointed run preparation."""
+    """Build the checkpointable adversarial reviewer StateGraph."""
     config = config.copy()
     configurable = dict(config.get("configurable") or {})
     config["configurable"] = configurable
     config.setdefault("recursion_limit", DEFAULT_RECURSION_LIMIT)
     thread_id = configurable.get("thread_id")
-
     if thread_id is None or not graph_loaded_for_execution(config):
-        logger.info("No thread_id or not for execution, returning reviewer without sandbox")
         return create_deep_agent(system_prompt="", tools=[]).with_config(config)
 
     is_eval = configurable.get("reviewer_eval") is True or configurable.get("eval") is True
-    review_profile_name = await _cached_review_profile_name()
-    review_profile = resolve_stage_profile(
+    profile_name = await _cached_review_profile_name()
+    profile = resolve_stage_profile(
         "review",
-        review_profile_name,
+        profile_name,
         allowed_tools=REVIEW_STAGE_TOOL_NAMES,
         fallback_body=REVIEWER_PROMPT_TEMPLATE,
     )
-    if review_profile.name != "default":
+    if profile.name != "default":
         logger.info(
-            "Ignoring review profile body %r for the adversarial reviewer; "
-            "model, reasoning effort, and tool pins still apply",
-            review_profile.name,
+            "Ignoring review profile body %r for the adversarial reviewer; model, "
+            "reasoning effort, and tool pins still apply",
+            profile.name,
         )
 
-    def _configured_pair(namespaced: str, eval_fallback: str) -> tuple[str, str | None] | None:
-        model_key = configurable.get(namespaced + "_model_id")
-        effort_key = namespaced + "_reasoning_effort"
-        if not (isinstance(model_key, str) and model_key) and is_eval:
-            model_key = configurable.get(eval_fallback + "_model_id")
-            effort_key = eval_fallback + "_reasoning_effort"
-        if isinstance(model_key, str) and model_key:
-            effort = configurable.get(effort_key)
-            return model_key, effort if isinstance(effort, str) else None
-        return None
-
-    configured = _configured_pair("reviewer_adversarial", "reviewer")
-    if configured is not None:
-        model_id, reasoning_effort = configured
-        subagent_model_id = model_id
-        subagent_effort = reasoning_effort
+    configured = configured_model_pair(configurable, is_eval, "reviewer_adversarial", "reviewer")
+    if configured:
+        model_id, effort = configured
+        subagent_model_id, subagent_effort = configured
     else:
         (
-            (model_id, reasoning_effort),
+            (model_id, effort),
             (subagent_model_id, subagent_effort),
         ) = await _cached_reviewer_team_defaults()
-        if review_profile.model is not None:
-            model_id = review_profile.model
-            reasoning_effort = review_profile.reasoning_effort
-            subagent_model_id = review_profile.model
-            subagent_effort = review_profile.reasoning_effort
-
-    configured_subagent = _configured_pair("reviewer_adversarial_subagent", "reviewer_subagent")
-    if configured_subagent is not None:
+        if profile.model is not None:
+            model_id = subagent_model_id = profile.model
+            effort = subagent_effort = profile.reasoning_effort
+    configured_subagent = configured_model_pair(
+        configurable, is_eval, "reviewer_adversarial_subagent", "reviewer_subagent"
+    )
+    if configured_subagent:
         subagent_model_id, subagent_effort = configured_subagent
 
     fable_enabled = await get_team_fable_enabled()
-    model_id, reasoning_effort = gate_fable_model(
-        model_id, reasoning_effort, fable_enabled=fable_enabled
-    )
+    model_id, effort = gate_fable_model(model_id, effort, fable_enabled=fable_enabled)
     subagent_model_id, subagent_effort = gate_fable_model(
         subagent_model_id, subagent_effort, fable_enabled=fable_enabled
     )
-    model_kwargs = provider_model_kwargs(
-        model_id,
-        reasoning_effort,
-        max_tokens=DEFAULT_LLM_MAX_TOKENS,
-        openai_reasoning_default=DEFAULT_LLM_REASONING,
-    )
-    subagent_model_kwargs = provider_model_kwargs(
-        subagent_model_id,
-        subagent_effort,
-        max_tokens=DEFAULT_LLM_MAX_TOKENS,
-        openai_reasoning_default=DEFAULT_LLM_REASONING,
-    )
-
     use_gateway = await _cached_gateway_enabled()
-    parent_model = _make_model_or_defer(model_id, use_gateway=use_gateway, **model_kwargs)
+    parent_model = _make_model_or_defer(
+        model_id,
+        use_gateway=use_gateway,
+        **provider_model_kwargs(
+            model_id,
+            effort,
+            max_tokens=DEFAULT_LLM_MAX_TOKENS,
+            openai_reasoning_default=DEFAULT_LLM_REASONING,
+        ),
+    )
     subagent_model = _make_model_or_defer(
         subagent_model_id,
         use_gateway=use_gateway,
-        **subagent_model_kwargs,
+        **provider_model_kwargs(
+            subagent_model_id,
+            subagent_effort,
+            max_tokens=DEFAULT_LLM_MAX_TOKENS,
+            openai_reasoning_default=DEFAULT_LLM_REASONING,
+        ),
     )
 
     async def reconnect_backend(
         _thread_id: str = thread_id,
         _configurable: dict[str, Any] = configurable,
     ) -> SandboxBackendProtocol:
-        sandbox_backend, _github_token = await _ensure_reviewer_sandbox_for_thread(
-            _thread_id, _configurable
-        )
-        return sandbox_backend
+        backend, _ = await _ensure_reviewer_sandbox_for_thread(_thread_id, _configurable)
+        return backend
 
     def backend_factory(_runtime: object, _thread_id: str = thread_id):
         return get_cached_sandbox_backend(_thread_id, reconnect=reconnect_backend)
 
-    subagents = build_subagents(
-        _DEFINITION,
-        model=subagent_model,
-        reserved_tools=RESERVED_SUBAGENT_TOOLS,
+    specs = build_subagents(
+        _DEFINITION, model=subagent_model, reserved_tools=RESERVED_SUBAGENT_TOOLS
     )
-    if review_profile.tools is not None:
-        allowed_tools = frozenset(review_profile.tools)
-        for subagent in subagents:
-            middleware = list(subagent.get("middleware", []))
-            subagent["middleware"] = [
-                *middleware,
-                ExcludeToolsMiddleware(allowed=allowed_tools),
-            ]
-
-    return create_deep_agent(
+    allowed = frozenset(profile.tools) if profile.tools is not None else None
+    stage_agents: dict[str, Pregel] = {}
+    for spec in specs:
+        name = str(spec["name"])
+        if name == "general-purpose":
+            continue
+        middleware = list(spec.get("middleware", []))
+        if allowed is not None:
+            response_tool = (
+                VerdictBatch.__name__ if name == "adjudicator" else FinderOutput.__name__
+            )
+            middleware.append(ExcludeToolsMiddleware(allowed=allowed | {response_tool}))
+        middleware.append(ExcludeToolsMiddleware(excluded=frozenset({"task"})))
+        stage_agents[name] = _bounded_agent(
+            model=cast(BaseChatModel, spec.get("model", subagent_model)),
+            response_format=VerdictBatch if name == "adjudicator" else FinderOutput,
+            backend=backend_factory,
+            tools=cast(list[Any], spec.get("tools", [])),
+            middleware=cast(list[AgentMiddleware[Any, Any, Any]], middleware),
+        )
+    repo = configurable.get("repo")
+    repo_owner = str(repo.get("owner", "")) if isinstance(repo, dict) else ""
+    repo_name = str(repo.get("name", "")) if isinstance(repo, dict) else ""
+    parent_prompt = _render_parent_prompt(
+        working_dir="the checkout supplied by the task",
+        repo_owner=repo_owner,
+        repo_name=repo_name,
+        pr_number=configurable.get("pr_number", ""),
+        repo_checkout_note="Inspect the task-supplied checkout and materialized diff.",
+    )
+    parent_filters = (
+        [ExcludeToolsMiddleware(allowed=allowed | {VerdictBatch.__name__, GateOutput.__name__})]
+        if allowed is not None
+        else []
+    )
+    parent_filters.append(ExcludeToolsMiddleware(excluded=frozenset({"task"})))
+    parent_adjudicator = _bounded_agent(
         model=parent_model,
-        system_prompt="",
-        tools=_PARENT_TOOLS,
-        subagents=subagents,
+        response_format=VerdictBatch,
         backend=backend_factory,
-        middleware=cast(
-            list[AgentMiddleware[Any, Any, Any]],
-            [
-                PrepareAdversarialReviewerRunMiddleware(
-                    thread_id=thread_id,
-                    config=config,
-                    use_gateway=use_gateway,
-                    review_profile_name=review_profile.name,
-                    review_profile_body=review_profile.body,
-                ),
-                SanitizeToolInputsMiddleware(),
-                ModelCallLimitMiddleware(
-                    run_limit=MODEL_CALL_RECURSION_LIMIT,
-                    exit_behavior="end",
-                ),
-                ToolErrorMiddleware(),
-                refresh_github_proxy_before_model,
-                check_message_queue_before_model,
-                SlackAssistantStatusMiddleware(),
-                TimeoutWrapupMiddleware(),
-                *(
-                    [ExcludeToolsMiddleware(allowed=frozenset(review_profile.tools))]
-                    if review_profile.tools is not None
-                    else []
-                ),
-                SanitizeFireworksMessagesMiddleware(),
-                SanitizeThinkingBlocksMiddleware(),
-                RepairOrphanedToolCallsMiddleware(),
-                settle_review_check_on_exit,
-            ],
-        ),
-    ).with_config(config)
+        prompt=parent_prompt,
+        tools=_STAGE_TOOLS,
+        middleware=cast(list[AgentMiddleware[Any, Any, Any]], parent_filters),
+    )
+    gate_agent = _bounded_agent(
+        model=parent_model,
+        response_format=GateOutput,
+        backend=backend_factory,
+        prompt=(f"{_DEFINITION.shared}\n\n" if _DEFINITION.shared else "")
+        + "You are the final bounded verification pass for an adversarial code review.",
+        tools=_STAGE_TOOLS,
+        middleware=cast(list[AgentMiddleware[Any, Any, Any]], parent_filters),
+    )
+    finder_names = sorted(name for name in stage_agents if name != "adjudicator")
+
+    async def prepare(state: AdversarialState) -> dict[str, Any]:
+        del state
+        try:
+            prepared = await _prepare_context(
+                cast(str, thread_id), configurable, materialize_path=True
+            )
+            return reset_run_state(prepared, finder_names)
+        except Exception as exc:
+            return {"error": f"prepare failed: {exc}"}
+
+    def fanout(state: AdversarialState) -> list[Send] | Literal["fail"]:
+        if state.get("error"):
+            return "fail"
+        data = cast(dict[str, Any], state)
+        return [
+            Send(
+                "find",
+                {
+                    "finder_name": name,
+                    "diff_path": data["diff_path"],
+                    "working_dir": data["working_dir"],
+                    "stage_context": data.get("stage_context", ""),
+                },
+            )
+            for name in data["finders_expected"]
+        ]
+
+    async def find(state: AdversarialState) -> dict[str, Any]:
+        data = cast(dict[str, Any], state)
+        name = cast(str, data["finder_name"])
+        prompt = (
+            f"Review the complete materialized diff at {data['diff_path']} against "
+            f"the checkout at {data['working_dir']}. Review context: "
+            f"{data.get('stage_context', '')}. Return only structured candidate defects."
+        )
+        try:
+            output = cast(FinderOutput, await _run_stage(stage_agents[name], prompt, config))
+            result: FinderRun = {
+                "finder": name,
+                "candidates": [item.model_dump() for item in output.candidates],
+                "error": None,
+            }
+        except Exception as exc:
+            result = {
+                "finder": name,
+                "candidates": [],
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        return {"finder_results": [result]}
+
+    async def dedupe(state: AdversarialState) -> dict[str, Any]:
+        results = state.get("finder_results", [])
+        result_names = [item["finder"] for item in results]
+        if (
+            len(result_names) != len(set(result_names))
+            or set(result_names) != set(state.get("finders_expected", []))
+            or any(item["error"] for item in results)
+        ):
+            return {"error": "finder fanout incomplete or failed"}
+        return {
+            "candidates": dedupe_candidates(
+                [candidate for item in results for candidate in item["candidates"]]
+            )
+        }
+
+    async def adjudicate(state: AdversarialState) -> dict[str, Any]:
+        if state.get("error"):
+            return {}
+        candidates = state.get("candidates", [])
+        if not candidates:
+            return {"verdicts": [], "kept_candidates": []}
+        prompt = (
+            f"Adjudicate every candidate exactly once by candidate_id against diff "
+            f"{state.get('diff_path', '')} and checkout {state.get('working_dir', '')}. "
+            f"Review context: {state.get('stage_context', '')}. Candidates: {candidates}"
+        )
+        try:
+            agent = stage_agents.get("adjudicator", parent_adjudicator)
+            output = cast(VerdictBatch, await _run_stage(agent, prompt, config))
+            verdicts = [item.model_dump() for item in output.verdicts]
+            by_id = validate_verdicts(candidates, verdicts)
+            kept = merge_kept_candidates(
+                [
+                    item
+                    for item in candidates
+                    if by_id[item["candidate_id"]].verdict == "keep-confirmed"
+                ]
+            )
+            return {"verdicts": verdicts, "kept_candidates": kept}
+        except Exception as exc:
+            return {"error": f"adjudication failed: {exc}"}
+
+    async def prepublish(state: AdversarialState) -> dict[str, Any]:
+        kept = list(state.get("kept_candidates", []))
+        triggers, _ = gate_triggers(state.get("diff_text", ""), kept)
+        if not triggers:
+            return {"gate_triggers": [], "kept_candidates": kept}
+        rewalk = [
+            trigger
+            for trigger in triggers
+            if trigger in {"zero-findings", "uncovered-major-prefix"}
+        ]
+        additions: list[dict[str, Any]] = []
+        gate_verdicts: list[dict[str, Any]] = []
+        try:
+            if rewalk:
+                output = cast(
+                    GateOutput,
+                    await _run_stage(
+                        gate_agent,
+                        f"Run only these re-read checks: {rewalk}. Re-read diff "
+                        f"{state.get('diff_path', '')} and checkout "
+                        f"{state.get('working_dir', '')} with PR title "
+                        f"{state.get('pr_title', '')!r}. Review context: "
+                        f"{state.get('stage_context', '')}. Current confirmed candidates: {kept}.",
+                        config,
+                    ),
+                )
+                if output.independence:
+                    raise RuntimeError("re-read gate returned unexpected independence decisions")
+                additions = dedupe_candidates([item.model_dump() for item in output.candidates])
+                for index, item in enumerate(additions):
+                    item["candidate_id"] = f"g{index + 1}"
+                if additions:
+                    agent = stage_agents.get("adjudicator", parent_adjudicator)
+                    verdict_output = cast(
+                        VerdictBatch,
+                        await _run_stage(
+                            agent,
+                            f"Adjudicate every gate candidate exactly once with review context "
+                            f"{state.get('stage_context', '')}: {additions}",
+                            config,
+                        ),
+                    )
+                    gate_verdicts = [item.model_dump() for item in verdict_output.verdicts]
+                    by_id = validate_verdicts(additions, gate_verdicts)
+                    kept.extend(
+                        item
+                        for item in additions
+                        if by_id[item["candidate_id"]].verdict == "keep-confirmed"
+                    )
+                    kept = merge_kept_candidates(kept)
+            _, collisions = gate_triggers(state.get("diff_text", ""), kept)
+            if collisions:
+                if "same-file-independence" not in triggers:
+                    triggers.append("same-file-independence")
+                output = cast(
+                    GateOutput,
+                    await _run_stage(
+                        gate_agent,
+                        "Judge whether each same-file candidate group has independent failure "
+                        f"modes. Return no candidates. Review context: "
+                        f"{state.get('stage_context', '')}. Groups: {collisions}. Candidates: {kept}",
+                        config,
+                    ),
+                )
+                if output.candidates:
+                    raise RuntimeError("same-file gate cannot add candidates")
+                kept = apply_independence(kept, collisions, output.independence)
+            return {
+                "gate_triggers": triggers,
+                "gate_candidates": additions,
+                "gate_verdicts": gate_verdicts,
+                "kept_candidates": kept,
+            }
+        except Exception as exc:
+            return {"error": f"pre-publish gate failed: {exc}", "gate_triggers": triggers}
+
+    async def record_publish(state: AdversarialState) -> dict[str, Any]:
+        if blocker := publication_blocker(state):
+            return {"error": blocker}
+        ordered = sorted(
+            state.get("kept_candidates", []),
+            key=lambda item: (
+                -SEVERITY_ORDER[cast(Severity, item["severity"])],
+                item["file"],
+                item["start_line"],
+            ),
+        )[:REVIEW_FINDING_CAP]
+        try:
+            for candidate in ordered:
+                result = await agent_tools.add_finding(
+                    severity=candidate["severity"],
+                    confidence="high",
+                    category=candidate["category"],
+                    file=candidate["file"],
+                    title=" ".join(candidate["failure_mode"].split()[:10]),
+                    description=finding_description(candidate),
+                    start_line=candidate["start_line"],
+                    end_line=candidate["end_line"],
+                    side=candidate["side"],
+                    state=cast(dict[str, Any], state),
+                )
+                if not result.get("success"):
+                    raise RuntimeError(str(result.get("error") or "finding write rejected"))
+            publication = await agent_tools.publish_review(state=cast(dict[str, Any], state))
+            if not publication.get("success"):
+                raise RuntimeError(str(publication.get("error") or "publish failed"))
+            return {"publication": publication}
+        except Exception as exc:
+            return {"error": f"record/publish failed: {exc}"}
+
+    async def settle(state: AdversarialState, runtime: Runtime) -> dict[str, Any]:
+        await settle_review_check_on_exit.aafter_agent(cast(AgentState, state), runtime)
+        return {}
+
+    def failed(state: AdversarialState) -> Literal["fail", "continue"]:
+        return "fail" if state.get("error") else "continue"
+
+    builder = StateGraph(AdversarialState)
+    builder.add_node("prepare", prepare)
+    builder.add_node("find", find)
+    builder.add_node("dedupe", dedupe)
+    builder.add_node("adjudicate", adjudicate)
+    builder.add_node("prepublish", prepublish)
+    builder.add_node("record_publish", record_publish)
+    builder.add_node("settle", settle)
+    builder.add_edge(START, "prepare")
+    builder.add_conditional_edges("prepare", fanout, {"fail": "settle"})
+    builder.add_edge("find", "dedupe")
+    builder.add_conditional_edges("dedupe", failed, {"fail": "settle", "continue": "adjudicate"})
+    builder.add_conditional_edges(
+        "adjudicate", failed, {"fail": "settle", "continue": "prepublish"}
+    )
+    builder.add_conditional_edges(
+        "prepublish", failed, {"fail": "settle", "continue": "record_publish"}
+    )
+    builder.add_conditional_edges(
+        "record_publish", failed, {"fail": "settle", "continue": "settle"}
+    )
+    builder.add_edge("settle", END)
+    return builder.compile(name="reviewer_adversarial").with_config(config)
 
 
 traced_reviewer_adversarial = traced_graph_factory(
-    get_reviewer_adversarial_agent,
-    REVIEW_TRACING_PROJECT,
+    get_reviewer_adversarial_agent, REVIEW_TRACING_PROJECT
 )
