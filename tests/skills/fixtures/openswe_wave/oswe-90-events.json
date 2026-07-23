@@ -1,0 +1,65 @@
+{
+  "source": "OSWE-90 Linear thread and PR #47 review timeline, 2026-07-23",
+  "session_user_id": "0f2475b5-868c-46d3-a9ac-a343e360396a",
+  "events": [
+    {
+      "poll_id": "01",
+      "kind": "ack",
+      "author_id": "98515a73-66e1-4262-bbf8-bd52581d8598"
+    },
+    {
+      "poll_id": "02",
+      "kind": "plan_posted",
+      "author_id": "98515a73-66e1-4262-bbf8-bd52581d8598",
+      "summary": "plan ready"
+    },
+    {
+      "poll_id": "03",
+      "kind": "approval",
+      "author_id": "0f2475b5-868c-46d3-a9ac-a343e360396a"
+    },
+    {
+      "poll_id": "04",
+      "kind": "pr_created",
+      "author_id": "98515a73-66e1-4262-bbf8-bd52581d8598"
+    },
+    {
+      "poll_id": "05",
+      "kind": "ci_progress",
+      "source": "github"
+    },
+    {
+      "poll_id": "06",
+      "kind": "review_findings",
+      "source": "github",
+      "summary": "rename scope finding"
+    },
+    {
+      "poll_id": "06",
+      "kind": "state_dump",
+      "source": "github",
+      "summary": "multi-line PR state dump"
+    },
+    {
+      "poll_id": "07",
+      "kind": "resume",
+      "author_id": "0f2475b5-868c-46d3-a9ac-a343e360396a"
+    },
+    {
+      "poll_id": "08",
+      "kind": "progress",
+      "author_id": "98515a73-66e1-4262-bbf8-bd52581d8598"
+    },
+    {
+      "poll_id": "09",
+      "kind": "checks_green",
+      "source": "github"
+    },
+    {
+      "poll_id": "10",
+      "kind": "merged",
+      "source": "github",
+      "summary": "PR #47 merged"
+    }
+  ]
+}
