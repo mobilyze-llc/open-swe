@@ -19,6 +19,7 @@ from agent.utils.model import OpenAIReasoning
 _GATEWAY_ENV_VARS = (
     "OPENAI_BASE_URL",
     "OPENAI_BASE_URL_OWNS_RETRIES",
+    "OPENAI_BASE_URL_MAX_RETRIES",
     "LANGSMITH_API_KEY",
     "LANGSMITH_API_KEY_PROD",
     "LANGSMITH_GATEWAY_API_KEY",
@@ -392,6 +393,31 @@ def test_make_model_direct_openai_retry_owner_disables_sdk_retries(
     assert captured["max_retries"] == 0
 
 
+@pytest.mark.parametrize("model_id", ["openai:gpt-5.6-sol", "openai:gpt-5.6-terra"])
+def test_make_model_direct_openai_retry_owner_honors_sdk_retry_override(
+    monkeypatch: pytest.MonkeyPatch,
+    model_id: str,
+) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://studio2.example:8317/v1/")
+    monkeypatch.setenv("OPENAI_BASE_URL_OWNS_RETRIES", "true")
+    monkeypatch.setenv("OPENAI_BASE_URL_MAX_RETRIES", "3")
+    captured, fake = _capture_init_chat_model()
+    with patch.object(model, "init_chat_model", fake):
+        model.make_model(model_id, use_gateway=False)
+    assert captured["base_url"] == "http://studio2.example:8317/v1"
+    assert captured["use_responses_api"] is True
+    assert captured["max_retries"] == 3
+
+
+def test_make_model_direct_openai_rejects_invalid_sdk_retry_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://studio2.example:8317/v1/")
+    monkeypatch.setenv("OPENAI_BASE_URL_MAX_RETRIES", "-1")
+    with pytest.raises(ValueError, match="OPENAI_BASE_URL_MAX_RETRIES"):
+        model.make_model("openai:gpt-5.6-sol", use_gateway=False)
+
+
 def test_make_model_direct_openai_base_url_preserves_explicit_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -456,6 +482,10 @@ def test_make_model_gateway_openai_preserves_reasoning_none(
     assert captured["include"] == ["reasoning.encrypted_content"]
     assert captured["reasoning"] == {"effort": "none"}
     assert "reasoning_effort" not in captured
+
+
+def test_openai_reasoning_max_uses_responses_summary() -> None:
+    assert model.openai_reasoning_for("max") == {"effort": "max", "summary": "auto"}
 
 
 def test_make_model_gateway_openai_responses_keeps_reasoning(

@@ -138,7 +138,6 @@ from .utils.github_proxy import record_proxy_token_expiry
 from .utils.json_types import as_json_object
 from .utils.model import (
     DEFAULT_LLM_REASONING,
-    ModelKwargs,
     fallback_model_id_for,
     make_model,
     provider_model_kwargs,
@@ -1059,9 +1058,13 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     fallback_model_id = os.environ.get("LLM_FALLBACK_MODEL_ID") or fallback_model_id_for(model_id)
     fallback_middleware: list[Any] = []
     if fallback_model_id and fallback_model_id != model_id:
-        fallback_kwargs: ModelKwargs = {"max_tokens": DEFAULT_LLM_MAX_TOKENS}
-        if fallback_model_id.startswith("openai:"):
-            fallback_kwargs["reasoning"] = DEFAULT_LLM_REASONING
+        fallback_effort = os.environ.get("LLM_FALLBACK_REASONING_EFFORT")
+        fallback_kwargs = provider_model_kwargs(
+            fallback_model_id,
+            fallback_effort,
+            max_tokens=DEFAULT_LLM_MAX_TOKENS,
+            openai_reasoning_default=DEFAULT_LLM_REASONING,
+        )
         fallback_middleware.append(
             ModelFallbackMiddleware(
                 _make_model_or_defer(fallback_model_id, use_gateway=use_gateway, **fallback_kwargs)

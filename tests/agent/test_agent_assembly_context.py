@@ -44,6 +44,7 @@ async def _capture_create_deep_agent_kwargs(
     configurable: dict[str, object] | None = None,
 ) -> dict[str, object]:
     captured: dict[str, object] = {}
+    make_model = MagicMock(side_effect=[MagicMock(name=f"model_{index}") for index in range(4)])
 
     def fake_create_deep_agent(**kwargs: object) -> _DummyAgent:
         captured.update(kwargs)
@@ -101,7 +102,7 @@ async def _capture_create_deep_agent_kwargs(
         ),
         patch("agent.server.load_profile", new_callable=AsyncMock, return_value=None),
         patch("agent.server.fallback_model_id_for", return_value=None),
-        patch("agent.server.make_model", side_effect=[MagicMock(), MagicMock()]),
+        patch("agent.server.make_model", make_model),
         patch("agent.server.construct_system_prompt", return_value="prompt"),
         patch("agent.server.create_deep_agent", side_effect=fake_create_deep_agent),
     ):
@@ -109,7 +110,33 @@ async def _capture_create_deep_agent_kwargs(
 
     captured["bound_config"] = agent.config
     captured["thread_update"] = thread_update
+    captured["make_model"] = make_model
     return captured
+
+
+@pytest.mark.asyncio
+async def test_agent_configures_sol_to_terra_max_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LLM_FALLBACK_MODEL_ID", "openai:gpt-5.6-terra")
+    monkeypatch.setenv("LLM_FALLBACK_REASONING_EFFORT", "max")
+
+    captured = await _capture_create_deep_agent_kwargs()
+
+    make_model = captured["make_model"]
+    assert isinstance(make_model, MagicMock)
+    calls = make_model.call_args_list
+    assert [call.args[0] for call in calls] == [
+        "openai:gpt-5.6-terra",
+        "openai:gpt-5.6-sol",
+        "openai:gpt-5.6-sol",
+    ]
+    assert calls[0].kwargs["reasoning"] == {"effort": "max", "summary": "auto"}
+    assert all(not call.args[0].startswith("anthropic:") for call in calls)
+
+    middleware = captured["middleware"]
+    assert isinstance(middleware, list)
+    assert sum(isinstance(item, server.ModelFallbackMiddleware) for item in middleware) == 1
 
 
 @pytest.mark.asyncio
