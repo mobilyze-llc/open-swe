@@ -192,12 +192,18 @@ async def test_adversarial_prepare_matches_pre_refactor_snapshot(
 ) -> None:
     result = await _prepare_adversarial(eval_mode=eval_mode)
 
-    assert result == {
-        "work_dir": "/workspace",
-        "rendered_system_prompt": (SNAPSHOT_DIR / f"{snapshot_name}.txt").read_text(),
-        "diff_text": DIFF,
-        "diff_line_set": {"example.py": {"RIGHT": {1}, "LEFT": {1}}},
-    }
+    assert result["work_dir"] == "/workspace"
+    assert result["diff_text"] == DIFF
+    assert result["diff_line_set"] == {"example.py": {"RIGHT": {1}, "LEFT": {1}}}
+    rendered = cast(str, result["rendered_system_prompt"])
+    snapshot = (SNAPSHOT_DIR / f"{snapshot_name}.txt").read_text()
+    shared = snapshot.split("\n\nYou are an adversarial code reviewer agent.", 1)[0]
+    context = (
+        "\n\n## Pull request to review" + snapshot.split("\n\n## Pull request to review", 1)[1]
+    )
+    assert rendered.startswith(shared)
+    assert rendered.endswith(context)
+    assert "parent adjudicator" in rendered
 
 
 @pytest.mark.asyncio

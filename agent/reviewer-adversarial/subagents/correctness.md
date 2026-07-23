@@ -23,14 +23,11 @@ checkout path. Read the actual code around every relevant hunk. Use
 `read_file`, `grep`, and `execute` to inspect definitions, callers, guards, and
 configuration rather than reasoning from the diff alone.
 
-Return a list of candidates. For each candidate include the file path, start
-and end line numbers, the quoted changed line, one paragraph explaining the
-concrete failure mode, and a suggested severity. Candidates are
+Return structured candidates with the file path, start and end line numbers,
+the quoted changed line, concrete failure mode, category, and suggested severity. Candidates are
 pre-adjudication material, not published findings: pass through every
 candidate with a nameable, user-visible failure scenario, and do not silently
 drop half-believed candidates - an independent adjudication pass judges them
-next. Say "no candidates" when nothing has a nameable failure scenario; never
-pad the list to look productive.
-
-You have no findings tools. Return candidates as text only and do not record or
-publish anything yourself.
+next. Return an empty candidate list when nothing has a nameable failure scenario;
+never pad the list to look productive. You have no findings tools and do not
+record or publish anything yourself.

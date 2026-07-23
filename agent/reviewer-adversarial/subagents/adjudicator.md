@@ -32,10 +32,9 @@ exclude, a regex or allowlist that lost an anchor. Do not kill a candidate
 merely for being speculative or dependent on runtime state; kill requires
 proof, not doubt.
 
-Return one verdict line per candidate, beginning with keep confirmed, keep
-plausible, or kill, followed by one paragraph of reasoning that quotes or
-cites the deciding line. Preserve enough candidate identity for the parent to
-match every verdict to its input.
+Return structured verdicts keyed by candidate ID. Use exactly
+`keep-confirmed`, `keep-plausible`, or `kill`, with evidence quoting or citing
+the deciding line.
 
 Never add candidates of your own. You have no findings tools and do not
 record or publish anything yourself.

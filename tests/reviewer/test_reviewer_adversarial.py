@@ -65,6 +65,13 @@ def test_shipped_definition_shape() -> None:
         "security",
     )
     assert all(subagent.tools == () for subagent in definition.subagents)
+    prompt_text = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in Path("agent/reviewer-adversarial").rglob("*.md")
+    )
+    assert "zero-findings re-walk" not in prompt_text
+    assert "same-file independence" not in prompt_text
+    assert "top changed" not in prompt_text
 
     model = cast(BaseChatModel, MagicMock())
     specs = build_subagents(
@@ -263,7 +270,8 @@ async def test_prepare_renders_definition_prompt(tmp_path: Path) -> None:
         prompt = cast(str, updates["rendered_system_prompt"])
         assert "A finding is a claim about a concrete failure" in prompt
         assert "ADVERSARIAL PROFILE MARKER test-owner/test-repo" not in prompt
-        assert "Independent finder pass" in prompt
+        assert "parent adjudicator" in prompt
+        assert "Independent finder pass" not in prompt
         assert "test-owner/test-repo#7" in prompt
         assert "/workspace/test-repo" in prompt
         assert "This is a first review" in prompt
@@ -444,9 +452,6 @@ async def test_custom_profile_applies_pins_while_body_is_ignored(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     requested: list[str] = []
-    fake = MagicMock()
-    fake.with_config = MagicMock(return_value=fake)
-    subagent: dict[str, Any] = {}
     profile = StageProfile(
         stage="review",
         name="custom-review",
@@ -461,19 +466,15 @@ async def test_custom_profile_applies_pins_while_body_is_ignored(
         requested.append(model_id)
         return MagicMock()
 
+    fake_stage = MagicMock()
+    fake_graph = MagicMock()
+    fake_graph.with_config.return_value = fake_graph
     config = cast(
         RunnableConfig,
-        {
-            "configurable": {
-                "thread_id": "adversarial-thread",
-                "__is_for_execution__": True,
-            }
-        },
+        {"configurable": {"thread_id": "adversarial-thread", "__is_for_execution__": True}},
     )
     caplog.set_level("INFO", logger="agent.reviewer_adversarial")
-
     with (
-        patch("agent.reviewer_adversarial.create_deep_agent", return_value=fake) as create_agent,
         patch("agent.reviewer_adversarial._make_model_or_defer", side_effect=make_model),
         patch(
             "agent.reviewer_adversarial._cached_reviewer_team_defaults",
@@ -496,40 +497,496 @@ async def test_custom_profile_applies_pins_while_body_is_ignored(
             new_callable=AsyncMock,
             return_value=True,
         ),
-        patch("agent.reviewer_adversarial.build_subagents", return_value=[subagent]),
+        patch("agent.reviewer_adversarial._bounded_agent", return_value=fake_stage) as bounded,
+        patch("agent.reviewer_adversarial.StateGraph.compile", return_value=fake_graph),
     ):
-        await get_reviewer_adversarial_agent(config)
+        result = await get_reviewer_adversarial_agent(config)
 
+    assert result is fake_graph
     assert requested == ["profile-model", "profile-model"]
     assert "Ignoring review profile body 'custom-review'" in caplog.text
+    assert profile.body not in str(bounded.call_args_list)
+    assert any(
+        isinstance(item, ExcludeToolsMiddleware)
+        for call in bounded.call_args_list
+        for item in call.kwargs.get("middleware", [])
+    )
 
-    kwargs = create_agent.call_args.kwargs
-    middleware = cast(list[object], kwargs["middleware"])
-    prepare = cast(PrepareAdversarialReviewerRunMiddleware, middleware[0])
-    assert prepare._prepare_config_fingerprint()["review_profile"] == profile.name
+
+def _candidate(candidate_id: str, file: str = "src/app.py") -> dict[str, object]:
+    return {
+        "candidate_id": candidate_id,
+        "file": file,
+        "start_line": 10,
+        "end_line": 10,
+        "quoted_line": "changed()",
+        "failure_mode": f"failure {candidate_id}",
+        "severity": "high",
+        "category": "correctness",
+    }
+
+
+def test_publication_blocker_rejects_incomplete_finders_and_verdicts() -> None:
+    from agent.review.adversarial import publication_blocker
+
+    candidate = _candidate("c1")
+    incomplete = {
+        "finders_expected": ["correctness", "security"],
+        "finder_results": [{"finder": "correctness", "candidates": [], "error": None}],
+        "candidates": [candidate],
+        "verdicts": [{"candidate_id": "c1", "verdict": "keep-confirmed", "evidence": "x"}],
+    }
+    assert publication_blocker(cast(Any, incomplete)) == "finder fanout incomplete or failed"
+
+    unadjudicated = {
+        **incomplete,
+        "finder_results": [
+            {"finder": "correctness", "candidates": [], "error": None},
+            {"finder": "security", "candidates": [], "error": None},
+        ],
+        "verdicts": [],
+    }
+    assert "every candidate ID" in str(publication_blocker(cast(Any, unadjudicated)))
+
+
+def test_all_prepublish_gates_fire_on_their_triggers() -> None:
+    from agent.review.adversarial import gate_triggers
+
+    production_diff = (
+        "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
+    )
+    triggers, _ = gate_triggers(production_diff, [])
+    assert triggers == ["zero-findings", "uncovered-major-prefix"]
+
+    kept = [_candidate("c1"), _candidate("c2")]
+    triggers, collisions = gate_triggers(production_diff, cast(Any, kept))
+    assert triggers == ["same-file-independence"]
+    assert collisions == [["c1", "c2"]]
+
+
+def test_gate_classification_excludes_nonproduction_and_includes_major_ties() -> None:
+    from agent.review.adversarial import gate_triggers
+
+    docs_diff = "diff --git a/docs/a.md b/docs/a.md\n--- a/docs/a.md\n+++ b/docs/a.md\n-old\n+new\n"
+    assert gate_triggers(docs_diff, [])[0] == ["uncovered-major-prefix"]
+    root_docs = "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n-old\n+new\n"
+    assert gate_triggers(root_docs, [])[0] == ["uncovered-major-prefix"]
+    tied = (
+        "diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n-old\n+new\n"
+        "diff --git a/lib/b.py b/lib/b.py\n--- a/lib/b.py\n+++ b/lib/b.py\n-old\n+new\n"
+    )
+    triggers, _ = gate_triggers(tied, cast(Any, [_candidate("c1")]))
+    assert triggers == ["uncovered-major-prefix"]
+
+
+@pytest.mark.asyncio
+async def test_prepare_node_materializes_gathered_degraded_diff() -> None:
+    from agent.reviewer import ReviewContextBundle
+    from agent.reviewer_adversarial import _prepare_context
+
+    backend = MagicMock()
+    bundle = ReviewContextBundle(
+        sandbox_backend=backend,
+        github_token="token",
+        work_dir="/workspace",
+        repo_owner="owner",
+        repo_name="repo",
+        pr_number=7,
+        pr_url="https://github.com/owner/repo/pull/7",
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        repo_ready=False,
+        reviewer_eval=False,
+        diff_text="api-backed diff",
+        diff_line_set={},
+        pr_title="title",
+        pr_body="body",
+    )
     with (
         patch(
-            "agent.reviewer._ensure_reviewer_sandbox_for_thread",
+            "agent.reviewer_adversarial.gather_review_context",
             new_callable=AsyncMock,
-            return_value=(MagicMock(), None),
+            return_value=bundle,
         ),
         patch(
-            "agent.reviewer.aresolve_sandbox_work_dir",
+            "agent.reviewer_adversarial.materialize_review_diff",
             new_callable=AsyncMock,
-            return_value="/workspace",
+            return_value=MagicMock(path="/workspace/repo/review.patch"),
+        ) as materialize,
+    ):
+        prepared = await _prepare_context("thread", {}, materialize_path=True)
+
+    assert prepared["diff_path"] == "/workspace/repo/review.patch"
+    assert materialize.await_args is not None
+    assert materialize.await_args.kwargs["diff_text"] == "api-backed diff"
+
+
+def test_gate_policy_handles_quoted_paths() -> None:
+    from agent.review.adversarial import changed_prefix_counts
+
+    quoted = (
+        'diff --git "a/src/my file.py" "b/src/my file.py"\n'
+        '--- "a/src/my file.py"\n+++ "b/src/my file.py"\n-old\n+new\n'
+    )
+    assert changed_prefix_counts(quoted) == {"src": 2}
+
+
+def test_gate_added_same_file_candidate_requires_independence() -> None:
+    from agent.review.adversarial import IndependenceDecision, apply_independence, gate_triggers
+
+    diff = (
+        "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n+++ b/src/app.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
+    )
+    candidates = [
+        cast(dict[str, Any], _candidate("c1")),
+        cast(dict[str, Any], _candidate("g1")),
+    ]
+    triggers, collisions = gate_triggers(diff, candidates)
+    assert triggers == ["same-file-independence"]
+    result = apply_independence(
+        candidates,
+        collisions,
+        [
+            IndependenceDecision(
+                candidate_ids=["c1", "g1"],
+                independent=False,
+                keep_candidate_ids=["c1"],
+                rationale="same failure",
+            )
+        ],
+    )
+    assert [item["candidate_id"] for item in result] == ["c1"]
+
+
+@pytest.mark.asyncio
+async def test_finder_timeout_fails_closed_and_settles_terminal_check() -> None:
+    from agent.review.adversarial import FinderOutput
+
+    stages = [object() for _ in range(5)]
+    stage_iter = iter(stages)
+
+    async def run_stage(graph: object, *_args: object, **_kwargs: object) -> FinderOutput:
+        if graph is stages[2]:
+            raise TimeoutError("security finder timed out")
+        return FinderOutput(candidates=[])
+
+    config = cast(
+        RunnableConfig,
+        {"configurable": {"thread_id": "adversarial-thread", "__is_for_execution__": True}},
+    )
+    with (
+        patch(
+            "agent.reviewer_adversarial._cached_reviewer_team_defaults",
+            new_callable=AsyncMock,
+            return_value=(("team-main", "low"), ("team-sub", "low")),
         ),
         patch(
-            "agent.reviewer.prepare_review_repo",
+            "agent.reviewer_adversarial._cached_review_profile_name",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "agent.reviewer_adversarial._cached_gateway_enabled",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "agent.reviewer_adversarial.get_team_fable_enabled",
             new_callable=AsyncMock,
             return_value=True,
         ),
+        patch("agent.reviewer_adversarial._make_model_or_defer", return_value=MagicMock()),
+        patch(
+            "agent.reviewer_adversarial._bounded_agent",
+            side_effect=lambda **_kwargs: next(stage_iter),
+        ),
+        patch(
+            "agent.reviewer_adversarial._prepare_context",
+            new_callable=AsyncMock,
+            return_value={
+                "work_dir": "/workspace",
+                "working_dir": "/workspace/repo",
+                "rendered_system_prompt": "prompt",
+                "diff_text": "",
+                "diff_line_set": None,
+                "pr_title": "title",
+                "diff_path": "/tmp/review.diff",
+            },
+        ),
+        patch("agent.reviewer_adversarial._run_stage", side_effect=run_stage),
+        patch("agent.reviewer_adversarial.agent_tools.add_finding", new_callable=AsyncMock) as add,
+        patch(
+            "agent.reviewer_adversarial.agent_tools.publish_review", new_callable=AsyncMock
+        ) as publish,
+        patch.object(
+            __import__(
+                "agent.reviewer_adversarial", fromlist=["settle_review_check_on_exit"]
+            ).settle_review_check_on_exit,
+            "aafter_agent",
+            new_callable=AsyncMock,
+        ) as settle,
     ):
-        updates = await _run_prepare(prepare)
-    assert profile.body not in cast(str, updates["rendered_system_prompt"])
-    assert profile.tools is not None
-    expected_tools = frozenset(profile.tools)
-    parent_filter = next(item for item in middleware if isinstance(item, ExcludeToolsMiddleware))
-    assert cast(Any, parent_filter)._allowed == expected_tools
-    subagent_filter = cast(list[object], subagent["middleware"])[-1]
-    assert isinstance(subagent_filter, ExcludeToolsMiddleware)
-    assert cast(Any, subagent_filter)._allowed == expected_tools
+        graph = await get_reviewer_adversarial_agent(config)
+        result = await graph.ainvoke({"messages": []})
+
+    assert result["error"] == "finder fanout incomplete or failed"
+    add.assert_not_awaited()
+    publish.assert_not_awaited()
+    settle.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("complete_verdicts", "publishes"), [(False, False), (True, True)])
+async def test_adjudication_barrier_controls_single_publish(
+    complete_verdicts: bool, publishes: bool
+) -> None:
+    from agent.review.adversarial import CandidateDraft, FinderOutput, Verdict, VerdictBatch
+
+    stages = [object() for _ in range(5)]
+    stage_iter = iter(stages)
+    candidate = {
+        "file": "src/app.py",
+        "start_line": 1,
+        "end_line": 1,
+        "quoted_line": "new",
+        "failure_mode": "returns the wrong value",
+        "severity": "high",
+        "category": "correctness",
+    }
+
+    async def run_stage(graph: object, *_args: object, **_kwargs: object) -> Any:
+        if graph is stages[1]:
+            return FinderOutput(candidates=[CandidateDraft.model_validate(candidate)])
+        if graph is stages[2]:
+            return FinderOutput(candidates=[])
+        if graph is stages[0]:
+            verdicts = (
+                [
+                    Verdict(
+                        candidate_id="c1",
+                        verdict="keep-confirmed",
+                        evidence="reachable from the changed line",
+                    )
+                ]
+                if complete_verdicts
+                else []
+            )
+            return VerdictBatch(verdicts=verdicts)
+        raise AssertionError("unexpected gate stage")
+
+    config = cast(
+        RunnableConfig,
+        {"configurable": {"thread_id": "adversarial-thread", "__is_for_execution__": True}},
+    )
+    with (
+        patch(
+            "agent.reviewer_adversarial._cached_reviewer_team_defaults",
+            new_callable=AsyncMock,
+            return_value=(("team-main", "low"), ("team-sub", "low")),
+        ),
+        patch(
+            "agent.reviewer_adversarial._cached_review_profile_name",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "agent.reviewer_adversarial._cached_gateway_enabled",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "agent.reviewer_adversarial.get_team_fable_enabled",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("agent.reviewer_adversarial._make_model_or_defer", return_value=MagicMock()),
+        patch(
+            "agent.reviewer_adversarial._bounded_agent",
+            side_effect=lambda **_kwargs: next(stage_iter),
+        ),
+        patch(
+            "agent.reviewer_adversarial._prepare_context",
+            new_callable=AsyncMock,
+            return_value={
+                "work_dir": "/workspace",
+                "working_dir": "/workspace/repo",
+                "rendered_system_prompt": "prompt",
+                "diff_text": (
+                    "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n"
+                    "+++ b/src/app.py\n@@ -1 +1 @@\n-old\n+new\n"
+                ),
+                "diff_line_set": {"src/app.py": {"RIGHT": {1}, "LEFT": {1}}},
+                "pr_title": "title",
+                "diff_path": "/tmp/review.diff",
+            },
+        ),
+        patch("agent.reviewer_adversarial._run_stage", side_effect=run_stage),
+        patch(
+            "agent.reviewer_adversarial.agent_tools.add_finding",
+            new_callable=AsyncMock,
+            return_value={"success": True, "finding_id": "f1"},
+        ) as add,
+        patch(
+            "agent.reviewer_adversarial.agent_tools.publish_review",
+            new_callable=AsyncMock,
+            return_value={"success": True, "review_id": 7},
+        ) as publish,
+        patch.object(
+            __import__(
+                "agent.reviewer_adversarial", fromlist=["settle_review_check_on_exit"]
+            ).settle_review_check_on_exit,
+            "aafter_agent",
+            new_callable=AsyncMock,
+        ) as settle,
+    ):
+        graph = await get_reviewer_adversarial_agent(config)
+        result = await graph.ainvoke({"messages": []})
+
+    if publishes:
+        assert result["publication"]["review_id"] == 7
+        add.assert_awaited_once()
+        publish.assert_awaited_once()
+    else:
+        assert "adjudication failed" in result["error"]
+        add.assert_not_awaited()
+        publish.assert_not_awaited()
+    settle.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_compiled_graph_runs_all_prepublish_gates_with_bounded_passes() -> None:
+    from agent.review.adversarial import (
+        CandidateDraft,
+        FinderOutput,
+        GateOutput,
+        IndependenceDecision,
+        Verdict,
+        VerdictBatch,
+    )
+
+    stages = [object() for _ in range(5)]
+    stage_iter = iter(stages)
+    gate_calls = 0
+
+    async def run_stage(graph: object, *_args: object, **_kwargs: object) -> Any:
+        nonlocal gate_calls
+        if graph in {stages[1], stages[2]}:
+            return FinderOutput(candidates=[])
+        if graph is stages[0]:
+            return VerdictBatch(
+                verdicts=[
+                    Verdict(
+                        candidate_id=candidate_id,
+                        verdict="keep-confirmed",
+                        evidence="reachable",
+                    )
+                    for candidate_id in ("g1", "g2")
+                ]
+            )
+        if graph is stages[4]:
+            gate_calls += 1
+            if gate_calls == 1:
+                return GateOutput(
+                    candidates=[
+                        CandidateDraft(
+                            file="src/app.py",
+                            start_line=line,
+                            end_line=line,
+                            quoted_line=f"changed_{line}",
+                            failure_mode=f"failure {line}",
+                            severity="high",
+                        )
+                        for line in (1, 2)
+                    ]
+                )
+            return GateOutput(
+                independence=[
+                    IndependenceDecision(
+                        candidate_ids=["g1", "g2"],
+                        independent=False,
+                        keep_candidate_ids=["g1"],
+                        rationale="same user-visible failure",
+                    )
+                ]
+            )
+        raise AssertionError("unexpected parent adjudicator stage")
+
+    config = cast(
+        RunnableConfig,
+        {"configurable": {"thread_id": "adversarial-thread", "__is_for_execution__": True}},
+    )
+    with (
+        patch(
+            "agent.reviewer_adversarial._cached_reviewer_team_defaults",
+            new_callable=AsyncMock,
+            return_value=(("team-main", "low"), ("team-sub", "low")),
+        ),
+        patch(
+            "agent.reviewer_adversarial._cached_review_profile_name",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "agent.reviewer_adversarial._cached_gateway_enabled",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "agent.reviewer_adversarial.get_team_fable_enabled",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("agent.reviewer_adversarial._make_model_or_defer", return_value=MagicMock()),
+        patch(
+            "agent.reviewer_adversarial._bounded_agent",
+            side_effect=lambda **_kwargs: next(stage_iter),
+        ),
+        patch(
+            "agent.reviewer_adversarial._prepare_context",
+            new_callable=AsyncMock,
+            return_value={
+                "work_dir": "/workspace",
+                "working_dir": "/workspace/repo",
+                "rendered_system_prompt": "prompt",
+                "stage_context": "context",
+                "diff_text": (
+                    "diff --git a/src/app.py b/src/app.py\n--- a/src/app.py\n"
+                    "+++ b/src/app.py\n@@ -1,2 +1,2 @@\n-old1\n-old2\n+new1\n+new2\n"
+                ),
+                "diff_line_set": {"src/app.py": {"RIGHT": {1, 2}, "LEFT": {1, 2}}},
+                "diff_path": "/tmp/review.diff",
+                "pr_title": "change app",
+            },
+        ),
+        patch("agent.reviewer_adversarial._run_stage", side_effect=run_stage),
+        patch(
+            "agent.reviewer_adversarial.agent_tools.add_finding",
+            new_callable=AsyncMock,
+            return_value={"success": True, "finding_id": "f1"},
+        ) as add,
+        patch(
+            "agent.reviewer_adversarial.agent_tools.publish_review",
+            new_callable=AsyncMock,
+            return_value={"success": True, "review_id": 7},
+        ) as publish,
+        patch.object(
+            __import__(
+                "agent.reviewer_adversarial", fromlist=["settle_review_check_on_exit"]
+            ).settle_review_check_on_exit,
+            "aafter_agent",
+            new_callable=AsyncMock,
+        ),
+    ):
+        graph = await get_reviewer_adversarial_agent(config)
+        result = await graph.ainvoke({"messages": []})
+
+    assert result["gate_triggers"] == [
+        "zero-findings",
+        "uncovered-major-prefix",
+        "same-file-independence",
+    ]
+    assert gate_calls == 2
+    add.assert_awaited_once()
+    publish.assert_awaited_once()
