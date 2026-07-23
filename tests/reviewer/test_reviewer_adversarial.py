@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -97,6 +98,7 @@ def test_shipped_definition_shape() -> None:
 def test_conventions_roster_filter_and_finder_context_isolation(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.INFO, logger="agent.reviewer_adversarial")
     finder_names = ["conventions", "correctness", "security"]
     assert (
         _active_finder_names(finder_names, agents_md_content="ROOT RULE", scoped_agents_md={})
