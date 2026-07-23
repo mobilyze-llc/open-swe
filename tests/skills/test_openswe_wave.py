@@ -63,7 +63,36 @@ def test_replay_coalesces_actionable_state_dump() -> None:
     result = wave.replay_events(events, "session")
 
     assert result["wake_count"] == 1
+    assert result["wakes"][0]["wake_node"] == "terminal_run_error"
     assert len(result["wakes"][0]["evidence"]) == 2
+
+
+def test_unhandled_and_terminal_observations_beat_plan_in_same_poll() -> None:
+    events = [
+        {"poll_id": "same", "kind": "plan_posted"},
+        {"poll_id": "same", "kind": "merged"},
+        {"poll_id": "same", "kind": "unhandled"},
+    ]
+
+    result = wave.replay_events(events, "session")
+
+    assert result["wake_count"] == 1
+    assert result["wakes"][0]["wake_node"] == "unhandled_condition"
+
+
+def test_live_poll_assigns_one_id_to_every_observation() -> None:
+    events = [
+        {"kind": "review_findings", "poll_id": "comment-time"},
+        {"kind": "merged"},
+        {"kind": "run_error"},
+    ]
+
+    assigned = wave.assign_poll_id(events, "poll-now")
+    result = wave.replay_events(assigned, "session")
+
+    assert {event["poll_id"] for event in assigned} == {"poll-now"}
+    assert result["wake_count"] == 1
+    assert result["wakes"][0]["wake_node"] == "terminal_run_error"
 
 
 def test_transition_detection_uses_new_thread_and_error_ids() -> None:
@@ -205,7 +234,9 @@ def test_green_draft_fixture_is_eligible_and_dry_run_only() -> None:
     assert decision.eligible
     assert decision.reason == "green_draft"
     assert decision.commands[0][:3] == ("gh", "pr", "ready")
-    assert decision.commands[1][-2:] == ("--auto", "--squash")
+    assert "--auto" in decision.commands[1]
+    assert "--squash" in decision.commands[1]
+    assert decision.commands[1][-2:] == ("--match-head-commit", snapshot["pr"]["headRefOid"])
     assert snapshot["inferred_fields"]
 
 
@@ -216,8 +247,11 @@ def test_queue_stall_fixture_is_eligible_and_uses_arm_cycle() -> None:
 
     assert decision.eligible
     assert decision.reason == "queue_stall"
-    assert decision.commands[0][-1] == "--disable-auto"
-    assert decision.commands[1][-2:] == ("--auto", "--squash")
+    assert "--disable-auto" in decision.commands[0]
+    assert decision.commands[0][-2:] == ("--match-head-commit", snapshot["pr"]["headRefOid"])
+    assert "--auto" in decision.commands[1]
+    assert "--squash" in decision.commands[1]
+    assert decision.commands[1][-2:] == ("--match-head-commit", snapshot["pr"]["headRefOid"])
     assert "isInMergeQueue" in wave.PR_QUERY
 
 
@@ -252,10 +286,13 @@ def test_recoveries_respect_merge_hold_and_action_dedupe() -> None:
 def test_apply_recovery_rechecks_and_verifies(monkeypatch: pytest.MonkeyPatch) -> None:
     initial = fixture("pr-43-green-draft.json")
     decision = wave.recovery_decision(initial)
-    applied = deepcopy(initial)
-    applied["pr"]["isDraft"] = False
+    after_ready = deepcopy(initial)
+    after_ready["pr"]["isDraft"] = False
+    applied = deepcopy(after_ready)
     applied["pr"]["autoMergeRequest"] = {"enabledAt": "now"}
-    states = iter([deepcopy(initial), applied])
+    states = iter(
+        [deepcopy(initial), deepcopy(initial), after_ready, deepcopy(after_ready), applied]
+    )
     commands: list[tuple[str, ...]] = []
 
     monkeypatch.setattr(wave, "_run", lambda command, **_kwargs: commands.append(tuple(command)))
@@ -272,9 +309,11 @@ def test_apply_recovery_logs_start_before_first_command(
 ) -> None:
     initial = fixture("pr-44-queue-stall.json")
     decision = wave.recovery_decision(initial)
+    after_disable = deepcopy(initial)
+    after_disable["pr"]["autoMergeRequest"] = None
     applied = deepcopy(initial)
     applied["pr"]["autoMergeRequest"] = {"enabledAt": "now"}
-    states = iter([deepcopy(initial), applied])
+    states = iter([deepcopy(initial), deepcopy(initial), after_disable, applied])
     order: list[str] = []
     monkeypatch.setattr(wave, "_run", lambda _command, **_kwargs: order.append("command"))
     monkeypatch.setattr(wave.time, "sleep", lambda _seconds: None)
@@ -464,6 +503,42 @@ def test_trace_digest_falls_back_to_child_llm_tokens() -> None:
     digest = wave.trace_digest(runs, "thread")
 
     assert digest["total_tokens"] == 777
+
+
+def test_trace_digest_applies_child_fallback_per_root() -> None:
+    runs = [
+        {
+            "id": "root-1",
+            "trace_id": "trace-1",
+            "metadata": {"thread_id": "thread"},
+            "parent_run_id": None,
+            "status": "success",
+            "total_tokens": 100,
+            "inputs": {},
+        },
+        {
+            "id": "root-2",
+            "trace_id": "trace-2",
+            "metadata": {"thread_id": "thread"},
+            "parent_run_id": None,
+            "status": "error",
+            "inputs": {},
+        },
+        {
+            "id": "llm-2",
+            "trace_id": "trace-2",
+            "metadata": {"thread_id": "thread"},
+            "parent_run_id": "root-2",
+            "status": "success",
+            "total_tokens": 200,
+            "inputs": {},
+        },
+    ]
+
+    digest = wave.trace_digest(runs, "thread")
+
+    assert [root["tokens"] for root in digest["root_runs"]] == [100, 200]
+    assert digest["total_tokens"] == 300
 
 
 def test_trace_digest_reads_token_attributes_from_run_models() -> None:

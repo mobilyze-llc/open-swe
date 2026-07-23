@@ -26,7 +26,7 @@ Apply adds `--apply` and executes, in order:
 
 ```bash
 gh pr ready <number> --repo <owner/repo>
-gh pr merge <number> --repo <owner/repo> --auto --squash
+gh pr merge <number> --repo <owner/repo> --auto --squash --match-head-commit <head-sha>
 ```
 
 The monitor verifies the unchanged head is non-draft with auto-merge armed, then posts a deduplicated Linear action log. A human, missing, null, or unknown actor blocks recovery.
@@ -48,8 +48,8 @@ Required evidence:
 Apply mode executes, in order:
 
 ```bash
-gh pr merge <number> --repo <owner/repo> --disable-auto
-gh pr merge <number> --repo <owner/repo> --auto --squash
+gh pr merge <number> --repo <owner/repo> --disable-auto --match-head-commit <head-sha>
+gh pr merge <number> --repo <owner/repo> --auto --squash --match-head-commit <head-sha>
 ```
 
 The monitor verifies the unchanged head remains non-draft with auto-merge armed and posts the Linear action log. It never directly merges or bypasses checks.

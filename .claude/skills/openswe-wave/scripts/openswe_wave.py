@@ -327,6 +327,11 @@ def _event_node(event: dict[str, Any]) -> str | None:
     return mapping.get(str(event.get("kind")))
 
 
+def assign_poll_id(events: Sequence[dict[str, Any]], poll_id: str) -> list[dict[str, Any]]:
+    """Assign one poll identity to every observation collected in that poll."""
+    return [{**event, "poll_id": poll_id} for event in events]
+
+
 def replay_events(events: Sequence[dict[str, Any]], session_user_id: str) -> dict[str, Any]:
     """Replay recorded observations with self suppression and per-poll coalescing."""
     grouped: dict[str, list[dict[str, Any]]] = {}
@@ -346,7 +351,7 @@ def replay_events(events: Sequence[dict[str, Any]], session_user_id: str) -> dic
             grouped[poll_id] = []
             order.append(poll_id)
         grouped[poll_id].append({**event, "wake_node": node})
-    priority = {node: index for index, node in enumerate(reversed(WAKE_NODES))}
+    priority = {node: index for index, node in enumerate(WAKE_NODES)}
     wakes = []
     for poll_id in order:
         observations = grouped[poll_id]
@@ -588,7 +593,18 @@ def recovery_decision(snapshot: dict[str, Any]) -> RecoveryDecision:
                 break
         commands = (
             ("gh", "pr", "ready", str(number), "--repo", repo),
-            ("gh", "pr", "merge", str(number), "--repo", repo, "--auto", "--squash"),
+            (
+                "gh",
+                "pr",
+                "merge",
+                str(number),
+                "--repo",
+                repo,
+                "--auto",
+                "--squash",
+                "--match-head-commit",
+                head_sha,
+            ),
         )
     elif reason == "queue_stall":
         if pr.get("isDraft") is not False:
@@ -596,8 +612,29 @@ def recovery_decision(snapshot: dict[str, Any]) -> RecoveryDecision:
         if pr.get("autoMergeRequest") is None:
             blockers.append("auto-merge is not armed")
         commands = (
-            ("gh", "pr", "merge", str(number), "--repo", repo, "--disable-auto"),
-            ("gh", "pr", "merge", str(number), "--repo", repo, "--auto", "--squash"),
+            (
+                "gh",
+                "pr",
+                "merge",
+                str(number),
+                "--repo",
+                repo,
+                "--disable-auto",
+                "--match-head-commit",
+                head_sha,
+            ),
+            (
+                "gh",
+                "pr",
+                "merge",
+                str(number),
+                "--repo",
+                repo,
+                "--auto",
+                "--squash",
+                "--match-head-commit",
+                head_sha,
+            ),
         )
     evidence = {
         "reason": reason,
@@ -632,6 +669,25 @@ def _recovery_verified(reason: str, pr: dict[str, Any], expected_head: str) -> b
     return pr.get("isDraft") is False and pr.get("autoMergeRequest") is not None
 
 
+def _recovery_stage_blockers(snapshot: dict[str, Any], decision: RecoveryDecision) -> list[str]:
+    """Revalidate mutation-safe state without requiring the pre-action shape."""
+    pr = snapshot.get("pr") or {}
+    blockers = []
+    if pr.get("headRefOid") != decision.evidence["head_sha"]:
+        blockers.append("head changed during recovery")
+    if pr.get("state") != "OPEN":
+        blockers.append("pull request is not open")
+    if pr.get("baseRefName") != pr.get("defaultBranch"):
+        blockers.append("pull request does not target the default branch")
+    if pr.get("mergeStateStatus") != "CLEAN" or not _green(pr):
+        blockers.append("pull request is no longer green and CLEAN")
+    if pr.get("isInMergeQueue") is not False:
+        blockers.append("queue state is not explicitly false")
+    if _has_merge_hold(pr):
+        blockers.append("the merge-hold label is present")
+    return blockers
+
+
 def apply_recovery(
     snapshot: dict[str, Any],
     decision: RecoveryDecision,
@@ -650,8 +706,25 @@ def apply_recovery(
         }
     if before_actions:
         before_actions()
+    action_started = False
     for command in decision.commands:
+        blockers = _recovery_stage_blockers(refresh(), decision)
+        if blockers:
+            return {
+                "status": "verification_failed" if action_started else "blocked_after_recheck",
+                "blockers": blockers,
+                "verified": False,
+            }
         _run(command)
+        action_started = True
+        if len(command) > 2 and command[2] == "ready":
+            blockers = _recovery_stage_blockers(refresh(), decision)
+            if blockers:
+                return {
+                    "status": "verification_failed",
+                    "blockers": blockers,
+                    "verified": False,
+                }
     verified = False
     for _ in range(3):
         latest = refresh()
@@ -871,6 +944,31 @@ def _token_count(run: Any) -> int:
     return 0
 
 
+def _root_token_total(root: Any, runs: Sequence[Any]) -> int:
+    """Use aggregate root usage or leaf usage within that root's trace."""
+    direct = _token_count(root)
+    if direct:
+        return direct
+    root_id = str(_get(root, "id") or "")
+    trace_id = str(_get(root, "trace_id") or "")
+    run_ids = {str(_get(run, "id") or "") for run in runs}
+    parent_ids = {
+        str(_get(run, "parent_run_id") or "") for run in runs if _get(run, "parent_run_id")
+    }
+    candidates = []
+    for run in runs:
+        run_id = str(_get(run, "id") or "")
+        if run_id == root_id or run_id in parent_ids:
+            continue
+        same_trace = trace_id and str(_get(run, "trace_id") or "") == trace_id
+        direct_child = str(_get(run, "parent_run_id") or "") == root_id
+        if same_trace or direct_child:
+            candidates.append(run)
+    if not trace_id and root_id not in run_ids:
+        return 0
+    return sum(_token_count(run) for run in candidates)
+
+
 def trace_digest(runs: Sequence[Any], thread_id: str) -> dict[str, Any]:
     """Build a compact LangSmith thread digest."""
     selected = [run for run in runs if _run_metadata(run).get("thread_id") == thread_id]
@@ -899,6 +997,7 @@ def trace_digest(runs: Sequence[Any], thread_id: str) -> dict[str, Any]:
         threshold = max(1000, int(prompt_sizes[0] * 0.1))
         trend = "up" if delta > threshold else "down" if delta < -threshold else "flat"
     recent = sorted(selected, key=lambda run: str(_get(run, "start_time") or ""), reverse=True)[:10]
+    root_tokens = [_root_token_total(root, selected) for root in roots]
     return {
         "thread_id": thread_id,
         "root_runs": [
@@ -906,14 +1005,11 @@ def trace_digest(runs: Sequence[Any], thread_id: str) -> dict[str, Any]:
                 "id": str(_get(run, "id") or ""),
                 "status": _get(run, "status"),
                 "start_time": str(_get(run, "start_time") or ""),
-                "tokens": _token_count(run),
+                "tokens": root_tokens[index],
             }
-            for run in roots
+            for index, run in enumerate(roots)
         ],
-        "total_tokens": (
-            sum(_token_count(run) for run in roots)
-            or sum(_token_count(run) for run in selected if _get(run, "parent_run_id"))
-        ),
+        "total_tokens": sum(root_tokens),
         "errors": errors,
         "recent_activity": [
             {
@@ -1102,6 +1198,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
                     last_recovery_fingerprint = fingerprint
                 else:
                     last_recovery_fingerprint = None
+            poll_id = str(current.get("observed_at") or f"poll-{iterations}")
+            events = assign_poll_id(events, poll_id)
             current_unhandled = {
                 json.dumps(event, sort_keys=True, default=str)
                 for event in events
