@@ -20,7 +20,8 @@ import logging
 import posixpath
 import re
 import warnings
-from typing import Any, NotRequired, cast
+from dataclasses import dataclass
+from typing import Any, Literal, NotRequired, cast
 
 logger = logging.getLogger(__name__)
 
@@ -789,6 +790,25 @@ class PrepareReviewerRunState(PrepareRunState):
     diff_line_set: NotRequired[dict[str, dict[str, set[int]]] | None]
 
 
+@dataclass(frozen=True)
+class ReviewContextBundle:
+    sandbox_backend: SandboxBackendProtocol
+    github_token: str | None
+    work_dir: str
+    repo_owner: str
+    repo_name: str
+    pr_number: int | str
+    pr_url: str
+    base_sha: str
+    head_sha: str
+    repo_ready: bool
+    reviewer_eval: bool
+    diff_text: str
+    diff_line_set: dict[str, dict[str, set[int]]] | None
+    pr_title: str
+    pr_body: str
+
+
 async def _ensure_reviewer_sandbox_for_thread(
     thread_id: str,
     configurable: dict[str, Any],
@@ -822,6 +842,135 @@ async def _ensure_reviewer_sandbox_for_thread(
             repo=repo_for_snapshot,
         ),
         github_token,
+    )
+
+
+async def gather_review_context(
+    thread_id: str,
+    configurable: dict[str, Any],
+    *,
+    diff_mode: Literal["stock", "adversarial"] = "stock",
+) -> ReviewContextBundle:
+    repo_config = configurable.get("repo") or {}
+    sandbox_backend, github_token = await _ensure_reviewer_sandbox_for_thread(
+        thread_id, configurable
+    )
+    work_dir = await aresolve_sandbox_work_dir(sandbox_backend)
+    repo_owner = str(repo_config.get("owner", ""))
+    repo_name = str(repo_config.get("name", ""))
+    base_sha = str(configurable.get("base_sha", "") or "")
+    head_sha = str(configurable.get("head_sha", "") or "")
+    configured_pr_number = configurable.get("pr_number")
+    pr_number: int | str = configured_pr_number if isinstance(configured_pr_number, int) else ""
+    pr_url = str(configurable.get("pr_url", "") or "")
+    last_reviewed_sha = str(configurable.get("last_reviewed_sha", "") or "")
+    is_re_review = bool(configurable.get("re_review"))
+    reviewer_eval = configurable.get("reviewer_eval") is True or configurable.get("eval") is True
+
+    repo_ready = await prepare_review_repo(
+        sandbox_backend,
+        work_dir=work_dir,
+        repo_owner=repo_owner,
+        repo_name=repo_name,
+        head_sha=head_sha,
+        pr_number=pr_number if isinstance(pr_number, int) else None,
+        base_sha=base_sha,
+    )
+
+    stock_can_fetch_pr = (
+        isinstance(pr_number, int) and bool(repo_owner) and bool(repo_name) and bool(github_token)
+    )
+    adversarial_can_use_api = (
+        isinstance(pr_number, int)
+        and bool(repo_owner)
+        and bool(repo_name)
+        and github_token is not None
+    )
+
+    async def _fetch_diff_context() -> tuple[str, dict[str, dict[str, set[int]]] | None]:
+        can_fetch_pr = stock_can_fetch_pr if diff_mode == "stock" else adversarial_can_use_api
+        if diff_mode == "stock" and not can_fetch_pr:
+            return "", None
+        fetched_diff: str | None = None
+        if can_fetch_pr and github_token is not None and isinstance(pr_number, int):
+            if diff_mode == "adversarial" or not (is_re_review and last_reviewed_sha):
+                fetched_diff = await fetch_pr_diff(
+                    owner=repo_owner,
+                    repo=repo_name,
+                    pr_number=pr_number,
+                    token=github_token,
+                )
+                if diff_mode == "stock" and fetched_diff is None:
+                    return "", None
+        if diff_mode == "adversarial" and not (repo_ready and repo_name and base_sha and head_sha):
+            diff_text = fetched_diff or ""
+            return diff_text, compute_diff_line_set(diff_text) if diff_text else None
+        try:
+            diff_base, diff_head, merge_base = review_diff_range(
+                base_sha=base_sha,
+                head_sha=head_sha,
+                last_reviewed_sha=last_reviewed_sha if diff_mode == "stock" else "",
+                re_review=is_re_review if diff_mode == "stock" else False,
+            )
+            materialized = await materialize_review_diff(
+                sandbox_backend,
+                work_dir=f"{work_dir}/{repo_name}",
+                base_ref=diff_base,
+                head_ref=diff_head,
+                merge_base=merge_base,
+                diff_text=fetched_diff,
+            )
+            diff_text = materialized.diff_text
+        except (RuntimeError, ValueError):
+            logger.exception(
+                "Failed to materialize review diff"
+                if diff_mode == "stock"
+                else "Failed to materialize adversarial review diff"
+            )
+            if diff_mode == "stock" and fetched_diff is None:
+                return "", None
+            diff_text = fetched_diff or ""
+        if diff_mode == "adversarial" and not diff_text:
+            return "", None
+        return diff_text, compute_diff_line_set(diff_text)
+
+    async def _fetch_pr_overview() -> tuple[str, str]:
+        can_fetch_pr = stock_can_fetch_pr if diff_mode == "stock" else adversarial_can_use_api
+        if not can_fetch_pr or github_token is None or not isinstance(pr_number, int):
+            return "", ""
+        metadata = await fetch_pr_metadata(
+            owner=repo_owner,
+            repo=repo_name,
+            pr_number=pr_number,
+            token=github_token,
+        )
+        return metadata if metadata is not None else ("", "")
+
+    if diff_mode == "stock":
+        diff_context_task = asyncio.create_task(_fetch_diff_context())
+        pr_overview_task = asyncio.create_task(_fetch_pr_overview())
+        diff_text, diff_line_set = await diff_context_task
+        pr_title, pr_body = await pr_overview_task
+    else:
+        diff_text, diff_line_set = await _fetch_diff_context()
+        pr_title, pr_body = await _fetch_pr_overview()
+
+    return ReviewContextBundle(
+        sandbox_backend=sandbox_backend,
+        github_token=github_token,
+        work_dir=work_dir,
+        repo_owner=repo_owner,
+        repo_name=repo_name,
+        pr_number=pr_number,
+        pr_url=pr_url,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        repo_ready=repo_ready,
+        reviewer_eval=reviewer_eval,
+        diff_text=diff_text,
+        diff_line_set=diff_line_set,
+        pr_title=pr_title,
+        pr_body=pr_body,
     )
 
 
@@ -873,94 +1022,38 @@ class PrepareReviewerRunMiddleware(BasePrepareRunMiddleware):
 
     async def _prepare(self, state: PrepareRunState, runtime: Runtime) -> dict[str, Any]:
         configurable = self._config.get("configurable") or {}
-        repo_config = configurable.get("repo") or {}
-        sandbox_backend, github_token = await _ensure_reviewer_sandbox_for_thread(
-            self._thread_id, configurable
-        )
-        work_dir = await aresolve_sandbox_work_dir(sandbox_backend)
+        review_bundle = await gather_review_context(self._thread_id, configurable)
+        sandbox_backend = review_bundle.sandbox_backend
+        github_token = review_bundle.github_token
+        work_dir = review_bundle.work_dir
+        repo_owner = review_bundle.repo_owner
+        repo_name = review_bundle.repo_name
+        base_sha = review_bundle.base_sha
+        head_sha = review_bundle.head_sha
+        pr_number = review_bundle.pr_number
+        pr_url = review_bundle.pr_url
+        repo_ready = review_bundle.repo_ready
+        reviewer_eval = review_bundle.reviewer_eval
+        pr_diff_text = review_bundle.diff_text
+        pr_diff_line_set = review_bundle.diff_line_set
+        pr_title = review_bundle.pr_title
+        pr_body = review_bundle.pr_body
 
-        repo_owner = str(repo_config.get("owner", ""))
-        repo_name = str(repo_config.get("name", ""))
-        base_sha = str(configurable.get("base_sha", "") or "")
-        head_sha = str(configurable.get("head_sha", "") or "")
-        pr_number = configurable.get("pr_number")
-
-        repo_ready = await prepare_review_repo(
-            sandbox_backend,
-            work_dir=work_dir,
-            repo_owner=repo_owner,
-            repo_name=repo_name,
-            head_sha=head_sha,
-            pr_number=pr_number if isinstance(pr_number, int) else None,
-            base_sha=base_sha,
-        )
         skill_sources: list[str] = []
         if repo_ready and repo_name:
             skill_sources = await materialize_trusted_skills(
                 sandbox_backend, repo_dir=f"{work_dir}/{repo_name}", trusted_ref=base_sha
             )
 
-        pr_url = str(configurable.get("pr_url", "") or "")
         last_reviewed_sha = str(configurable.get("last_reviewed_sha", "") or "")
         is_re_review = bool(configurable.get("re_review"))
         reviewer_event = str(configurable.get("reviewer_event", "") or "")
-        reviewer_eval = (
-            configurable.get("reviewer_eval") is True or configurable.get("eval") is True
-        )
         can_fetch_pr = (
-            pr_number is not None
-            and isinstance(pr_number, int)
+            isinstance(pr_number, int)
             and bool(repo_owner)
             and bool(repo_name)
             and bool(github_token)
         )
-
-        async def _fetch_diff_context() -> tuple[str, dict[str, dict[str, set[int]]] | None]:
-            if not can_fetch_pr or github_token is None or not isinstance(pr_number, int):
-                return "", None
-            fetched_diff: str | None = None
-            if not (is_re_review and last_reviewed_sha):
-                fetched_diff = await fetch_pr_diff(
-                    owner=repo_owner,
-                    repo=repo_name,
-                    pr_number=pr_number,
-                    token=github_token,
-                )
-                if fetched_diff is None:
-                    return "", None
-            try:
-                diff_base, diff_head, merge_base = review_diff_range(
-                    base_sha=base_sha,
-                    head_sha=head_sha,
-                    last_reviewed_sha=last_reviewed_sha,
-                    re_review=is_re_review,
-                )
-                materialized = await materialize_review_diff(
-                    sandbox_backend,
-                    work_dir=f"{work_dir}/{repo_name}",
-                    base_ref=diff_base,
-                    head_ref=diff_head,
-                    merge_base=merge_base,
-                    diff_text=fetched_diff,
-                )
-                diff_text = materialized.diff_text
-            except (RuntimeError, ValueError):
-                logger.exception("Failed to materialize review diff")
-                if fetched_diff is None:
-                    return "", None
-                diff_text = fetched_diff
-            return diff_text, compute_diff_line_set(diff_text)
-
-        async def _fetch_pr_overview() -> tuple[str, str]:
-            if not can_fetch_pr or github_token is None or not isinstance(pr_number, int):
-                return "", ""
-            metadata = await fetch_pr_metadata(
-                owner=repo_owner,
-                repo=repo_name,
-                pr_number=pr_number,
-                token=github_token,
-            )
-            return metadata if metadata is not None else ("", "")
 
         async def _fetch_existing_threads_block() -> str:
             if (
@@ -1029,16 +1122,12 @@ class PrepareReviewerRunMiddleware(BasePrepareRunMiddleware):
                 logger.exception("Failed to prepare PR trace context; continuing without it")
                 return None
 
-        diff_context_task = asyncio.create_task(_fetch_diff_context())
-        pr_overview_task = asyncio.create_task(_fetch_pr_overview())
         existing_threads_task = asyncio.create_task(_fetch_existing_threads_block())
         repo_style_task = asyncio.create_task(_fetch_repo_style_prompt())
         agents_md_task = asyncio.create_task(_fetch_agents_md_context())
         org_guidelines_task = asyncio.create_task(_cached_org_review_guidelines())
         api_standards_task = asyncio.create_task(_cached_api_standards_skill())
         pr_trace_context_task = asyncio.create_task(_prepare_pr_trace_context())
-        diff_context = await diff_context_task
-        pr_diff_text, pr_diff_line_set = diff_context
         scoped_agents_md_task = asyncio.create_task(
             fetch_scoped_agents_md(
                 repo_owner,
@@ -1048,7 +1137,6 @@ class PrepareReviewerRunMiddleware(BasePrepareRunMiddleware):
                 token=github_token,
             )
         )
-        pr_overview = await pr_overview_task
         existing_threads_block = await existing_threads_task
         repo_style_prompt = await repo_style_task
         agents_md_content = await agents_md_task
@@ -1056,7 +1144,6 @@ class PrepareReviewerRunMiddleware(BasePrepareRunMiddleware):
         org_guidelines = await org_guidelines_task
         api_standards_skill = await api_standards_task
         pr_trace_context = await pr_trace_context_task
-        pr_title, pr_body = pr_overview
 
         review_context = ""
         if pr_number is not None and isinstance(pr_number, int):
