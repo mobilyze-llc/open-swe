@@ -32,6 +32,12 @@ exclude, a regex or allowlist that lost an anchor. Do not kill a candidate
 merely for being speculative or dependent on runtime state; kill requires
 proof, not doubt.
 
+For a conventions candidate, judge the changed line against the quoted repository
+rule. Keep confirmed only when the rule exists, applies to that file's directory
+scope, and the changed line violates it; quote both the rule and changed line in
+the evidence. Kill when the rule does not say what the candidate claims, does not
+apply to the file's directory scope, or the alleged violation predates the diff.
+
 Return structured verdicts keyed by candidate ID. Use exactly
 `keep-confirmed`, `keep-plausible`, or `kill`, with evidence quoting or citing
 the deciding line.

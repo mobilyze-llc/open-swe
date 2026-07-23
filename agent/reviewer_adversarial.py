@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from typing import Any, Literal, cast
 
 from deepagents import create_deep_agent
@@ -191,6 +192,9 @@ async def _prepare_context(
         "diff_text": bundle.diff_text,
         "diff_line_set": bundle.diff_line_set,
         "pr_title": bundle.pr_title,
+        "agents_md_content": bundle.agents_md_content,
+        "scoped_agents_md": bundle.scoped_agents_md,
+        "skill_sources": bundle.skill_sources,
     }
     if materialize_path:
         materialized = await materialize_review_diff(
@@ -248,6 +252,65 @@ def _judgment_context(state: AdversarialState) -> str:
     if not parent_review_context:
         return stage_context
     return f"{stage_context}\n\n{parent_review_context}" if stage_context else parent_review_context
+
+
+def _active_finder_names(
+    finder_names: list[str],
+    *,
+    agents_md_content: str | None,
+    scoped_agents_md: Mapping[str, str],
+) -> list[str]:
+    if agents_md_content or scoped_agents_md:
+        return list(finder_names)
+    logger.info("Skipping conventions finder: no repository instructions loaded")
+    return [name for name in finder_names if name != "conventions"]
+
+
+def _finder_payload(name: str, state: Mapping[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "finder_name": name,
+        "diff_path": state["diff_path"],
+        "working_dir": state["working_dir"],
+        "stage_context": state.get("stage_context", ""),
+        "skill_sources": state.get("skill_sources", []),
+    }
+    if name == "conventions":
+        payload["agents_md_content"] = state.get("agents_md_content")
+        payload["scoped_agents_md"] = state.get("scoped_agents_md", {})
+    return payload
+
+
+def _finder_prompt(state: Mapping[str, Any]) -> str:
+    name = cast(str, state["finder_name"])
+    prompt = (
+        f"Review the complete materialized diff at {state['diff_path']} against "
+        f"the checkout at {state['working_dir']}. Review context: "
+        f"{state.get('stage_context', '')}. Return only structured candidate defects."
+    )
+    skill_sources = cast(list[str], state.get("skill_sources", []))
+    if skill_sources:
+        prompt += (
+            "\n\nRepository reviewer skills are available at these read-only source roots:\n"
+            + "\n".join(f"- {path}" for path in skill_sources)
+            + "\nGrep these roots for the SKILL.md matching the area you are reviewing; "
+            "do not load unrelated skills."
+        )
+    if name != "conventions":
+        return prompt
+    instruction_sections: list[str] = []
+    root_instructions = state.get("agents_md_content")
+    if isinstance(root_instructions, str) and root_instructions:
+        instruction_sections.append("### Root repository instructions\n" + root_instructions)
+    scoped_instructions = cast(dict[str, str], state.get("scoped_agents_md", {}))
+    instruction_sections.extend(
+        f"### Scoped repository instructions: {path}\n{content}"
+        for path, content in sorted(
+            scoped_instructions.items(), key=lambda item: (item[0].count("/"), item[0])
+        )
+    )
+    if instruction_sections:
+        prompt += "\n\nRepository instructions to enforce:\n\n" + "\n\n".join(instruction_sections)
+    return prompt
 
 
 def _stage_middleware(extra: list[AgentMiddleware[Any, Any, Any]] | None = None):
@@ -432,7 +495,12 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
                 materialize_path=True,
                 use_gateway=use_gateway,
             )
-            return reset_run_state(prepared, finder_names)
+            active_finder_names = _active_finder_names(
+                finder_names,
+                agents_md_content=cast(str | None, prepared.get("agents_md_content")),
+                scoped_agents_md=cast(dict[str, str], prepared.get("scoped_agents_md", {})),
+            )
+            return reset_run_state(prepared, active_finder_names)
         except Exception as exc:
             return {"error": f"prepare failed: {exc}"}
 
@@ -440,27 +508,12 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
         if state.get("error"):
             return "fail"
         data = cast(dict[str, Any], state)
-        return [
-            Send(
-                "find",
-                {
-                    "finder_name": name,
-                    "diff_path": data["diff_path"],
-                    "working_dir": data["working_dir"],
-                    "stage_context": data.get("stage_context", ""),
-                },
-            )
-            for name in data["finders_expected"]
-        ]
+        return [Send("find", _finder_payload(name, data)) for name in data["finders_expected"]]
 
     async def find(state: AdversarialState) -> dict[str, Any]:
         data = cast(dict[str, Any], state)
         name = cast(str, data["finder_name"])
-        prompt = (
-            f"Review the complete materialized diff at {data['diff_path']} against "
-            f"the checkout at {data['working_dir']}. Review context: "
-            f"{data.get('stage_context', '')}. Return only structured candidate defects."
-        )
+        prompt = _finder_prompt(data)
         try:
             output = cast(FinderOutput, await _run_stage(stage_agents[name], prompt, config))
             result: FinderRun = {
