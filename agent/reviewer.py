@@ -226,6 +226,54 @@ def _repo_checkout_note(
     )
 
 
+def _format_org_review_guidelines_prompt(org_guidelines: str | None) -> str:
+    if not org_guidelines:
+        return ""
+    return (
+        "# Organization-wide review guidelines\n\n"
+        "These guidelines were set by a workspace admin and apply to every "
+        "repository this reviewer covers. Apply them when they agree with the "
+        "global bar above; they refine tone, severity, and what this "
+        "organization typically flags. Repository-specific rules below take "
+        "precedence when they conflict.\n\n"
+        f"{org_guidelines}"
+    )
+
+
+def _format_repo_review_style_prompt(repo_style_prompt: str | None) -> str:
+    if not repo_style_prompt:
+        return ""
+    return (
+        "# Repository-specific review style\n\n"
+        "The following rules were learned from this repository's historical "
+        "PR reviews. Apply them when they agree with the global bar above; "
+        "they refine tone, severity, and what this team typically flags.\n\n"
+        f"{repo_style_prompt}"
+    )
+
+
+def _format_api_standards_prompt(api_standards_skill: str | None) -> str:
+    if not api_standards_skill:
+        return ""
+    return (
+        "# API standards skill\n\n"
+        "Apply this skill ONLY when the PR introduces a new API or modifies "
+        "an existing one (HTTP routes/handlers, RPC or GraphQL endpoints, "
+        "public SDK/library signatures, request/response schemas, status "
+        "codes, headers, or other API contracts). When the diff touches such "
+        "surfaces, verify the change against the best practices below and "
+        "file a finding when a changed line violates them and clears the "
+        "global bar above (anchored, concrete failure mode, in-diff). If the "
+        "PR does not change any API, ignore this section. Do not file "
+        "style-only nits or pre-existing violations outside the diff.\n\n"
+        f"{api_standards_skill}"
+    )
+
+
+def _append_prompt_section(prompt: str, section: str) -> str:
+    return f"{prompt}\n\n{section}" if section else prompt
+
+
 def _reviewer_system_prompt(
     working_dir: str,
     *,
@@ -260,26 +308,8 @@ def _reviewer_system_prompt(
     )
     if reviewer_eval:
         prompt = f"{prompt}\n{REVIEWER_EVAL_PROMPT_SUFFIX}"
-    if org_guidelines:
-        prompt = (
-            f"{prompt}\n\n"
-            "# Organization-wide review guidelines\n\n"
-            "These guidelines were set by a workspace admin and apply to every "
-            "repository this reviewer covers. Apply them when they agree with the "
-            "global bar above; they refine tone, severity, and what this "
-            "organization typically flags. Repository-specific rules below take "
-            "precedence when they conflict.\n\n"
-            f"{org_guidelines}"
-        )
-    if repo_style_prompt:
-        prompt = (
-            f"{prompt}\n\n"
-            "# Repository-specific review style\n\n"
-            "The following rules were learned from this repository's historical "
-            "PR reviews. Apply them when they agree with the global bar above; "
-            "they refine tone, severity, and what this team typically flags.\n\n"
-            f"{repo_style_prompt}"
-        )
+    prompt = _append_prompt_section(prompt, _format_org_review_guidelines_prompt(org_guidelines))
+    prompt = _append_prompt_section(prompt, _format_repo_review_style_prompt(repo_style_prompt))
     if agents_md_content or scoped_agents_md:
         instruction_sections: list[str] = []
         if agents_md_content:
@@ -319,21 +349,7 @@ def _reviewer_system_prompt(
             "listed directory. When instructions conflict, the most deeply "
             "nested applicable file takes precedence.\n\n" + "\n\n".join(instruction_sections)
         )
-    if api_standards_skill:
-        prompt = (
-            f"{prompt}\n\n"
-            "# API standards skill\n\n"
-            "Apply this skill ONLY when the PR introduces a new API or modifies "
-            "an existing one (HTTP routes/handlers, RPC or GraphQL endpoints, "
-            "public SDK/library signatures, request/response schemas, status "
-            "codes, headers, or other API contracts). When the diff touches such "
-            "surfaces, verify the change against the best practices below and "
-            "file a finding when a changed line violates them and clears the "
-            "global bar above (anchored, concrete failure mode, in-diff). If the "
-            "PR does not change any API, ignore this section. Do not file "
-            "style-only nits or pre-existing violations outside the diff.\n\n"
-            f"{api_standards_skill}"
-        )
+    prompt = _append_prompt_section(prompt, _format_api_standards_prompt(api_standards_skill))
     return prompt
 
 
@@ -745,6 +761,29 @@ async def _resolve_grouping_model(
     return _make_model_or_defer(model_id, use_gateway=use_gateway, **model_kwargs)
 
 
+async def _schedule_diff_grouping(
+    *,
+    configurable: dict[str, object],
+    use_gateway: bool,
+    thread_id: str,
+    head_sha: str,
+    diff_text: str,
+) -> None:
+    if configurable.get("reviewer_event") == "finding_reply" or not diff_text or not thread_id:
+        return
+    grouping_model = await _resolve_grouping_model(configurable, use_gateway=use_gateway)
+    grouping_task = asyncio.create_task(
+        maybe_generate_and_store_diff_groups(
+            thread_id=thread_id,
+            head_sha=head_sha,
+            diff_text=diff_text,
+            model=grouping_model,
+        )
+    )
+    _BACKGROUND_TASKS.add(grouping_task)
+    grouping_task.add_done_callback(_on_background_task_done)
+
+
 async def _cached_reviewer_team_defaults():
     return await ttl_cache.cached(
         f"team-default-model-pair:reviewer:{id(get_team_default_model_pair)}",
@@ -807,6 +846,11 @@ class ReviewContextBundle:
     diff_line_set: dict[str, dict[str, set[int]]] | None
     pr_title: str
     pr_body: str
+    existing_threads_block: str = ""
+    org_guidelines: str | None = None
+    repo_style_prompt: str | None = None
+    api_standards_skill: str | None = None
+    pr_trace_context: PRTraceContext | None = None
 
 
 async def _ensure_reviewer_sandbox_for_thread(
@@ -843,6 +887,98 @@ async def _ensure_reviewer_sandbox_for_thread(
         ),
         github_token,
     )
+
+
+async def _fetch_existing_threads_block(
+    *,
+    thread_id: str,
+    repo_owner: str,
+    repo_name: str,
+    pr_number: int | str,
+    github_token: str | None,
+    reviewer_eval: bool,
+) -> str:
+    can_fetch_pr = (
+        isinstance(pr_number, int) and bool(repo_owner) and bool(repo_name) and bool(github_token)
+    )
+    if reviewer_eval or not can_fetch_pr or github_token is None or not isinstance(pr_number, int):
+        return ""
+    try:
+        threads = await fetch_pr_review_threads(
+            owner=repo_owner,
+            repo=repo_name,
+            pr_number=pr_number,
+            token=github_token,
+        )
+        await reconcile_findings_with_review_threads(thread_id, threads)
+        block = _format_pr_review_threads(threads)
+        if block:
+            logger.info(
+                "Loaded %d existing PR review thread(s) into reviewer context for %s/%s#%s",
+                len(threads),
+                repo_owner,
+                repo_name,
+                pr_number,
+            )
+        return block
+    except Exception:
+        logger.exception(
+            "Failed to load existing PR review threads for %s/%s#%s; continuing without comment-awareness context",
+            repo_owner,
+            repo_name,
+            pr_number,
+        )
+        return ""
+
+
+async def _fetch_repo_style_prompt(repo_owner: str, repo_name: str) -> str | None:
+    if not repo_owner or not repo_name:
+        return None
+    from .dashboard.review_styles import get_repo_custom_prompt
+
+    return await get_repo_custom_prompt(repo_owner, repo_name)
+
+
+async def _prepare_pr_trace_context_best_effort(
+    *,
+    configurable: dict[str, Any],
+    sandbox_backend: SandboxBackendProtocol,
+    work_dir: str,
+) -> PRTraceContext | None:
+    try:
+        return await prepare_pr_trace_context(
+            configurable=configurable,
+            sandbox_backend=sandbox_backend,
+            work_dir=work_dir,
+        )
+    except Exception:
+        logger.exception("Failed to prepare PR trace context; continuing without it")
+        return None
+
+
+def _format_parent_review_context(
+    bundle: ReviewContextBundle, *, include_repo_style: bool = True
+) -> str:
+    sections: list[str] = []
+    if bundle.existing_threads_block:
+        sections.append(
+            f"{HISTORICAL_REVIEW_GUIDANCE}\n\n"
+            "## Pre-existing PR review threads\n\n"
+            f"{bundle.existing_threads_block}"
+        )
+    sections.extend(
+        section
+        for section in (
+            _format_org_review_guidelines_prompt(bundle.org_guidelines),
+            _format_repo_review_style_prompt(bundle.repo_style_prompt)
+            if include_repo_style
+            else "",
+            _format_api_standards_prompt(bundle.api_standards_skill),
+            format_pr_trace_context_prompt(bundle.pr_trace_context),
+        )
+        if section
+    )
+    return "\n\n".join(sections)
 
 
 async def gather_review_context(
@@ -955,6 +1091,33 @@ async def gather_review_context(
         diff_text, diff_line_set = await _fetch_diff_context()
         pr_title, pr_body = await _fetch_pr_overview()
 
+    existing_threads_task = asyncio.create_task(
+        _fetch_existing_threads_block(
+            thread_id=thread_id,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            pr_number=pr_number,
+            github_token=github_token,
+            reviewer_eval=reviewer_eval,
+        )
+    )
+    repo_style_task = asyncio.create_task(_fetch_repo_style_prompt(repo_owner, repo_name))
+    org_guidelines_task = asyncio.create_task(_cached_org_review_guidelines())
+    api_standards_task = asyncio.create_task(_cached_api_standards_skill())
+    pr_trace_context_task = asyncio.create_task(
+        _prepare_pr_trace_context_best_effort(
+            configurable=configurable,
+            sandbox_backend=sandbox_backend,
+            work_dir=work_dir,
+        )
+    )
+
+    existing_threads_block = await existing_threads_task
+    repo_style_prompt = await repo_style_task
+    org_guidelines = await org_guidelines_task
+    api_standards_skill = await api_standards_task
+    pr_trace_context = await pr_trace_context_task
+
     return ReviewContextBundle(
         sandbox_backend=sandbox_backend,
         github_token=github_token,
@@ -971,6 +1134,11 @@ async def gather_review_context(
         diff_line_set=diff_line_set,
         pr_title=pr_title,
         pr_body=pr_body,
+        existing_threads_block=existing_threads_block,
+        org_guidelines=org_guidelines,
+        repo_style_prompt=repo_style_prompt,
+        api_standards_skill=api_standards_skill,
+        pr_trace_context=pr_trace_context,
     )
 
 
@@ -1038,6 +1206,11 @@ class PrepareReviewerRunMiddleware(BasePrepareRunMiddleware):
         pr_diff_line_set = review_bundle.diff_line_set
         pr_title = review_bundle.pr_title
         pr_body = review_bundle.pr_body
+        existing_threads_block = review_bundle.existing_threads_block
+        org_guidelines = review_bundle.org_guidelines
+        repo_style_prompt = review_bundle.repo_style_prompt
+        api_standards_skill = review_bundle.api_standards_skill
+        pr_trace_context = review_bundle.pr_trace_context
 
         skill_sources: list[str] = []
         if repo_ready and repo_name:
@@ -1048,54 +1221,6 @@ class PrepareReviewerRunMiddleware(BasePrepareRunMiddleware):
         last_reviewed_sha = str(configurable.get("last_reviewed_sha", "") or "")
         is_re_review = bool(configurable.get("re_review"))
         reviewer_event = str(configurable.get("reviewer_event", "") or "")
-        can_fetch_pr = (
-            isinstance(pr_number, int)
-            and bool(repo_owner)
-            and bool(repo_name)
-            and bool(github_token)
-        )
-
-        async def _fetch_existing_threads_block() -> str:
-            if (
-                reviewer_eval
-                or not can_fetch_pr
-                or github_token is None
-                or not isinstance(pr_number, int)
-            ):
-                return ""
-            try:
-                threads = await fetch_pr_review_threads(
-                    owner=repo_owner,
-                    repo=repo_name,
-                    pr_number=pr_number,
-                    token=github_token,
-                )
-                await reconcile_findings_with_review_threads(self._thread_id, threads)
-                block = _format_pr_review_threads(threads)
-                if block:
-                    logger.info(
-                        "Loaded %d existing PR review thread(s) into reviewer context for %s/%s#%s",
-                        len(threads),
-                        repo_owner,
-                        repo_name,
-                        pr_number,
-                    )
-                return block
-            except Exception:
-                logger.exception(
-                    "Failed to load existing PR review threads for %s/%s#%s; continuing without comment-awareness context",
-                    repo_owner,
-                    repo_name,
-                    pr_number,
-                )
-                return ""
-
-        async def _fetch_repo_style_prompt() -> str | None:
-            if not repo_owner or not repo_name:
-                return None
-            from .dashboard.review_styles import get_repo_custom_prompt
-
-            return await get_repo_custom_prompt(repo_owner, repo_name)
 
         async def _fetch_agents_md_context() -> str | None:
             if not repo_owner or not repo_name or not base_sha:
@@ -1111,23 +1236,7 @@ class PrepareReviewerRunMiddleware(BasePrepareRunMiddleware):
                 )
             return content
 
-        async def _prepare_pr_trace_context() -> PRTraceContext | None:
-            try:
-                return await prepare_pr_trace_context(
-                    configurable=configurable,
-                    sandbox_backend=sandbox_backend,
-                    work_dir=work_dir,
-                )
-            except Exception:
-                logger.exception("Failed to prepare PR trace context; continuing without it")
-                return None
-
-        existing_threads_task = asyncio.create_task(_fetch_existing_threads_block())
-        repo_style_task = asyncio.create_task(_fetch_repo_style_prompt())
         agents_md_task = asyncio.create_task(_fetch_agents_md_context())
-        org_guidelines_task = asyncio.create_task(_cached_org_review_guidelines())
-        api_standards_task = asyncio.create_task(_cached_api_standards_skill())
-        pr_trace_context_task = asyncio.create_task(_prepare_pr_trace_context())
         scoped_agents_md_task = asyncio.create_task(
             fetch_scoped_agents_md(
                 repo_owner,
@@ -1137,13 +1246,8 @@ class PrepareReviewerRunMiddleware(BasePrepareRunMiddleware):
                 token=github_token,
             )
         )
-        existing_threads_block = await existing_threads_task
-        repo_style_prompt = await repo_style_task
         agents_md_content = await agents_md_task
         scoped_agents_md = await scoped_agents_md_task
-        org_guidelines = await org_guidelines_task
-        api_standards_skill = await api_standards_task
-        pr_trace_context = await pr_trace_context_task
 
         review_context = ""
         if pr_number is not None and isinstance(pr_number, int):
@@ -1242,20 +1346,13 @@ class PrepareReviewerRunMiddleware(BasePrepareRunMiddleware):
                     )
                 )
 
-        if reviewer_event != "finding_reply" and pr_diff_text and self._thread_id:
-            grouping_model = await _resolve_grouping_model(
-                configurable, use_gateway=self._use_gateway
-            )
-            grouping_task = asyncio.create_task(
-                maybe_generate_and_store_diff_groups(
-                    thread_id=self._thread_id,
-                    head_sha=head_sha,
-                    diff_text=pr_diff_text,
-                    model=grouping_model,
-                )
-            )
-            _BACKGROUND_TASKS.add(grouping_task)
-            grouping_task.add_done_callback(_on_background_task_done)
+        await _schedule_diff_grouping(
+            configurable=configurable,
+            use_gateway=self._use_gateway,
+            thread_id=self._thread_id,
+            head_sha=head_sha,
+            diff_text=pr_diff_text,
+        )
 
         return {
             "work_dir": work_dir,

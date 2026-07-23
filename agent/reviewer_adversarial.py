@@ -63,8 +63,10 @@ from .reviewer import (
     _cached_review_profile_name,
     _cached_reviewer_team_defaults,
     _ensure_reviewer_sandbox_for_thread,
+    _format_parent_review_context,
     _make_model_or_defer,
     _repo_checkout_note,
+    _schedule_diff_grouping,
     gather_review_context,
 )
 from .runtime import (
@@ -122,7 +124,11 @@ _ = _render_parent_prompt(
 
 
 async def _prepare_context(
-    thread_id: str, configurable: dict[str, Any], *, materialize_path: bool = False
+    thread_id: str,
+    configurable: dict[str, Any],
+    *,
+    materialize_path: bool = False,
+    use_gateway: bool = False,
 ) -> dict[str, Any]:
     if (
         configurable.get("re_review")
@@ -171,11 +177,17 @@ async def _prepare_context(
     if review_context:
         prompt = f"{prompt}\n\n{review_context}"
         context_parts.append(review_context)
+    parent_review_context = _format_parent_review_context(
+        bundle, include_repo_style=not bundle.reviewer_eval
+    )
+    if parent_review_context:
+        prompt = f"{prompt}\n\n{parent_review_context}"
     prepared = {
         "work_dir": bundle.work_dir,
         "working_dir": working_dir,
         "rendered_system_prompt": prompt,
         "stage_context": "\n\n".join(context_parts),
+        "parent_review_context": parent_review_context,
         "diff_text": bundle.diff_text,
         "diff_line_set": bundle.diff_line_set,
         "pr_title": bundle.pr_title,
@@ -190,13 +202,24 @@ async def _prepare_context(
             diff_text=bundle.diff_text,
         )
         prepared["diff_path"] = materialized.path
+    await _schedule_diff_grouping(
+        configurable=configurable,
+        use_gateway=use_gateway,
+        thread_id=thread_id,
+        head_sha=bundle.head_sha,
+        diff_text=bundle.diff_text,
+    )
     return prepared
 
 
 class PrepareAdversarialReviewerRunMiddleware(PrepareReviewerRunMiddleware):
     async def _prepare(self, state: PrepareRunState, runtime: Runtime) -> dict[str, Any]:
         del state, runtime
-        prepared = await _prepare_context(self._thread_id, self._config.get("configurable") or {})
+        prepared = await _prepare_context(
+            self._thread_id,
+            self._config.get("configurable") or {},
+            use_gateway=self._use_gateway,
+        )
         return {
             key: prepared[key]
             for key in ("work_dir", "rendered_system_prompt", "diff_text", "diff_line_set")
@@ -217,6 +240,14 @@ async def _run_stage(
     if not isinstance(structured, BaseModel):
         raise RuntimeError("bounded reviewer stage returned no structured response")
     return structured
+
+
+def _judgment_context(state: AdversarialState) -> str:
+    stage_context = state.get("stage_context", "")
+    parent_review_context = state.get("parent_review_context", "")
+    if not parent_review_context:
+        return stage_context
+    return f"{stage_context}\n\n{parent_review_context}" if stage_context else parent_review_context
 
 
 def _stage_middleware(extra: list[AgentMiddleware[Any, Any, Any]] | None = None):
@@ -396,7 +427,10 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
         del state
         try:
             prepared = await _prepare_context(
-                cast(str, thread_id), configurable, materialize_path=True
+                cast(str, thread_id),
+                configurable,
+                materialize_path=True,
+                use_gateway=use_gateway,
             )
             return reset_run_state(prepared, finder_names)
         except Exception as exc:
@@ -466,7 +500,7 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
         prompt = (
             f"Adjudicate every candidate exactly once by candidate_id against diff "
             f"{state.get('diff_path', '')} and checkout {state.get('working_dir', '')}. "
-            f"Review context: {state.get('stage_context', '')}. Candidates: {candidates}"
+            f"Review context: {_judgment_context(state)}. Candidates: {candidates}"
         )
         try:
             agent = stage_agents.get("adjudicator", parent_adjudicator)
@@ -506,7 +540,7 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
                         f"{state.get('diff_path', '')} and checkout "
                         f"{state.get('working_dir', '')} with PR title "
                         f"{state.get('pr_title', '')!r}. Review context: "
-                        f"{state.get('stage_context', '')}. Current confirmed candidates: {kept}.",
+                        f"{_judgment_context(state)}. Current confirmed candidates: {kept}.",
                         config,
                     ),
                 )
@@ -522,7 +556,7 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
                         await _run_stage(
                             agent,
                             f"Adjudicate every gate candidate exactly once with review context "
-                            f"{state.get('stage_context', '')}: {additions}",
+                            f"{_judgment_context(state)}: {additions}",
                             config,
                         ),
                     )
@@ -544,7 +578,7 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
                         gate_agent,
                         "Judge whether each same-file candidate group has independent failure "
                         f"modes. Return no candidates. Review context: "
-                        f"{state.get('stage_context', '')}. Groups: {collisions}. Candidates: {kept}",
+                        f"{_judgment_context(state)}. Groups: {collisions}. Candidates: {kept}",
                         config,
                     ),
                 )

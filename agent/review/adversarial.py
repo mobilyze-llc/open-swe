@@ -29,6 +29,7 @@ class AdversarialState(TypedDict, total=False):
     working_dir: str
     rendered_system_prompt: str
     stage_context: str
+    parent_review_context: str
     diff_text: str
     diff_line_set: dict[str, Any] | None
     diff_path: str
