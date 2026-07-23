@@ -492,3 +492,24 @@ def test_build_github_issue_prompt_only_wraps_external_comments() -> None:
     assert github_comments.UNTRUSTED_GITHUB_COMMENT_OPEN_TAG in prompt
     assert github_comments.UNTRUSTED_GITHUB_COMMENT_CLOSE_TAG in prompt
     assert "External Untrusted Comments" not in prompt
+
+
+def test_construct_system_prompt_never_mode_has_no_arming_instruction() -> None:
+    prompt = construct_system_prompt(working_dir="/workspace", auto_merge_eligible=False)
+
+    assert "### Auto-Merge Policy" not in prompt
+    assert "gh pr merge <number-or-url> --auto --squash" not in prompt
+    assert "Never directly merge a pull request" in prompt
+    assert "Never use `--admin`" in prompt
+
+
+def test_construct_system_prompt_eligible_mode_owns_draft_and_arms_safely() -> None:
+    prompt = construct_system_prompt(working_dir="/workspace", auto_merge_eligible=True)
+
+    assert "### Auto-Merge Policy" in prompt
+    assert "`draft=false`" in prompt
+    assert "do not later convert the PR back to draft" in prompt
+    assert "GH_TOKEN=dummy gh pr merge <number-or-url> --auto --squash" in prompt
+    assert "`hold merge`" in prompt
+    assert "`hold-merge` label" in prompt
+    assert "never use `--admin`" in prompt

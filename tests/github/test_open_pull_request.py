@@ -46,7 +46,7 @@ class _FakeClient:
         self.get_calls.append({"url": url, "headers": headers, "params": params})
         if self._get is not None:
             return self._get
-        return _FakeResponse(200, {"name": "ok"})
+        return _FakeResponse(200, {"name": "ok", "default_branch": "main"})
 
 
 class _RoutingClient:
@@ -77,7 +77,7 @@ class _RoutingClient:
         for needle, resp in self._get_routes.items():
             if needle in url:
                 return resp
-        return _FakeResponse(200, {"name": "ok"})
+        return _FakeResponse(200, {"name": "ok", "default_branch": "main"})
 
 
 def _install_client(monkeypatch: pytest.MonkeyPatch, client: _FakeClient | _RoutingClient) -> None:
@@ -623,3 +623,119 @@ def test_derive_pr_state_draft() -> None:
 
 def test_derive_pr_state_open() -> None:
     assert opr.derive_pr_state(state="open", merged=False, draft=False) == "open"
+
+
+def test_auto_merge_eligible_forces_non_draft_and_reports_tracking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_config(
+        monkeypatch,
+        {
+            "source": "dashboard",
+            "thread_id": "thread-1",
+            "auto_merge_mode": "always",
+            "require_plan_approval": False,
+        },
+    )
+    _stub_token(monkeypatch)
+    monkeypatch.setattr(opr, "_thread_has_active_auto_merge", lambda *_a: _coro(False))
+    monkeypatch.setattr(opr, "_record_pr_telemetry", lambda **_kw: _coro(True))
+    client = _FakeClient(
+        post=_FakeResponse(
+            201,
+            {"html_url": "https://x/pull/1", "number": 1, "user": {"login": "open-swe[bot]"}},
+        )
+    )
+    _install_client(monkeypatch, client)
+
+    result = _open()
+
+    assert client.post_calls[0]["json"]["draft"] is False
+    assert result["auto_merge_eligible"] is True
+    assert result["auto_merge_tracked"] is True
+
+
+def test_auto_merge_hold_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_config(
+        monkeypatch,
+        {
+            "source": "dashboard",
+            "thread_id": "thread-1",
+            "auto_merge_mode": "always",
+            "merge_hold_requested": True,
+        },
+    )
+    _stub_token(monkeypatch)
+    monkeypatch.setattr(opr, "_thread_has_active_auto_merge", lambda *_a: _coro(False))
+    monkeypatch.setattr(opr, "_record_pr_telemetry", lambda **_kw: _coro(True))
+    client = _FakeClient(
+        post=_FakeResponse(201, {"html_url": "https://x/pull/1", "number": 1, "user": {}})
+    )
+    _install_client(monkeypatch, client)
+
+    result = _open()
+
+    assert client.post_calls[0]["json"]["draft"] is True
+    assert result["auto_merge_eligible"] is False
+
+
+@pytest.mark.asyncio
+async def test_on_plan_approval_requires_gate_and_approved_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_plan(monkeypatch, {"status": "approved", "markdown": "plan"})
+    monkeypatch.setattr(opr, "_thread_has_active_auto_merge", lambda *_a: _coro(False))
+    assert await opr._resolve_auto_merge_eligibility(
+        {
+            "thread_id": "t1",
+            "auto_merge_mode": "on_plan_approval",
+            "require_plan_approval": True,
+        }
+    )
+    assert not await opr._resolve_auto_merge_eligibility(
+        {
+            "thread_id": "t1",
+            "auto_merge_mode": "on_plan_approval",
+            "require_plan_approval": False,
+        }
+    )
+
+
+def test_auto_merge_non_default_base_remains_draft(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_config(
+        monkeypatch,
+        {"source": "dashboard", "thread_id": "thread-1", "auto_merge_mode": "always"},
+    )
+    _stub_token(monkeypatch)
+    monkeypatch.setattr(opr, "_thread_has_active_auto_merge", lambda *_a: _coro(False))
+    monkeypatch.setattr(opr, "_record_pr_telemetry", lambda **_kw: _coro(False))
+    client = _RoutingClient(
+        post=_FakeResponse(201, {"html_url": "u", "number": 1, "user": {}}),
+        get_routes={
+            "/repos/langchain-ai/open-swe/branches/release": _FakeResponse(
+                200, {"name": "release"}
+            ),
+            "/repos/langchain-ai/open-swe/branches/open-swe%2Ffeature": _FakeResponse(
+                200, {"name": "head"}
+            ),
+            "/repos/langchain-ai/open-swe": _FakeResponse(
+                200, {"private": True, "default_branch": "main"}
+            ),
+        },
+    )
+    _install_client(monkeypatch, client)
+
+    result = asyncio.run(
+        opr._open_pull_request(
+            owner="langchain-ai",
+            repo="open-swe",
+            head="open-swe/feature",
+            base="release",
+            title="feat: x",
+            body="body",
+            draft=True,
+        )
+    )
+
+    assert client.post_calls[0]["json"]["draft"] is True
+    assert result["auto_merge_eligible"] is False

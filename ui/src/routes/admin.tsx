@@ -60,6 +60,8 @@ function AdminPage() {
     >
       <GlobalDefaultsSection models={options.data?.models ?? []} />
 
+      <AutoMergeSection />
+
       <LLMGatewaySection />
 
       <FableSection />
@@ -669,6 +671,59 @@ function PRTraceResolutionSection() {
           }
         />
       </div>
+      {error && <p className="px-4 pb-3 text-xs text-destructive">{error}</p>}
+    </SettingsSection>
+  )
+}
+
+function AutoMergeSection() {
+  const qc = useQueryClient()
+  const settings = useQuery({
+    queryKey: ["teamSettings"],
+    queryFn: api.getTeamSettings,
+  })
+  const [error, setError] = useState<string | null>(null)
+  const save = useMutation({
+    mutationFn: (body: TeamSettings) => api.saveTeamSettings(body),
+    onSuccess: (saved) => {
+      qc.setQueryData(["teamSettings"], saved)
+      setError(null)
+    },
+    onError: (e: Error) => setError(e.message),
+  })
+  const mode = settings.data?.auto_merge_mode ?? "never"
+
+  return (
+    <SettingsSection
+      title="Agent pull request merging"
+      description="Controls whether eligible Open SWE pull requests request merge after all protected checks pass."
+    >
+      <SettingsRow
+        label="Auto-merge mode"
+        description="Hold merge requests and the hold-merge label always override this setting."
+        control={
+          <Select
+            value={mode}
+            onValueChange={(next) =>
+              settings.data &&
+              save.mutate({
+                ...settings.data,
+                auto_merge_mode: next,
+              })
+            }
+            disabled={!settings.data || save.isPending}
+          >
+            <SelectTrigger className="w-48">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="never">Never</SelectItem>
+              <SelectItem value="on_plan_approval">On plan approval</SelectItem>
+              <SelectItem value="always">Always</SelectItem>
+            </SelectContent>
+          </Select>
+        }
+      />
       {error && <p className="px-4 pb-3 text-xs text-destructive">{error}</p>}
     </SettingsSection>
   )

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import uuid
 from typing import Any
 from urllib.parse import urlparse
@@ -78,6 +79,17 @@ def _resolve_completion_webhook_url(base: str, secret: str | None) -> str | None
 COMPLETION_WEBHOOK_URL: str | None = _resolve_completion_webhook_url(
     _COMPLETION_WEBHOOK_BASE, _RUN_COMPLETE_SECRET
 )
+
+_HOLD_MERGE_RE = re.compile(r"\bhold(?:\s+|-)merge\b", re.IGNORECASE)
+
+
+def content_requests_merge_hold(content: ContentBlocks) -> bool:
+    """Return whether dispatch content explicitly asks to hold merge."""
+    if isinstance(content, str):
+        text = content
+    else:
+        text = "\n".join(str(block.get("text", "")) for block in content if isinstance(block, dict))
+    return _HOLD_MERGE_RE.search(text) is not None
 
 
 def _langgraph_url() -> str:
@@ -165,6 +177,20 @@ async def dispatch_agent_run(
     contract. ``source`` is for logging/metadata only; ``assistant_id`` selects
     the graph (``"agent"`` or ``"reviewer"``).
     """
+    configurable = dict(configurable)
+    configurable["merge_hold_requested"] = configurable.get(
+        "merge_hold_requested"
+    ) is True or content_requests_merge_hold(content)
+    run_client = client or dispatch_client()
+    if configurable["merge_hold_requested"] is True:
+        await run_client.threads.create(
+            thread_id=thread_id,
+            metadata={"merge_hold_requested": True},
+            if_exists="do_nothing",
+        )
+        await run_client.threads.update(
+            thread_id=thread_id, metadata={"merge_hold_requested": True}
+        )
     return await create_durable_run(
         thread_id,
         assistant_id,
@@ -172,5 +198,5 @@ async def dispatch_agent_run(
         config={"configurable": configurable},
         metadata=metadata or {},
         source=source,
-        client=client or dispatch_client(),
+        client=run_client,
     )

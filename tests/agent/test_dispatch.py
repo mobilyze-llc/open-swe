@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -57,9 +58,16 @@ class _FakeRuns:
         return {"run_id": "run-1"}
 
 
+class _FakeThreads:
+    def __init__(self) -> None:
+        self.create = AsyncMock(return_value=None)
+        self.update = AsyncMock(return_value=None)
+
+
 class _FakeClient:
     def __init__(self) -> None:
         self.runs = _FakeRuns()
+        self.threads = _FakeThreads()
 
 
 @pytest.mark.asyncio
@@ -110,3 +118,35 @@ async def test_create_durable_run_preserves_existing_prepare_id_and_stream_kwarg
     assert created["stream_mode"] == ["values"]
     assert created["stream_resumable"] is True
     assert created["config"]["configurable"]["prepare_run_id"] == "existing"
+
+
+def test_content_requests_merge_hold_accepts_phrase_and_label() -> None:
+    from agent.dispatch import content_requests_merge_hold
+
+    assert content_requests_merge_hold("Please HOLD MERGE after approval")
+    assert content_requests_merge_hold([{"type": "text", "text": "apply hold-merge"}])
+    assert not content_requests_merge_hold("merge when clean")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_persists_merge_hold_before_starting_run() -> None:
+    client = _FakeClient()
+
+    await dispatch.dispatch_agent_run(
+        "thread-1",
+        "Please hold merge after implementation",
+        {"thread_id": "thread-1"},
+        source="test",
+        client=client,
+    )
+
+    client.threads.create.assert_awaited_once_with(
+        thread_id="thread-1",
+        metadata={"merge_hold_requested": True},
+        if_exists="do_nothing",
+    )
+    client.threads.update.assert_awaited_once_with(
+        thread_id="thread-1", metadata={"merge_hold_requested": True}
+    )
+    created = client.runs.created[0]
+    assert created["config"]["configurable"]["merge_hold_requested"] is True

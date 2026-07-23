@@ -29,6 +29,8 @@ class PlanModeState(AgentState):
     # Declared so ``enter_plan_mode``'s Command update is a tracked channel that
     # this middleware can read back from ``request.state``.
     plan_mode: NotRequired[bool]
+    auto_merge_eligible: NotRequired[bool]
+    merge_hold_requested: NotRequired[bool]
 
 
 def _tool_name(tool: BaseTool | dict[str, Any] | Any) -> str | None:

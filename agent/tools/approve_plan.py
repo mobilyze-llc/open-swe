@@ -20,7 +20,9 @@ from ..dashboard.plan_store import (
     list_plan_comments,
     set_plan_status,
 )
+from ..dashboard.team_settings import AUTO_MERGE_ALWAYS, AUTO_MERGE_ON_PLAN_APPROVAL
 from ..dashboard.thread_api import _user_owns_thread
+from ..dispatch import content_requests_merge_hold
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,8 @@ logger = logging.getLogger(__name__)
 class ApprovePlanState(TypedDict, total=False):
     plan_mode: bool
     plan_approval_blocked: bool
+    auto_merge_eligible: bool
+    merge_hold_requested: bool
 
 
 async def approve_plan(
@@ -66,6 +70,19 @@ async def approve_plan(
         comments = await list_plan_comments(str(thread_id), raise_on_error=True)
         feedback = _format_comments(comments)
         await set_plan_status(str(thread_id), PLAN_STATUS_APPROVED, plan_mode=False)
+        mode = configurable.get("auto_merge_mode")
+        hold_merge = (
+            configurable.get("merge_hold_requested") is True
+            or content_requests_merge_hold(feedback)
+            or content_requests_merge_hold(plan_markdown)
+        )
+        auto_merge_eligible = not hold_merge and (
+            mode == AUTO_MERGE_ALWAYS
+            or (
+                mode == AUTO_MERGE_ON_PLAN_APPROVAL
+                and configurable.get("require_plan_approval") is True
+            )
+        )
     except Exception as exc:  # noqa: BLE001
         logger.exception("approve_plan failed for thread %s", thread_id)
         return {"success": False, "error": f"failed to approve plan: {exc}"}
@@ -73,9 +90,13 @@ async def approve_plan(
     return Command(
         update={
             "plan_mode": False,
+            "auto_merge_eligible": auto_merge_eligible,
+            "merge_hold_requested": hold_merge,
             "messages": [
                 ToolMessage(
-                    content=_approved_message(plan_markdown, feedback),
+                    content=_approved_message(
+                        plan_markdown, feedback, auto_merge_eligible=auto_merge_eligible
+                    ),
                     tool_call_id=tool_call_id,
                 )
             ],
@@ -128,7 +149,9 @@ def _format_comments(comments: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _approved_message(plan_markdown: str, feedback: str) -> str:
+def _approved_message(
+    plan_markdown: str, feedback: str, *, auto_merge_eligible: bool = False
+) -> str:
     if plan_markdown:
         message = (
             "Plan mode is now inactive because the plan was approved. "
@@ -142,4 +165,11 @@ def _approved_message(plan_markdown: str, feedback: str) -> str:
         )
     if feedback:
         message += "\n\nAlso take this reviewer feedback into account:\n\n" + feedback
+    if auto_merge_eligible:
+        message += (
+            "\n\nThis approved run is eligible for merge-on-clean. Open the PR non-draft "
+            "and, after open_pull_request reports auto_merge_eligible=true, arm only with "
+            "GH_TOKEN=dummy gh pr merge <number-or-url> --auto --squash. Never directly "
+            "merge or use --admin."
+        )
     return message

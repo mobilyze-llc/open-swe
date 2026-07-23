@@ -100,6 +100,11 @@ async def _capture_create_deep_agent_kwargs(
             new_callable=AsyncMock,
             return_value=require_plan_approval,
         ),
+        patch(
+            "agent.server._cached_auto_merge_mode",
+            new_callable=AsyncMock,
+            return_value=server.AUTO_MERGE_NEVER,
+        ),
         patch("agent.server.load_profile", new_callable=AsyncMock, return_value=None),
         patch("agent.server.fallback_model_id_for", return_value=None),
         patch("agent.server.make_model", make_model),
@@ -307,7 +312,14 @@ async def test_policy_unset_preserves_legacy_tool_and_middleware_wiring() -> Non
     bound_config = captured["bound_config"]
     assert isinstance(bound_config, dict)
     baseline_configurable = _base_config().get("configurable")
-    assert bound_config["configurable"] == baseline_configurable
+    assert isinstance(baseline_configurable, dict)
+    assert bound_config["configurable"] == {
+        **baseline_configurable,
+        "auto_merge_mode": server.AUTO_MERGE_NEVER,
+        "require_plan_approval": False,
+        "auto_merge_eligible": False,
+        "merge_hold_requested": False,
+    }
 
 
 @pytest.mark.asyncio
@@ -437,3 +449,47 @@ async def test_voluntary_plan_rejection_followup_keeps_approve_plan_available(
     plan_mode = _plan_mode_middleware(captured)
     assert plan_mode._initial is True
     assert "approve_plan" not in plan_mode._excluded
+
+
+@pytest.mark.parametrize(
+    ("mode", "gate", "approved", "hold", "expected"),
+    [
+        (server.AUTO_MERGE_NEVER, False, False, False, False),
+        (server.AUTO_MERGE_ALWAYS, False, False, False, True),
+        (server.AUTO_MERGE_ALWAYS, True, True, True, False),
+        (server.AUTO_MERGE_ON_PLAN_APPROVAL, True, True, False, True),
+        (server.AUTO_MERGE_ON_PLAN_APPROVAL, True, False, False, False),
+        (server.AUTO_MERGE_ON_PLAN_APPROVAL, False, True, False, False),
+        (server.AUTO_MERGE_ON_PLAN_APPROVAL, True, True, True, False),
+    ],
+)
+def test_auto_merge_eligibility_matrix(
+    mode: server.AutoMergeMode,
+    gate: bool,
+    approved: bool,
+    hold: bool,
+    expected: bool,
+) -> None:
+    assert (
+        server._auto_merge_eligible(
+            mode,
+            require_plan_approval=gate,
+            plan_approved=approved,
+            hold_merge=hold,
+        )
+        is expected
+    )
+
+
+@pytest.mark.asyncio
+async def test_cached_auto_merge_policy_cold_failure_defaults_never() -> None:
+    server.ttl_cache.clear()
+    try:
+        with patch(
+            "agent.server.get_team_auto_merge_mode",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("store unavailable"),
+        ):
+            assert await server._cached_auto_merge_mode() == server.AUTO_MERGE_NEVER
+    finally:
+        server.ttl_cache.clear()
