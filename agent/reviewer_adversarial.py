@@ -44,7 +44,9 @@ from .review.adversarial import (
     apply_independence,
     configured_model_pair,
     dedupe_candidates,
+    finding_description,
     gate_triggers,
+    merge_kept_candidates,
     publication_blocker,
     reset_run_state,
     validate_verdicts,
@@ -509,26 +511,6 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
                 if output.independence:
                     raise RuntimeError("re-read gate returned unexpected independence decisions")
                 additions = dedupe_candidates([item.model_dump() for item in output.candidates])
-                existing = {
-                    (
-                        item["file"],
-                        item["start_line"],
-                        item["end_line"],
-                        item["failure_mode"].casefold(),
-                    )
-                    for item in kept
-                }
-                additions = [
-                    item
-                    for item in additions
-                    if (
-                        item["file"],
-                        item["start_line"],
-                        item["end_line"],
-                        item["failure_mode"].casefold(),
-                    )
-                    not in existing
-                ]
                 for index, item in enumerate(additions):
                     item["candidate_id"] = f"g{index + 1}"
                 if additions:
@@ -549,6 +531,7 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
                         for item in additions
                         if by_id[item["candidate_id"]].verdict == "keep-confirmed"
                     )
+                    kept = merge_kept_candidates(kept)
             _, collisions = gate_triggers(state.get("diff_text", ""), kept)
             if collisions:
                 if "same-file-independence" not in triggers:
@@ -594,11 +577,10 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
                     category=candidate["category"],
                     file=candidate["file"],
                     title=" ".join(candidate["failure_mode"].split()[:10]),
-                    description=(
-                        f"{candidate['failure_mode']}\n\nChanged line: `{candidate['quoted_line']}`"
-                    ),
+                    description=finding_description(candidate),
                     start_line=candidate["start_line"],
                     end_line=candidate["end_line"],
+                    side=candidate["side"],
                     state=cast(dict[str, Any], state),
                 )
                 if not result.get("success"):

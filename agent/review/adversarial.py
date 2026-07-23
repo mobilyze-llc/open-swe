@@ -54,6 +54,7 @@ class CandidateDraft(BaseModel):
     end_line: int = Field(ge=1)
     quoted_line: str = Field(min_length=1)
     failure_mode: str = Field(min_length=1)
+    side: Literal["LEFT", "RIGHT"]
     severity: Literal["low", "medium", "high", "critical"]
     category: str = Field(default="correctness", min_length=1)
 
@@ -66,6 +67,15 @@ class CandidateDraft(BaseModel):
 
 class Candidate(CandidateDraft):
     candidate_id: str
+    affected_locations: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def populate_location(self) -> Candidate:
+        if not self.affected_locations:
+            self.affected_locations = [
+                f"{self.file}:{self.start_line}-{self.end_line} ({self.side})"
+            ]
+        return self
 
 
 class FinderOutput(BaseModel):
@@ -102,6 +112,14 @@ class GateOutput(BaseModel):
 
     candidates: list[CandidateDraft] = Field(default_factory=list)
     independence: list[IndependenceDecision] = Field(default_factory=list)
+
+
+def finding_description(candidate: Mapping[str, Any]) -> str:
+    description = f"{candidate['failure_mode']}\n\nChanged line: `{candidate['quoted_line']}`"
+    locations = candidate.get("affected_locations", [])
+    if len(locations) > 1:
+        description += "\n\nAffected locations: " + ", ".join(locations)
+    return description
 
 
 def reset_run_state(prepared: Mapping[str, Any], finder_names: list[str]) -> dict[str, Any]:
@@ -162,33 +180,54 @@ def apply_independence(
 
 
 def dedupe_candidates(drafts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: list[CandidateDraft] = []
-    for raw in drafts:
-        draft = CandidateDraft.model_validate(raw)
+    parsed = sorted(
+        (CandidateDraft.model_validate(raw) for raw in drafts),
+        key=lambda item: (item.file, item.start_line, item.end_line, item.failure_mode),
+    )
+    merged: dict[str, tuple[CandidateDraft, list[str]]] = {}
+    for draft in parsed:
         key = " ".join(draft.failure_mode.casefold().split())
-        duplicate = next(
-            (
-                item
-                for item in merged
-                if item.file == draft.file
-                and " ".join(item.failure_mode.casefold().split()) == key
-                and item.start_line <= draft.end_line
-                and draft.start_line <= item.end_line
-            ),
-            None,
-        )
-        if duplicate is None:
-            merged.append(draft)
-        else:
-            duplicate.start_line = min(duplicate.start_line, draft.start_line)
-            duplicate.end_line = max(duplicate.end_line, draft.end_line)
-            if SEVERITY_ORDER[draft.severity] > SEVERITY_ORDER[duplicate.severity]:
-                duplicate.severity = draft.severity
-    merged.sort(key=lambda item: (item.file, item.start_line, item.end_line, item.failure_mode))
+        location = f"{draft.file}:{draft.start_line}-{draft.end_line} ({draft.side})"
+        if key not in merged:
+            merged[key] = (draft, [location])
+            continue
+        existing, locations = merged[key]
+        if location not in locations:
+            locations.append(location)
+        if SEVERITY_ORDER[draft.severity] > SEVERITY_ORDER[existing.severity]:
+            existing.severity = draft.severity
+    ordered = sorted(
+        merged.values(),
+        key=lambda item: (item[0].file, item[0].start_line, item[0].end_line, item[0].failure_mode),
+    )
     return [
-        Candidate(candidate_id=f"c{index + 1}", **item.model_dump()).model_dump()
-        for index, item in enumerate(merged)
+        Candidate(
+            candidate_id=f"c{index + 1}",
+            affected_locations=locations,
+            **draft.model_dump(),
+        ).model_dump()
+        for index, (draft, locations) in enumerate(ordered)
     ]
+
+
+def merge_kept_candidates(kept: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    parsed = sorted(
+        (Candidate.model_validate(item) for item in kept),
+        key=lambda item: (item.file, item.start_line, item.end_line, item.failure_mode),
+    )
+    merged: dict[str, Candidate] = {}
+    for candidate in parsed:
+        key = " ".join(candidate.failure_mode.casefold().split())
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = candidate
+            continue
+        existing.affected_locations = list(
+            dict.fromkeys([*existing.affected_locations, *candidate.affected_locations])
+        )
+        if SEVERITY_ORDER[candidate.severity] > SEVERITY_ORDER[existing.severity]:
+            existing.severity = candidate.severity
+    return [item.model_dump() for item in merged.values()]
 
 
 def validate_verdicts(

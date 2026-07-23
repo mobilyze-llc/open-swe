@@ -523,6 +523,7 @@ def _candidate(candidate_id: str, file: str = "src/app.py") -> dict[str, object]
         "failure_mode": f"failure {candidate_id}",
         "severity": "high",
         "category": "correctness",
+        "side": "RIGHT",
     }
 
 
@@ -630,6 +631,81 @@ def test_gate_policy_handles_quoted_paths() -> None:
         '--- "a/src/my file.py"\n+++ "b/src/my file.py"\n-old\n+new\n'
     )
     assert changed_prefix_counts(quoted) == {"src": 2}
+
+
+def test_dedupe_merges_cross_file_failure_and_preserves_diff_side() -> None:
+    from pydantic import ValidationError
+
+    from agent.review.adversarial import CandidateDraft, dedupe_candidates, merge_kept_candidates
+
+    candidates = dedupe_candidates(
+        [
+            {
+                "file": "src/a.py",
+                "start_line": 4,
+                "end_line": 4,
+                "quoted_line": "removed_guard()",
+                "failure_mode": "missing guard allows invalid state",
+                "severity": "high",
+                "side": "LEFT",
+            },
+            {
+                "file": "lib/b.py",
+                "start_line": 9,
+                "end_line": 9,
+                "quoted_line": "removed_guard()",
+                "failure_mode": "  Missing guard allows invalid state ",
+                "severity": "medium",
+                "side": "LEFT",
+            },
+        ]
+    )
+    assert len(candidates) == 1
+    assert candidates[0]["side"] == "LEFT"
+    assert candidates[0]["affected_locations"] == [
+        "lib/b.py:9-9 (LEFT)",
+        "src/a.py:4-4 (LEFT)",
+    ]
+    gate_duplicate = {
+        **candidates[0],
+        "candidate_id": "g1",
+        "file": "other/c.py",
+        "start_line": 12,
+        "end_line": 12,
+        "quoted_line": "removed_guard()",
+        "affected_locations": ["other/c.py:12-12 (LEFT)"],
+    }
+    merged = merge_kept_candidates([candidates[0], gate_duplicate])
+    assert len(merged) == 1
+    assert merged[0]["affected_locations"] == [
+        "lib/b.py:9-9 (LEFT)",
+        "src/a.py:4-4 (LEFT)",
+        "other/c.py:12-12 (LEFT)",
+    ]
+    with pytest.raises(ValidationError):
+        CandidateDraft.model_validate(
+            {
+                "file": "src/a.py",
+                "start_line": 1,
+                "end_line": 1,
+                "quoted_line": "removed",
+                "failure_mode": "missing side",
+                "severity": "high",
+            }
+        )
+    with pytest.raises(ValidationError):
+        CandidateDraft.model_validate(
+            {
+                "file": "src/a.py",
+                "start_line": 1,
+                "end_line": 1,
+                "quoted_line": "removed",
+                "failure_mode": "fabricated locations",
+                "severity": "high",
+                "side": "LEFT",
+                "affected_locations": ["fake.py:1-1 (RIGHT)"],
+            }
+        )
 
 
 def test_gate_added_same_file_candidate_requires_independence() -> None:
@@ -754,6 +830,7 @@ async def test_adjudication_barrier_controls_single_publish(
         "failure_mode": "returns the wrong value",
         "severity": "high",
         "category": "correctness",
+        "side": "LEFT",
     }
 
     async def run_stage(graph: object, *_args: object, **_kwargs: object) -> Any:
@@ -847,6 +924,8 @@ async def test_adjudication_barrier_controls_single_publish(
     if publishes:
         assert result["publication"]["review_id"] == 7
         add.assert_awaited_once()
+        assert add.await_args is not None
+        assert add.await_args.kwargs["side"] == "LEFT"
         publish.assert_awaited_once()
     else:
         assert "adjudication failed" in result["error"]
@@ -897,6 +976,7 @@ async def test_compiled_graph_runs_all_prepublish_gates_with_bounded_passes() ->
                             quoted_line=f"changed_{line}",
                             failure_mode=f"failure {line}",
                             severity="high",
+                            side="RIGHT",
                         )
                         for line in (1, 2)
                     ]

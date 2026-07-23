@@ -15,7 +15,7 @@ checkout path. Read the actual code around every relevant hunk. Use
 configuration rather than reasoning from the diff alone.
 
 Return structured candidates with the file path, start and end line numbers,
-the quoted changed line, concrete failure mode, category, and suggested severity. Candidates are
+the quoted changed line, diff side (`LEFT` for a deleted line and `RIGHT` otherwise), concrete failure mode, category, and suggested severity. Candidates are
 pre-adjudication material, not published findings: pass through every
 candidate with a nameable, user-visible failure scenario, and do not silently
 drop half-believed candidates - an independent adjudication pass judges them
