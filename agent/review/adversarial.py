@@ -184,29 +184,37 @@ def dedupe_candidates(drafts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         (CandidateDraft.model_validate(raw) for raw in drafts),
         key=lambda item: (item.file, item.start_line, item.end_line, item.failure_mode),
     )
-    merged: dict[str, tuple[CandidateDraft, list[str]]] = {}
+    merged: list[tuple[CandidateDraft, list[str]]] = []
     for draft in parsed:
         key = " ".join(draft.failure_mode.casefold().split())
+        duplicate = next(
+            (
+                item
+                for item in merged
+                if item[0].file == draft.file
+                and item[0].side == draft.side
+                and " ".join(item[0].failure_mode.casefold().split()) == key
+                and item[0].start_line <= draft.end_line
+                and draft.start_line <= item[0].end_line
+            ),
+            None,
+        )
         location = f"{draft.file}:{draft.start_line}-{draft.end_line} ({draft.side})"
-        if key not in merged:
-            merged[key] = (draft, [location])
+        if duplicate is None:
+            merged.append((draft, [location]))
             continue
-        existing, locations = merged[key]
+        existing, locations = duplicate
         if location not in locations:
             locations.append(location)
         if SEVERITY_ORDER[draft.severity] > SEVERITY_ORDER[existing.severity]:
             existing.severity = draft.severity
-    ordered = sorted(
-        merged.values(),
-        key=lambda item: (item[0].file, item[0].start_line, item[0].end_line, item[0].failure_mode),
-    )
     return [
         Candidate(
             candidate_id=f"c{index + 1}",
             affected_locations=locations,
             **draft.model_dump(),
         ).model_dump()
-        for index, (draft, locations) in enumerate(ordered)
+        for index, (draft, locations) in enumerate(merged)
     ]
 
 

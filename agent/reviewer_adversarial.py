@@ -473,11 +473,13 @@ async def get_reviewer_adversarial_agent(config: RunnableConfig) -> Pregel:
             output = cast(VerdictBatch, await _run_stage(agent, prompt, config))
             verdicts = [item.model_dump() for item in output.verdicts]
             by_id = validate_verdicts(candidates, verdicts)
-            kept = [
-                item
-                for item in candidates
-                if by_id[item["candidate_id"]].verdict == "keep-confirmed"
-            ]
+            kept = merge_kept_candidates(
+                [
+                    item
+                    for item in candidates
+                    if by_id[item["candidate_id"]].verdict == "keep-confirmed"
+                ]
+            )
             return {"verdicts": verdicts, "kept_candidates": kept}
         except Exception as exc:
             return {"error": f"adjudication failed: {exc}"}

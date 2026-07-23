@@ -633,7 +633,7 @@ def test_gate_policy_handles_quoted_paths() -> None:
     assert changed_prefix_counts(quoted) == {"src": 2}
 
 
-def test_dedupe_merges_cross_file_failure_and_preserves_diff_side() -> None:
+def test_dedupe_merges_only_confirmed_cross_file_locations() -> None:
     from pydantic import ValidationError
 
     from agent.review.adversarial import CandidateDraft, dedupe_candidates, merge_kept_candidates
@@ -660,14 +660,22 @@ def test_dedupe_merges_cross_file_failure_and_preserves_diff_side() -> None:
             },
         ]
     )
-    assert len(candidates) == 1
-    assert candidates[0]["side"] == "LEFT"
-    assert candidates[0]["affected_locations"] == [
+    assert len(candidates) == 2
+    assert [item["affected_locations"] for item in candidates] == [
+        ["lib/b.py:9-9 (LEFT)"],
+        ["src/a.py:4-4 (LEFT)"],
+    ]
+    assert merge_kept_candidates([candidates[0]])[0]["affected_locations"] == [
+        "lib/b.py:9-9 (LEFT)"
+    ]
+    confirmed = merge_kept_candidates(candidates)
+    assert len(confirmed) == 1
+    assert confirmed[0]["affected_locations"] == [
         "lib/b.py:9-9 (LEFT)",
         "src/a.py:4-4 (LEFT)",
     ]
     gate_duplicate = {
-        **candidates[0],
+        **confirmed[0],
         "candidate_id": "g1",
         "file": "other/c.py",
         "start_line": 12,
@@ -675,8 +683,7 @@ def test_dedupe_merges_cross_file_failure_and_preserves_diff_side() -> None:
         "quoted_line": "removed_guard()",
         "affected_locations": ["other/c.py:12-12 (LEFT)"],
     }
-    merged = merge_kept_candidates([candidates[0], gate_duplicate])
-    assert len(merged) == 1
+    merged = merge_kept_candidates([confirmed[0], gate_duplicate])
     assert merged[0]["affected_locations"] == [
         "lib/b.py:9-9 (LEFT)",
         "src/a.py:4-4 (LEFT)",
