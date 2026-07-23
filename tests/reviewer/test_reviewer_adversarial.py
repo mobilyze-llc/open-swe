@@ -149,17 +149,17 @@ async def test_prepare_default_profile_matches_definition_prompt() -> None:
 
     with (
         patch(
-            "agent.reviewer_adversarial._ensure_reviewer_sandbox_for_thread",
+            "agent.reviewer._ensure_reviewer_sandbox_for_thread",
             new_callable=AsyncMock,
             return_value=(MagicMock(), None),
         ),
         patch(
-            "agent.reviewer_adversarial.aresolve_sandbox_work_dir",
+            "agent.reviewer.aresolve_sandbox_work_dir",
             new_callable=AsyncMock,
             return_value="/workspace",
         ),
         patch(
-            "agent.reviewer_adversarial.prepare_review_repo",
+            "agent.reviewer.prepare_review_repo",
             new_callable=AsyncMock,
             return_value=True,
         ),
@@ -229,32 +229,32 @@ async def test_prepare_renders_definition_prompt(tmp_path: Path) -> None:
 
     with (
         patch(
-            "agent.reviewer_adversarial._ensure_reviewer_sandbox_for_thread",
+            "agent.reviewer._ensure_reviewer_sandbox_for_thread",
             new_callable=AsyncMock,
             return_value=(backend, "token"),
         ),
         patch(
-            "agent.reviewer_adversarial.aresolve_sandbox_work_dir",
+            "agent.reviewer.aresolve_sandbox_work_dir",
             new_callable=AsyncMock,
             return_value="/workspace",
         ),
         patch(
-            "agent.reviewer_adversarial.prepare_review_repo",
+            "agent.reviewer.prepare_review_repo",
             new_callable=AsyncMock,
             return_value=True,
         ),
         patch(
-            "agent.reviewer_adversarial.fetch_pr_diff",
+            "agent.reviewer.fetch_pr_diff",
             new_callable=AsyncMock,
             return_value=diff,
         ),
         patch(
-            "agent.reviewer_adversarial.materialize_review_diff",
+            "agent.reviewer.materialize_review_diff",
             new_callable=AsyncMock,
             return_value=MagicMock(diff_text=diff),
         ),
         patch(
-            "agent.reviewer_adversarial.fetch_pr_metadata",
+            "agent.reviewer.fetch_pr_metadata",
             new_callable=AsyncMock,
             return_value=("A title", "A body"),
         ),
@@ -322,31 +322,31 @@ async def test_prepare_materializes_diff_without_api_token() -> None:
 
     with (
         patch(
-            "agent.reviewer_adversarial._ensure_reviewer_sandbox_for_thread",
+            "agent.reviewer._ensure_reviewer_sandbox_for_thread",
             new_callable=AsyncMock,
             return_value=(MagicMock(), None),
         ),
         patch(
-            "agent.reviewer_adversarial.aresolve_sandbox_work_dir",
+            "agent.reviewer.aresolve_sandbox_work_dir",
             new_callable=AsyncMock,
             return_value="/workspace",
         ),
         patch(
-            "agent.reviewer_adversarial.prepare_review_repo",
+            "agent.reviewer.prepare_review_repo",
             new_callable=AsyncMock,
             return_value=True,
         ),
         patch(
-            "agent.reviewer_adversarial.fetch_pr_diff",
+            "agent.reviewer.fetch_pr_diff",
             new_callable=AsyncMock,
         ) as fetch_diff,
         patch(
-            "agent.reviewer_adversarial.materialize_review_diff",
+            "agent.reviewer.materialize_review_diff",
             new_callable=AsyncMock,
             return_value=MagicMock(diff_text=diff),
         ) as materialize,
         patch(
-            "agent.reviewer_adversarial.fetch_pr_metadata",
+            "agent.reviewer.fetch_pr_metadata",
             new_callable=AsyncMock,
         ) as fetch_metadata,
     ):
@@ -509,17 +509,17 @@ async def test_custom_profile_applies_pins_while_body_is_ignored(
     assert prepare._prepare_config_fingerprint()["review_profile"] == profile.name
     with (
         patch(
-            "agent.reviewer_adversarial._ensure_reviewer_sandbox_for_thread",
+            "agent.reviewer._ensure_reviewer_sandbox_for_thread",
             new_callable=AsyncMock,
             return_value=(MagicMock(), None),
         ),
         patch(
-            "agent.reviewer_adversarial.aresolve_sandbox_work_dir",
+            "agent.reviewer.aresolve_sandbox_work_dir",
             new_callable=AsyncMock,
             return_value="/workspace",
         ),
         patch(
-            "agent.reviewer_adversarial.prepare_review_repo",
+            "agent.reviewer.prepare_review_repo",
             new_callable=AsyncMock,
             return_value=True,
         ),
