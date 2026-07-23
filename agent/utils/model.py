@@ -33,6 +33,19 @@ def _env_enabled(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_nonnegative_int(name: str) -> int | None:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a non-negative integer") from exc
+    if parsed < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return parsed
+
+
 async def close_cached_models() -> None:
     models = list(_MODEL_CACHE.values())
     _MODEL_CACHE.clear()
@@ -50,7 +63,7 @@ async def close_cached_models() -> None:
                 await result
 
 
-OpenAIReasoningEffort = Literal["none", "low", "medium", "high", "xhigh"]
+OpenAIReasoningEffort = Literal["none", "low", "medium", "high", "xhigh", "max"]
 # OpenAI's Responses API only returns human-readable reasoning text when a
 # summary is requested; without it, reasoning happens silently (billed in
 # output tokens) and the reasoning content block arrives empty.
@@ -145,7 +158,19 @@ def make_model(model_id: str, *, use_gateway: bool | None = None, **kwargs: Unpa
     endpoint_owns_retries = routed_through_direct_openai_base_url and _env_enabled(
         "OPENAI_BASE_URL_OWNS_RETRIES"
     )
-    model_kwargs.setdefault("max_retries", 0 if endpoint_owns_retries else DEFAULT_MAX_RETRIES)
+    endpoint_max_retries = (
+        _env_nonnegative_int("OPENAI_BASE_URL_MAX_RETRIES")
+        if routed_through_direct_openai_base_url
+        else None
+    )
+    default_max_retries = (
+        endpoint_max_retries
+        if endpoint_max_retries is not None
+        else 0
+        if endpoint_owns_retries
+        else DEFAULT_MAX_RETRIES
+    )
+    model_kwargs.setdefault("max_retries", default_max_retries)
 
     if model_id.startswith("openai:"):
         _configure_openai_responses_kwargs(model_kwargs)
@@ -209,6 +234,8 @@ def openai_reasoning_for(
         return {"effort": "high", "summary": "auto"}
     if effort == "xhigh":
         return {"effort": "xhigh", "summary": "auto"}
+    if effort == "max":
+        return {"effort": "max", "summary": "auto"}
     return None
 
 

@@ -30,10 +30,28 @@ def _anthropic_overloaded() -> anthropic.APIStatusError:
     return anthropic.APIStatusError("Overloaded", response=response, body=body)
 
 
+def _openai_status(status_code: int) -> openai.APIStatusError:
+    request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+    response = httpx.Response(
+        status_code, request=request, json={"error": {"message": "transient failure"}}
+    )
+    if status_code >= 500:
+        return openai.InternalServerError(
+            "transient failure", response=response, body=response.json()
+        )
+    return openai.APIStatusError("transient failure", response=response, body=response.json())
+
+
 def _openai_5xx() -> openai.APIStatusError:
-    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
-    response = httpx.Response(503, request=request, json={"error": {"message": "unavailable"}})
-    return openai.APIStatusError("unavailable", response=response, body=response.json())
+    return _openai_status(503)
+
+
+def _openai_408() -> openai.APIStatusError:
+    return _openai_status(408)
+
+
+def _openai_502() -> openai.APIStatusError:
+    return _openai_status(502)
 
 
 def _anthropic_model_not_available_error() -> anthropic.BadRequestError:
@@ -60,6 +78,10 @@ def _make_request() -> ModelRequest[None]:
 class TestShouldFallback:
     def test_anthropic_529_overload_falls_back(self) -> None:
         assert _should_fallback(_anthropic_overloaded()) is True
+
+    @pytest.mark.parametrize("error_factory", [_openai_408, _openai_502])
+    def test_observed_openai_errors_fall_back(self, error_factory: Any) -> None:
+        assert _should_fallback(error_factory()) is True
 
     def test_openai_503_falls_back(self) -> None:
         assert _should_fallback(_openai_5xx()) is True
@@ -109,6 +131,26 @@ class TestModelFallbackMiddleware:
         override = cast(MagicMock, request.override)
         override.assert_called_once_with(model=fallback_model)
         assert calls[1] is override.return_value
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("error_factory", [_openai_408, _openai_502])
+    async def test_async_falls_over_on_observed_openai_errors(self, error_factory: Any) -> None:
+        fallback_model = MagicMock(name="terra_model")
+        middleware = ModelFallbackMiddleware(fallback_model)
+        calls: list[object] = []
+        good_response = MagicMock(result=[AIMessage(content="ok from terra")])
+
+        async def handler(req: ModelRequest[None]) -> ModelResponse[Any]:
+            calls.append(req)
+            if len(calls) == 1:
+                raise error_factory()
+            return cast(ModelResponse[Any], good_response)
+
+        request = _make_request()
+        result = await middleware.awrap_model_call(request, handler)
+
+        assert result is good_response
+        assert calls == [request, cast(MagicMock, request.override).return_value]
 
     @pytest.mark.asyncio
     async def test_async_falls_over_on_stream_transport_error(self) -> None:
@@ -186,6 +228,24 @@ class TestModelFallbackMiddleware:
         assert calls[0] is request
         assert calls[1] is cast(MagicMock, request.override).return_value
         assert calls[2] is request
+
+    @pytest.mark.asyncio
+    async def test_new_call_starts_on_primary_after_fallback_success(self) -> None:
+        fallback_model = MagicMock(name="terra_model")
+        middleware = ModelFallbackMiddleware(fallback_model, backoff_schedule=(0.0,))
+        request = _make_request()
+        calls: list[object] = []
+        good_response = MagicMock(result=[AIMessage(content="ok")])
+
+        async def handler(req: ModelRequest[None]) -> ModelResponse[Any]:
+            calls.append(req)
+            if len(calls) == 1:
+                raise _openai_502()
+            return cast(ModelResponse[Any], good_response)
+
+        assert await middleware.awrap_model_call(request, handler) is good_response
+        assert await middleware.awrap_model_call(request, handler) is good_response
+        assert calls == [request, cast(MagicMock, request.override).return_value, request]
 
     @pytest.mark.asyncio
     async def test_async_exhaustion_returns_outage_message(self) -> None:
