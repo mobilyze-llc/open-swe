@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -28,6 +29,9 @@ from agent.reviewer import (
 from agent.reviewer_adversarial import (
     RESERVED_SUBAGENT_TOOLS,
     PrepareAdversarialReviewerRunMiddleware,
+    _active_finder_names,
+    _finder_payload,
+    _finder_prompt,
     _judgment_context,
     _prepare_context,
     _render_parent_prompt,
@@ -69,6 +73,7 @@ def test_shipped_definition_shape() -> None:
     )
     assert tuple(subagent.name for subagent in definition.subagents) == (
         "adjudicator",
+        "conventions",
         "correctness",
         "security",
     )
@@ -88,6 +93,174 @@ def test_shipped_definition_shape() -> None:
         reserved_tools=RESERVED_SUBAGENT_TOOLS,
     )
     assert all(spec.get("tools") == [] for spec in specs)
+
+
+def test_conventions_roster_filter_and_finder_context_isolation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="agent.reviewer_adversarial")
+    finder_names = ["conventions", "correctness", "security"]
+    assert (
+        _active_finder_names(finder_names, agents_md_content="ROOT RULE", scoped_agents_md={})
+        == finder_names
+    )
+    assert (
+        _active_finder_names(
+            finder_names, agents_md_content=None, scoped_agents_md={"src/AGENTS.md": "SCOPED"}
+        )
+        == finder_names
+    )
+    assert _active_finder_names(finder_names, agents_md_content=None, scoped_agents_md={}) == [
+        "correctness",
+        "security",
+    ]
+    assert "Skipping conventions finder" in caplog.text
+
+    state = {
+        "diff_path": "/tmp/review.diff",
+        "working_dir": "/workspace/repo",
+        "stage_context": "context",
+        "agents_md_content": "ROOT RULE",
+        "scoped_agents_md": {"src/AGENTS.md": "SCOPED RULE"},
+        "skill_sources": ["/workspace/.open-swe/trusted-skills/.agents/skills/"],
+    }
+    correctness = _finder_payload("correctness", state)
+    conventions = _finder_payload("conventions", state)
+    assert "agents_md_content" not in correctness
+    assert "scoped_agents_md" not in correctness
+    assert correctness["skill_sources"] == state["skill_sources"]
+    assert conventions["agents_md_content"] == "ROOT RULE"
+    assert conventions["scoped_agents_md"] == {"src/AGENTS.md": "SCOPED RULE"}
+    assert conventions["skill_sources"] == state["skill_sources"]
+
+
+def test_finder_prompt_preserves_empty_identity_and_distributes_paths_only() -> None:
+    base_state = {
+        "finder_name": "correctness",
+        "diff_path": "/tmp/review.diff",
+        "working_dir": "/workspace/repo",
+        "stage_context": "context",
+    }
+    expected = (
+        "Review the complete materialized diff at /tmp/review.diff against "
+        "the checkout at /workspace/repo. Review context: context. "
+        "Return only structured candidate defects."
+    )
+    assert _finder_prompt(base_state) == expected
+
+    skill_root = "/workspace/.open-swe/trusted-skills/.agents/skills/"
+    skill_prompt = _finder_prompt({**base_state, "skill_sources": [skill_root]})
+    assert skill_root in skill_prompt
+    assert "Grep these roots for the SKILL.md matching" in skill_prompt
+    assert "ROOT RULE" not in skill_prompt
+
+    conventions_prompt = _finder_prompt(
+        {
+            **base_state,
+            "finder_name": "conventions",
+            "skill_sources": [skill_root],
+            "agents_md_content": "ROOT RULE",
+            "scoped_agents_md": {
+                "src/pkg/AGENTS.md": "DEEP RULE",
+                "src/AGENTS.md": "SHALLOW RULE",
+            },
+        }
+    )
+    assert skill_root in conventions_prompt
+    assert "ROOT RULE" in conventions_prompt
+    assert conventions_prompt.index("src/AGENTS.md") < conventions_prompt.index("src/pkg/AGENTS.md")
+    assert conventions_prompt.index("SHALLOW RULE") < conventions_prompt.index("DEEP RULE")
+
+
+@pytest.mark.asyncio
+async def test_graph_dispatches_conventions_only_with_instructions_and_isolates_prompts() -> None:
+    from agent.review.adversarial import FinderOutput
+
+    stages = [object() for _ in range(6)]
+    stage_iter = iter(stages)
+    prompts: list[tuple[object, str]] = []
+
+    async def run_stage(graph: object, prompt: str, *_args: object, **_kwargs: object) -> Any:
+        prompts.append((graph, prompt))
+        if graph in {stages[1], stages[2], stages[3]}:
+            return FinderOutput(candidates=[])
+        raise AssertionError("unexpected judgment stage")
+
+    config = cast(
+        RunnableConfig,
+        {"configurable": {"thread_id": "adversarial-thread", "__is_for_execution__": True}},
+    )
+    with (
+        patch(
+            "agent.reviewer_adversarial._cached_reviewer_team_defaults",
+            new_callable=AsyncMock,
+            return_value=(("team-main", "low"), ("team-sub", "low")),
+        ),
+        patch(
+            "agent.reviewer_adversarial._cached_review_profile_name",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch(
+            "agent.reviewer_adversarial._cached_gateway_enabled",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        patch(
+            "agent.reviewer_adversarial.get_team_fable_enabled",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch("agent.reviewer_adversarial._make_model_or_defer", return_value=MagicMock()),
+        patch(
+            "agent.reviewer_adversarial._bounded_agent",
+            side_effect=lambda **_kwargs: next(stage_iter),
+        ),
+        patch(
+            "agent.reviewer_adversarial._prepare_context",
+            new_callable=AsyncMock,
+            return_value={
+                "work_dir": "/workspace",
+                "working_dir": "/workspace/repo",
+                "rendered_system_prompt": "prompt",
+                "stage_context": "finder context",
+                "parent_review_context": "PARENT CONTEXT MARKER",
+                "diff_text": "",
+                "diff_line_set": None,
+                "pr_title": "title",
+                "diff_path": "/tmp/review.diff",
+                "agents_md_content": "ROOT RULE",
+                "scoped_agents_md": {"src/AGENTS.md": "SCOPED RULE"},
+                "skill_sources": ["/workspace/.open-swe/trusted-skills/.agents/skills/"],
+            },
+        ),
+        patch("agent.reviewer_adversarial._run_stage", side_effect=run_stage),
+        patch(
+            "agent.reviewer_adversarial.agent_tools.publish_review",
+            new_callable=AsyncMock,
+            return_value={"success": True, "review_id": 7},
+        ),
+        patch.object(
+            __import__(
+                "agent.reviewer_adversarial", fromlist=["settle_review_check_on_exit"]
+            ).settle_review_check_on_exit,
+            "aafter_agent",
+            new_callable=AsyncMock,
+        ),
+    ):
+        graph = await get_reviewer_adversarial_agent(config)
+        result = await graph.ainvoke({"messages": []})
+
+    assert result["finders_expected"] == ["conventions", "correctness", "security"]
+    by_graph = dict(prompts)
+    assert set(by_graph) == {stages[1], stages[2], stages[3]}
+    assert "ROOT RULE" in by_graph[stages[1]]
+    assert "SCOPED RULE" in by_graph[stages[1]]
+    assert "SKILL.md matching" in by_graph[stages[1]]
+    for finder in (stages[2], stages[3]):
+        assert "ROOT RULE" not in by_graph[finder]
+        assert "SCOPED RULE" not in by_graph[finder]
+        assert "SKILL.md matching" in by_graph[finder]
 
 
 def test_discovery_finds_exactly_the_shipped_definition() -> None:
@@ -934,11 +1107,11 @@ def test_gate_added_same_file_candidate_requires_independence() -> None:
 async def test_finder_timeout_fails_closed_and_settles_terminal_check() -> None:
     from agent.review.adversarial import FinderOutput
 
-    stages = [object() for _ in range(5)]
+    stages = [object() for _ in range(6)]
     stage_iter = iter(stages)
 
     async def run_stage(graph: object, *_args: object, **_kwargs: object) -> FinderOutput:
-        if graph is stages[2]:
+        if graph is stages[3]:
             raise TimeoutError("security finder timed out")
         return FinderOutput(candidates=[])
 
@@ -1014,7 +1187,7 @@ async def test_adjudication_barrier_controls_single_publish(
 ) -> None:
     from agent.review.adversarial import CandidateDraft, FinderOutput, Verdict, VerdictBatch
 
-    stages = [object() for _ in range(5)]
+    stages = [object() for _ in range(6)]
     stage_iter = iter(stages)
     candidate = {
         "file": "src/app.py",
@@ -1030,9 +1203,9 @@ async def test_adjudication_barrier_controls_single_publish(
 
     async def run_stage(graph: object, *_args: object, **_kwargs: object) -> Any:
         prompts.append((graph, str(_args[0])))
-        if graph is stages[1]:
-            return FinderOutput(candidates=[CandidateDraft.model_validate(candidate)])
         if graph is stages[2]:
+            return FinderOutput(candidates=[CandidateDraft.model_validate(candidate)])
+        if graph is stages[3]:
             return FinderOutput(candidates=[])
         if graph is stages[0]:
             verdicts = (
@@ -1119,7 +1292,7 @@ async def test_adjudication_barrier_controls_single_publish(
         graph = await get_reviewer_adversarial_agent(config)
         result = await graph.ainvoke({"messages": []})
 
-    finder_prompts = [prompt for graph, prompt in prompts if graph in {stages[1], stages[2]}]
+    finder_prompts = [prompt for graph, prompt in prompts if graph in {stages[2], stages[3]}]
     parent_prompts = [prompt for graph, prompt in prompts if graph is stages[0]]
     assert finder_prompts and all(
         "PARENT CONTEXT MARKER" not in prompt for prompt in finder_prompts
@@ -1153,7 +1326,7 @@ async def test_compiled_graph_runs_all_prepublish_gates_with_bounded_passes() ->
         VerdictBatch,
     )
 
-    stages = [object() for _ in range(5)]
+    stages = [object() for _ in range(6)]
     stage_iter = iter(stages)
     gate_calls = 0
     prompts: list[tuple[object, str]] = []
@@ -1161,7 +1334,7 @@ async def test_compiled_graph_runs_all_prepublish_gates_with_bounded_passes() ->
     async def run_stage(graph: object, *_args: object, **_kwargs: object) -> Any:
         nonlocal gate_calls
         prompts.append((graph, str(_args[0])))
-        if graph in {stages[1], stages[2]}:
+        if graph in {stages[2], stages[3]}:
             return FinderOutput(candidates=[])
         if graph is stages[0]:
             return VerdictBatch(
@@ -1174,7 +1347,7 @@ async def test_compiled_graph_runs_all_prepublish_gates_with_bounded_passes() ->
                     for candidate_id in ("g1", "g2")
                 ]
             )
-        if graph is stages[4]:
+        if graph is stages[5]:
             gate_calls += 1
             if gate_calls == 1:
                 return GateOutput(
@@ -1273,8 +1446,8 @@ async def test_compiled_graph_runs_all_prepublish_gates_with_bounded_passes() ->
         graph = await get_reviewer_adversarial_agent(config)
         result = await graph.ainvoke({"messages": []})
 
-    finder_prompts = [prompt for graph, prompt in prompts if graph in {stages[1], stages[2]}]
-    judgment_prompts = [prompt for graph, prompt in prompts if graph in {stages[0], stages[4]}]
+    finder_prompts = [prompt for graph, prompt in prompts if graph in {stages[2], stages[3]}]
+    judgment_prompts = [prompt for graph, prompt in prompts if graph in {stages[0], stages[5]}]
     assert finder_prompts and all(
         "PARENT CONTEXT MARKER" not in prompt for prompt in finder_prompts
     )

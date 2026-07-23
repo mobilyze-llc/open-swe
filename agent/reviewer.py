@@ -20,7 +20,7 @@ import logging
 import posixpath
 import re
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, cast
 
 logger = logging.getLogger(__name__)
@@ -851,6 +851,9 @@ class ReviewContextBundle:
     repo_style_prompt: str | None = None
     api_standards_skill: str | None = None
     pr_trace_context: PRTraceContext | None = None
+    agents_md_content: str | None = None
+    scoped_agents_md: dict[str, str] = field(default_factory=dict)
+    skill_sources: list[str] = field(default_factory=list)
 
 
 async def _ensure_reviewer_sandbox_for_thread(
@@ -1112,11 +1115,50 @@ async def gather_review_context(
         )
     )
 
+    async def _fetch_agents_md_context() -> str | None:
+        if not repo_owner or not repo_name or not base_sha:
+            return None
+        content = await fetch_agents_md(repo_owner, repo_name, base_sha, token=github_token)
+        if content:
+            logger.info(
+                "Loaded AGENTS.md (%d chars) from %s/%s@%s into reviewer context",
+                len(content),
+                repo_owner,
+                repo_name,
+                base_sha,
+            )
+        return content
+
+    agents_md_task = asyncio.create_task(_fetch_agents_md_context())
+    scoped_agents_md_task = asyncio.create_task(
+        fetch_scoped_agents_md(
+            repo_owner,
+            repo_name,
+            base_sha,
+            changed_files(diff_text, include_old_paths=True),
+            token=github_token,
+        )
+    )
+
+    async def _materialize_skill_sources() -> list[str]:
+        if not repo_ready or not repo_name:
+            return []
+        return await materialize_trusted_skills(
+            sandbox_backend,
+            repo_dir=f"{work_dir}/{repo_name}",
+            trusted_ref=base_sha,
+        )
+
+    skill_sources_task = asyncio.create_task(_materialize_skill_sources())
+
     existing_threads_block = await existing_threads_task
     repo_style_prompt = await repo_style_task
     org_guidelines = await org_guidelines_task
     api_standards_skill = await api_standards_task
     pr_trace_context = await pr_trace_context_task
+    agents_md_content = await agents_md_task
+    scoped_agents_md = await scoped_agents_md_task
+    skill_sources = await skill_sources_task
 
     return ReviewContextBundle(
         sandbox_backend=sandbox_backend,
@@ -1139,6 +1181,9 @@ async def gather_review_context(
         repo_style_prompt=repo_style_prompt,
         api_standards_skill=api_standards_skill,
         pr_trace_context=pr_trace_context,
+        agents_md_content=agents_md_content,
+        scoped_agents_md=scoped_agents_md,
+        skill_sources=skill_sources,
     )
 
 
@@ -1192,7 +1237,6 @@ class PrepareReviewerRunMiddleware(BasePrepareRunMiddleware):
         configurable = self._config.get("configurable") or {}
         review_bundle = await gather_review_context(self._thread_id, configurable)
         sandbox_backend = review_bundle.sandbox_backend
-        github_token = review_bundle.github_token
         work_dir = review_bundle.work_dir
         repo_owner = review_bundle.repo_owner
         repo_name = review_bundle.repo_name
@@ -1211,43 +1255,13 @@ class PrepareReviewerRunMiddleware(BasePrepareRunMiddleware):
         repo_style_prompt = review_bundle.repo_style_prompt
         api_standards_skill = review_bundle.api_standards_skill
         pr_trace_context = review_bundle.pr_trace_context
-
-        skill_sources: list[str] = []
-        if repo_ready and repo_name:
-            skill_sources = await materialize_trusted_skills(
-                sandbox_backend, repo_dir=f"{work_dir}/{repo_name}", trusted_ref=base_sha
-            )
+        agents_md_content = review_bundle.agents_md_content
+        scoped_agents_md = review_bundle.scoped_agents_md
+        skill_sources = review_bundle.skill_sources
 
         last_reviewed_sha = str(configurable.get("last_reviewed_sha", "") or "")
         is_re_review = bool(configurable.get("re_review"))
         reviewer_event = str(configurable.get("reviewer_event", "") or "")
-
-        async def _fetch_agents_md_context() -> str | None:
-            if not repo_owner or not repo_name or not base_sha:
-                return None
-            content = await fetch_agents_md(repo_owner, repo_name, base_sha, token=github_token)
-            if content:
-                logger.info(
-                    "Loaded AGENTS.md (%d chars) from %s/%s@%s into reviewer prompt",
-                    len(content),
-                    repo_owner,
-                    repo_name,
-                    base_sha,
-                )
-            return content
-
-        agents_md_task = asyncio.create_task(_fetch_agents_md_context())
-        scoped_agents_md_task = asyncio.create_task(
-            fetch_scoped_agents_md(
-                repo_owner,
-                repo_name,
-                base_sha,
-                changed_files(pr_diff_text),
-                token=github_token,
-            )
-        )
-        agents_md_content = await agents_md_task
-        scoped_agents_md = await scoped_agents_md_task
 
         review_context = ""
         if pr_number is not None and isinstance(pr_number, int):

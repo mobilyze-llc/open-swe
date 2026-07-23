@@ -59,6 +59,15 @@ def _common_patches(stack: ExitStack, *, token: str | None = "token") -> None:
         patch("agent.reviewer.prepare_review_repo", new_callable=AsyncMock, return_value=True)
     )
     stack.enter_context(
+        patch("agent.reviewer.fetch_agents_md", new_callable=AsyncMock, return_value=None)
+    )
+    stack.enter_context(
+        patch("agent.reviewer.fetch_scoped_agents_md", new_callable=AsyncMock, return_value={})
+    )
+    stack.enter_context(
+        patch("agent.reviewer.materialize_trusted_skills", new_callable=AsyncMock, return_value=[])
+    )
+    stack.enter_context(
         patch("agent.reviewer.fetch_pr_diff", new_callable=AsyncMock, return_value=DIFF)
     )
     stack.enter_context(
@@ -79,9 +88,6 @@ def _common_patches(stack: ExitStack, *, token: str | None = "token") -> None:
 
 def _stock_patches(stack: ExitStack) -> None:
     stack.enter_context(
-        patch("agent.reviewer.materialize_trusted_skills", new_callable=AsyncMock, return_value=[])
-    )
-    stack.enter_context(
         patch("agent.reviewer.fetch_pr_review_threads", new_callable=AsyncMock, return_value=[])
     )
     stack.enter_context(
@@ -93,12 +99,6 @@ def _stock_patches(stack: ExitStack) -> None:
             new_callable=AsyncMock,
             return_value=None,
         )
-    )
-    stack.enter_context(
-        patch("agent.reviewer.fetch_agents_md", new_callable=AsyncMock, return_value=None)
-    )
-    stack.enter_context(
-        patch("agent.reviewer.fetch_scoped_agents_md", new_callable=AsyncMock, return_value={})
     )
     stack.enter_context(
         patch(
@@ -207,6 +207,58 @@ async def test_adversarial_prepare_matches_pre_refactor_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_stock_prepare_consumes_bundle_skill_sources_once() -> None:
+    backend = MagicMock()
+    bundle = reviewer.ReviewContextBundle(
+        sandbox_backend=backend,
+        github_token="token",
+        work_dir="/workspace",
+        repo_owner="test-owner",
+        repo_name="test-repo",
+        pr_number=7,
+        pr_url="https://github.com/test-owner/test-repo/pull/7",
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        repo_ready=True,
+        reviewer_eval=False,
+        diff_text=DIFF,
+        diff_line_set={"example.py": {"RIGHT": {1}, "LEFT": {1}}},
+        pr_title="A title",
+        pr_body="A body",
+        skill_sources=["/workspace/.open-swe/trusted-skills/.agents/skills/"],
+    )
+    skills = MagicMock()
+    skills.abefore_agent = AsyncMock(return_value={"skills_metadata": [], "skills_load_errors": []})
+    skills._format_skills_locations.return_value = "SKILL LOCATIONS"
+    skills._format_skills_list.return_value = "SKILL LIST"
+    skills._format_skills_load_warnings.return_value = ""
+    skills.system_prompt_template = "{skills_locations}\n{skills_load_warnings}\n{skills_list}"
+    middleware = reviewer.PrepareReviewerRunMiddleware(
+        thread_id="reviewer-thread",
+        config=_config(eval_mode=False),
+        use_gateway=False,
+        review_profile_name="default",
+        review_profile_body=reviewer.REVIEWER_PROMPT_TEMPLATE,
+    )
+
+    with (
+        patch(
+            "agent.reviewer.gather_review_context",
+            new_callable=AsyncMock,
+            return_value=bundle,
+        ),
+        patch("agent.reviewer.SkillsMiddleware", return_value=skills) as skills_type,
+        patch("agent.reviewer._schedule_diff_grouping", new_callable=AsyncMock),
+    ):
+        result = await middleware._prepare(cast(PrepareRunState, {"messages": []}), MagicMock())
+
+    skills_type.assert_called_once_with(backend=backend, sources=bundle.skill_sources)
+    skills.abefore_agent.assert_awaited_once()
+    assert "SKILL LOCATIONS" in result["rendered_system_prompt"]
+    assert "SKILL LIST" in result["rendered_system_prompt"]
+
+
+@pytest.mark.asyncio
 async def test_gather_review_context_returns_shared_parent_inputs() -> None:
     config = cast(dict[str, Any], _config(eval_mode=False).get("configurable") or {})
     trace_context = MagicMock()
@@ -248,6 +300,27 @@ async def test_gather_review_context_returns_shared_parent_inputs() -> None:
                 return_value=trace_context,
             )
         )
+        fetch_agents = stack.enter_context(
+            patch(
+                "agent.reviewer.fetch_agents_md",
+                new_callable=AsyncMock,
+                return_value="ROOT RULE",
+            )
+        )
+        fetch_scoped = stack.enter_context(
+            patch(
+                "agent.reviewer.fetch_scoped_agents_md",
+                new_callable=AsyncMock,
+                return_value={"src/AGENTS.md": "SCOPED RULE"},
+            )
+        )
+        materialize_skills = stack.enter_context(
+            patch(
+                "agent.reviewer.materialize_trusted_skills",
+                new_callable=AsyncMock,
+                return_value=["/workspace/.open-swe/trusted-skills/.agents/skills/"],
+            )
+        )
         bundle = await reviewer.gather_review_context(
             "reviewer-thread", config, diff_mode="adversarial"
         )
@@ -257,6 +330,61 @@ async def test_gather_review_context_returns_shared_parent_inputs() -> None:
     assert bundle.repo_style_prompt == "STYLE"
     assert bundle.api_standards_skill == "API"
     assert bundle.pr_trace_context is trace_context
+    assert bundle.agents_md_content == "ROOT RULE"
+    assert bundle.scoped_agents_md == {"src/AGENTS.md": "SCOPED RULE"}
+    assert bundle.skill_sources == ["/workspace/.open-swe/trusted-skills/.agents/skills/"]
+    fetch_agents.assert_awaited_once_with("test-owner", "test-repo", "a" * 40, token="token")
+    fetch_scoped.assert_awaited_once_with(
+        "test-owner",
+        "test-repo",
+        "a" * 40,
+        ["example.py"],
+        token="token",
+    )
+    materialize_skills.assert_awaited_once_with(
+        bundle.sandbox_backend,
+        repo_dir="/workspace/test-repo",
+        trusted_ref="a" * 40,
+    )
+
+
+@pytest.mark.asyncio
+async def test_gather_review_context_fetches_both_rename_scopes() -> None:
+    config = cast(dict[str, Any], _config(eval_mode=False).get("configurable") or {})
+    rename_diff = (
+        "diff --git a/legacy/foo.py b/src/foo.py\n"
+        "--- a/legacy/foo.py\n"
+        "+++ b/src/foo.py\n"
+        "@@ -1 +1 @@\n"
+        "-old = 1\n"
+        "+new = 2\n"
+    )
+
+    with ExitStack() as stack:
+        _common_patches(stack)
+        stack.enter_context(
+            patch(
+                "agent.reviewer.materialize_review_diff",
+                new_callable=AsyncMock,
+                return_value=MagicMock(diff_text=rename_diff),
+            )
+        )
+        fetch_scoped = stack.enter_context(
+            patch(
+                "agent.reviewer.fetch_scoped_agents_md",
+                new_callable=AsyncMock,
+                return_value={},
+            )
+        )
+        await reviewer.gather_review_context("reviewer-thread", config, diff_mode="adversarial")
+
+    fetch_scoped.assert_awaited_once_with(
+        "test-owner",
+        "test-repo",
+        "a" * 40,
+        ["legacy/foo.py", "src/foo.py"],
+        token="token",
+    )
 
 
 @pytest.mark.asyncio

@@ -34,6 +34,9 @@ class AdversarialState(TypedDict, total=False):
     diff_line_set: dict[str, Any] | None
     diff_path: str
     pr_title: str
+    agents_md_content: str | None
+    scoped_agents_md: dict[str, str]
+    skill_sources: list[str]
     finders_expected: list[str]
     finder_name: str
     finder_results: Annotated[list[FinderRun], operator.add]

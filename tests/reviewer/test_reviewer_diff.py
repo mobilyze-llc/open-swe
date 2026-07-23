@@ -114,6 +114,16 @@ def test_changed_files_returns_bounded_path_list() -> None:
     assert changed_files(_TWO_FILE_DIFF) == ["foo.py", "bar.py"]
 
 
+def test_changed_files_optionally_includes_rename_source_path() -> None:
+    rename_diff = "diff --git a/legacy/foo.py b/src/foo.py\n"
+
+    assert changed_files(rename_diff) == ["src/foo.py"]
+    assert changed_files(rename_diff, include_old_paths=True) == [
+        "legacy/foo.py",
+        "src/foo.py",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_materialize_review_diff_reuses_existing_file() -> None:
     from unittest.mock import AsyncMock, MagicMock
