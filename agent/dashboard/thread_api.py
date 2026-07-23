@@ -17,6 +17,7 @@ from fastapi import HTTPException
 from langchain_core.messages.content import ImageContentBlock, create_image_block
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..dispatch import content_requests_merge_hold
 from ..utils.dashboard_handoff import DASHBOARD_HANDOFF_INSTRUCTION
 from ..utils.json_types import (
     JsonObject,
@@ -1048,6 +1049,8 @@ async def _build_dashboard_configurable(
             configurable.setdefault(key, value)
     if metadata.get("plan_mode") is True:
         configurable["plan_mode"] = True
+    if metadata.get("merge_hold_requested") is True:
+        configurable["merge_hold_requested"] = True
     if overrides:
         for key, value in overrides.items():
             if value is not None:
@@ -1269,6 +1272,13 @@ async def _enrich_run_start_command(
             metadata = {**metadata, **metadata_update}
             await client.threads.update(thread_id=thread_id, metadata=metadata)
 
+    merge_hold_requested = metadata.get(
+        "merge_hold_requested"
+    ) is True or content_requests_merge_hold(content)
+    if merge_hold_requested and metadata.get("merge_hold_requested") is not True:
+        await client.threads.update(thread_id=thread_id, metadata={"merge_hold_requested": True})
+        metadata = {**metadata, "merge_hold_requested": True}
+
     merged_configurable = await _build_dashboard_configurable(
         thread_id,
         login,
@@ -1350,6 +1360,8 @@ async def send_dashboard_message(
         "updated_at_ms": now_ms,
         "plan_mode": body.plan_mode,
     }
+    if metadata.get("merge_hold_requested") is True or content_requests_merge_hold(prompt):
+        metadata_update["merge_hold_requested"] = True
     if chosen_model and chosen_effort:
         metadata_update["model"] = chosen_model
         metadata_update["effort"] = chosen_effort

@@ -46,6 +46,13 @@ mutation DisableAutoMerge($pullRequestId: ID!) {
   }
 }
 """
+_DEQUEUE_PULL_REQUEST = """
+mutation DequeuePullRequest($pullRequestId: ID!) {
+  dequeuePullRequest(input: { id: $pullRequestId }) {
+    pullRequest { id isInMergeQueue }
+  }
+}
+"""
 
 
 def _parse_created_at(value: Any) -> datetime | None:
@@ -203,6 +210,7 @@ async def reconcile_auto_merge_prs(
         "threads_checked": 0,
         "armed": 0,
         "held_disabled": 0,
+        "held_dequeued": 0,
         "rearmed": 0,
         "queued": 0,
         "alerted": 0,
@@ -279,6 +287,9 @@ async def reconcile_auto_merge_prs(
                 same_head = metadata.get("auto_merge_head_sha") == head_sha
                 recovery_attempted = metadata.get("auto_merge_recovery_attempted") is True
                 if held:
+                    if queued and isinstance(pr_id, str):
+                        await _graphql(github, _DEQUEUE_PULL_REQUEST, {"pullRequestId": pr_id})
+                        counts["held_dequeued"] += 1
                     if armed and isinstance(pr_id, str):
                         await _graphql(github, _DISABLE_AUTO_MERGE, {"pullRequestId": pr_id})
                         counts["held_disabled"] += 1
@@ -297,7 +308,7 @@ async def reconcile_auto_merge_prs(
                         auto_merge_phase="queued",
                         auto_merge_phase_at=now.isoformat(),
                         auto_merge_head_sha=head_sha or "",
-                        auto_merge_reconcile=False,
+                        auto_merge_reconcile=True,
                     )
                     counts["queued"] += 1
                     continue

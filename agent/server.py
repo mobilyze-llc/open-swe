@@ -68,6 +68,7 @@ from .dashboard.team_settings import (
     get_team_stage_profile,
 )
 from .dashboard.user_mappings import email_for_login
+from .dispatch import content_requests_merge_hold
 from .integrations.corridor_mcp import load_corridor_tools
 from .integrations.currents_tools import load_currents_tools
 from .integrations.datadog_mcp import load_datadog_tools
@@ -778,6 +779,18 @@ def _auto_merge_eligible(
     return mode == AUTO_MERGE_ON_PLAN_APPROVAL and require_plan_approval and plan_approved
 
 
+async def _persisted_merge_hold_requested(thread_id: str) -> bool:
+    try:
+        thread = await client.threads.get(thread_id)
+    except Exception:
+        logger.warning("Could not verify persisted merge hold; auto-merge disabled", exc_info=True)
+        return True
+    metadata = (
+        thread.get("metadata") if isinstance(thread, dict) else getattr(thread, "metadata", None)
+    )
+    return isinstance(metadata, dict) and metadata.get("merge_hold_requested") is True
+
+
 async def _plan_was_approved(thread_id: str) -> bool:
     try:
         plan = await get_plan_content(thread_id, raise_on_error=True)
@@ -883,6 +896,13 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
         }
 
     async def _prepare(self, state: PrepareRunState, runtime: Runtime) -> dict[str, Any]:  # noqa: ARG002
+        messages = state.get("messages")
+        latest = messages[-1] if isinstance(messages, list) and messages else None
+        latest_content = getattr(latest, "content", latest)
+        merge_hold_requested = self._merge_hold_requested or (
+            isinstance(latest_content, (str, list)) and content_requests_merge_hold(latest_content)
+        )
+        auto_merge_eligible = self._auto_merge_eligible and not merge_hold_requested
         github_token, _expires_at = await resolve_github_token(self._config, self._thread_id)
         configurable = (self._config or {}).get("configurable") or {}
         prompt_default_repo = await _resolve_prompt_default_repo(configurable)
@@ -918,8 +938,8 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
                     "plan_gate_forced": self._plan_gate_forced,
                     "plan_profile": self._plan_profile_name,
                     "auto_merge_mode": self._auto_merge_mode,
-                    "auto_merge_eligible": self._auto_merge_eligible,
-                    "merge_hold_requested": self._merge_hold_requested,
+                    "auto_merge_eligible": auto_merge_eligible,
+                    "merge_hold_requested": merge_hold_requested,
                 },
             )
             await record_agent_thread_usage(
@@ -937,13 +957,15 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
 
         return {
             "work_dir": work_dir,
+            "auto_merge_eligible": auto_merge_eligible,
+            "merge_hold_requested": merge_hold_requested,
             "rendered_system_prompt": construct_system_prompt(
                 working_dir=work_dir,
                 linear_project_id=self._linear_project_id,
                 linear_issue_number=self._linear_issue_number,
                 triggering_user_identity=triggering_user_identity,
                 create_prs=self._create_prs,
-                auto_merge_eligible=self._auto_merge_eligible,
+                auto_merge_eligible=auto_merge_eligible,
                 default_repo=prompt_default_repo,
                 plan_mode=self._plan_mode,
                 plan_url=dashboard_plan_url(self._thread_id),
@@ -1005,7 +1027,9 @@ async def get_agent(config: RunnableConfig) -> Pregel:
         configurable["plan_gate_forced"] = True
         logger.info("Plan approval policy forced plan mode for thread %s", thread_id)
 
-    merge_hold_requested = configurable.get("merge_hold_requested") is True
+    merge_hold_requested = configurable.get(
+        "merge_hold_requested"
+    ) is True or await _persisted_merge_hold_requested(thread_id)
     plan_approved = (
         await _plan_was_approved(thread_id)
         if auto_merge_mode == AUTO_MERGE_ON_PLAN_APPROVAL

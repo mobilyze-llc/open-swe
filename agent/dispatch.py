@@ -83,12 +83,14 @@ COMPLETION_WEBHOOK_URL: str | None = _resolve_completion_webhook_url(
 _HOLD_MERGE_RE = re.compile(r"\bhold(?:\s+|-)merge\b", re.IGNORECASE)
 
 
-def content_requests_merge_hold(content: ContentBlocks) -> bool:
+def content_requests_merge_hold(content: object) -> bool:
     """Return whether dispatch content explicitly asks to hold merge."""
     if isinstance(content, str):
         text = content
-    else:
+    elif isinstance(content, list):
         text = "\n".join(str(block.get("text", "")) for block in content if isinstance(block, dict))
+    else:
+        return False
     return _HOLD_MERGE_RE.search(text) is not None
 
 
