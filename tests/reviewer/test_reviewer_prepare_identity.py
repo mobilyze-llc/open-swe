@@ -207,6 +207,59 @@ async def test_adversarial_prepare_matches_pre_refactor_snapshot(
 
 
 @pytest.mark.asyncio
+async def test_gather_review_context_returns_shared_parent_inputs() -> None:
+    config = cast(dict[str, Any], _config(eval_mode=False).get("configurable") or {})
+    trace_context = MagicMock()
+
+    with ExitStack() as stack:
+        _common_patches(stack)
+        stack.enter_context(
+            patch(
+                "agent.reviewer._fetch_existing_threads_block",
+                new_callable=AsyncMock,
+                return_value="THREADS",
+            )
+        )
+        stack.enter_context(
+            patch(
+                "agent.reviewer._fetch_repo_style_prompt",
+                new_callable=AsyncMock,
+                return_value="STYLE",
+            )
+        )
+        stack.enter_context(
+            patch(
+                "agent.reviewer._cached_org_review_guidelines",
+                new_callable=AsyncMock,
+                return_value="ORG",
+            )
+        )
+        stack.enter_context(
+            patch(
+                "agent.reviewer._cached_api_standards_skill",
+                new_callable=AsyncMock,
+                return_value="API",
+            )
+        )
+        stack.enter_context(
+            patch(
+                "agent.reviewer._prepare_pr_trace_context_best_effort",
+                new_callable=AsyncMock,
+                return_value=trace_context,
+            )
+        )
+        bundle = await reviewer.gather_review_context(
+            "reviewer-thread", config, diff_mode="adversarial"
+        )
+
+    assert bundle.existing_threads_block == "THREADS"
+    assert bundle.org_guidelines == "ORG"
+    assert bundle.repo_style_prompt == "STYLE"
+    assert bundle.api_standards_skill == "API"
+    assert bundle.pr_trace_context is trace_context
+
+
+@pytest.mark.asyncio
 async def test_gather_review_context_preserves_diff_policy_split() -> None:
     config = cast(dict[str, Any], _config(eval_mode=False).get("configurable") or {})
     backend = MagicMock()
