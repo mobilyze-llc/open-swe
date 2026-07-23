@@ -22,11 +22,19 @@ class _FakeResponse:
 
 
 class _FakeClient:
-    def __init__(self, *, post: _FakeResponse, get: _FakeResponse | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        post: _FakeResponse,
+        get: _FakeResponse | None = None,
+        patch: _FakeResponse | None = None,
+    ) -> None:
         self._post = post
         self._get = get
+        self._patch = patch
         self.post_calls: list[dict[str, Any]] = []
         self.get_calls: list[dict[str, Any]] = []
+        self.patch_calls: list[dict[str, Any]] = []
 
     async def __aenter__(self) -> _FakeClient:
         return self
@@ -47,6 +55,12 @@ class _FakeClient:
         if self._get is not None:
             return self._get
         return _FakeResponse(200, {"name": "ok", "default_branch": "main"})
+
+    async def patch(
+        self, url: str, *, headers: dict[str, str], json: dict[str, Any]
+    ) -> _FakeResponse:
+        self.patch_calls.append({"url": url, "headers": headers, "json": json})
+        return self._patch or _FakeResponse(200, {})
 
 
 class _RoutingClient:
@@ -88,15 +102,15 @@ def _set_config(monkeypatch: pytest.MonkeyPatch, configurable: dict[str, Any]) -
     monkeypatch.setattr(opr, "get_config", lambda: {"configurable": configurable})
 
 
-def _open() -> dict[str, Any]:
+def _open(*, title: str = "feat: x", body: str = "body") -> dict[str, Any]:
     return asyncio.run(
         opr._open_pull_request(
             owner="langchain-ai",
             repo="open-swe",
             head="open-swe/feature",
             base="main",
-            title="feat: x",
-            body="body",
+            title=title,
+            body=body,
             draft=True,
         )
     )
@@ -252,6 +266,38 @@ def test_returns_existing_pr_on_422(monkeypatch: pytest.MonkeyPatch) -> None:
         "head": "langchain-ai:open-swe/feature",
         "state": "open",
     }
+    assert client.patch_calls == []
+
+
+def test_updates_existing_pr_body_with_linear_closing_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_config(monkeypatch, {"source": "slack", "github_login": "johannes117"})
+
+    from agent.dashboard import profiles
+
+    monkeypatch.setattr(profiles, "get_valid_access_token", lambda *_a, **_k: _coro("user-tok"))
+    monkeypatch.setattr(opr, "get_github_app_installation_token", lambda: _coro("bot"))
+
+    client = _FakeClient(
+        post=_FakeResponse(422, text="A pull request already exists"),
+        get=_FakeResponse(
+            200, [{"html_url": "https://x/pull/9", "number": 9, "user": {"login": "johannes117"}}]
+        ),
+    )
+    _install_client(monkeypatch, client)
+
+    result = _open(title="feat: x [closes AB-12]")
+
+    assert result["success"] is True
+    assert result["created"] is False
+    assert client.patch_calls == [
+        {
+            "url": "https://api.github.com/repos/langchain-ai/open-swe/pulls/9",
+            "headers": opr._auth_headers("user-tok"),
+            "json": {"body": "body\n\nCloses AB-12"},
+        }
+    ]
 
 
 def test_error_surfaced_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -331,17 +377,47 @@ async def _coro(value: Any) -> Any:
     return value
 
 
-def _open_with_body(body: str) -> dict[str, Any]:
+def _open_with_body(body: str, *, title: str = "feat: x") -> dict[str, Any]:
     return asyncio.run(
         opr._open_pull_request(
             owner="langchain-ai",
             repo="open-swe",
             head="open-swe/feature",
             base="main",
-            title="feat: x",
+            title=title,
             body=body,
             draft=True,
         )
+    )
+
+
+def test_appends_linear_closing_line_from_title() -> None:
+    assert (
+        opr._maybe_append_linear_closing_line("feat: x [closes OSWE-123]", "body")
+        == "body\n\nCloses OSWE-123"
+    )
+
+
+def test_omits_linear_closing_line_without_title_suffix() -> None:
+    assert opr._maybe_append_linear_closing_line("feat: x", "body") == "body"
+
+
+def test_does_not_duplicate_linear_closing_line() -> None:
+    body = "body\n\ncLoSeS oswe-123"
+    assert opr._maybe_append_linear_closing_line("feat: x [closes OSWE-123]", body) == body
+
+
+def test_normalizes_case_in_linear_closing_line() -> None:
+    assert (
+        opr._maybe_append_linear_closing_line("feat: x [CLOSES oswe-123]", "body")
+        == "body\n\nCloses OSWE-123"
+    )
+
+
+def test_places_linear_closing_line_before_existing_references() -> None:
+    body = "body\n\n## References\n- existing"
+    assert opr._maybe_append_linear_closing_line("feat: x [closes OSWE-123]", body) == (
+        "body\n\nCloses OSWE-123\n\n## References\n- existing"
     )
 
 
@@ -546,9 +622,10 @@ def test_appends_linear_reference_for_private_repo(monkeypatch: pytest.MonkeyPat
     )
     _install_client(monkeypatch, client)
 
-    _open_with_body("body")
+    _open_with_body("body", title="feat: x [closes AB-12]")
 
     sent_body = client.post_calls[0]["json"]["body"]
+    assert "Closes AB-12\n\n## References" in sent_body
     assert "- Linear ticket: [AB-12](https://linear.app/x/AB-12)" in sent_body
 
 

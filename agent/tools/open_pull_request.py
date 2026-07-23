@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Annotated, Any
 from urllib.parse import quote
@@ -26,9 +27,11 @@ logger = logging.getLogger(__name__)
 GITHUB_API = "https://api.github.com"
 _USER_TOKEN_SOURCES = ("slack", "linear", "dashboard")
 _REFERENCES_HEADING = "## References"
+_CLOSING_TITLE_RE = re.compile(r"\[closes\s+(?P<ticket>[A-Z][A-Z0-9]*-\d+)\]\s*$", re.IGNORECASE)
 _ACCESS_FAILURE_CODE = "github_app_access_missing_or_repo_not_found"
 _BRANCH_FAILURE_CODE = "github_pr_branch_not_visible"
 _PREFLIGHT_FAILURE_CODE = "github_pr_preflight_failed"
+_PR_UPDATE_FAILURE_CODE = "github_pr_update_failed"
 _PR_CREATED_FALSE = False
 _AUTO_MERGE_METADATA_LOCKS: dict[str, asyncio.Lock] = {}
 
@@ -666,6 +669,23 @@ async def _is_private_repo(client: httpx.AsyncClient, token: str, owner: str, re
     return bool(data.get("private")) if isinstance(data, dict) else False
 
 
+def _maybe_append_linear_closing_line(title: str, body: str) -> str:
+    """Append the closing line declared by the PR title."""
+    match = _CLOSING_TITLE_RE.search(title)
+    if match is None:
+        return body
+    ticket = match.group("ticket").upper()
+    if re.search(rf"(?im)^\s*closes\s+{re.escape(ticket)}\s*$", body):
+        return body
+    closing_line = f"Closes {ticket}"
+    if _REFERENCES_HEADING not in body:
+        separator = "\n\n" if body.rstrip() else ""
+        return f"{body.rstrip()}{separator}{closing_line}"
+    before, after = body.split(_REFERENCES_HEADING, 1)
+    separator = "\n\n" if before.rstrip() else ""
+    return f"{before.rstrip()}{separator}{closing_line}\n\n{_REFERENCES_HEADING}{after}"
+
+
 async def _maybe_append_references(
     client: httpx.AsyncClient, token: str, owner: str, repo: str, body: str
 ) -> str:
@@ -747,6 +767,7 @@ async def _open_pull_request(
         )
         if auto_merge_intent:
             draft = False
+        body = _maybe_append_linear_closing_line(title, body)
         body = await _maybe_append_references(client, token, owner, repo, body)
         payload = {"title": title, "head": head, "base": base, "body": body, "draft": draft}
         resp = await client.post(
@@ -787,6 +808,46 @@ async def _open_pull_request(
         if resp.status_code == 422:  # noqa: PLR2004
             existing = await _find_existing_pr(client, token, owner, repo, head)
             if existing is not None:
+                if _CLOSING_TITLE_RE.search(title):
+                    number = existing.get("number")
+                    if not isinstance(number, int):
+                        return _failure_payload(
+                            code=_PR_UPDATE_FAILURE_CODE,
+                            owner=owner,
+                            repo=repo,
+                            head=head,
+                            base=base,
+                            token_kind=kind,
+                            http_status=None,
+                            reason="the existing pull request number was unavailable",
+                            likely_cause="GitHub returned an incomplete existing pull request payload",
+                            suggested_action="inspect the existing pull request and update its body",
+                            branch_pushed=True,
+                            failed_step="update_existing_pull_request",
+                        )
+                    update_resp = await client.patch(
+                        f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{number}",
+                        headers=_auth_headers(token),
+                        json={"body": body},
+                    )
+                    if update_resp.status_code != 200:  # noqa: PLR2004
+                        return _failure_payload(
+                            code=_PR_UPDATE_FAILURE_CODE,
+                            owner=owner,
+                            repo=repo,
+                            head=head,
+                            base=base,
+                            token_kind=kind,
+                            http_status=update_resp.status_code,
+                            reason=(
+                                "GitHub rejected the existing pull request body update: "
+                                f"{_github_message(update_resp)}"
+                            ),
+                            likely_cause="the PR author token cannot edit the existing pull request",
+                            suggested_action="inspect the existing pull request and update its body",
+                            branch_pushed=True,
+                            failed_step="update_existing_pull_request",
+                        )
                 await _record_pr_telemetry(
                     client=client,
                     token=token,
