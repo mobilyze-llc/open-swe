@@ -22,6 +22,7 @@ class PrepareRunState(AgentState):
     rendered_system_prompt: NotRequired[str | None]
     auto_merge_eligible: NotRequired[bool]
     merge_hold_requested: NotRequired[bool]
+    merge_hold_known: NotRequired[bool]
 
 
 def _latest_message_fingerprint(state: Mapping[str, Any]) -> str | None:

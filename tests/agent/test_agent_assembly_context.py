@@ -326,6 +326,7 @@ async def test_policy_unset_preserves_legacy_tool_and_middleware_wiring() -> Non
         "require_plan_approval": False,
         "auto_merge_eligible": False,
         "merge_hold_requested": False,
+        "merge_hold_known": True,
     }
 
 
@@ -513,6 +514,7 @@ async def test_persisted_merge_hold_survives_followup_config() -> None:
     bound_config = captured["bound_config"]
     assert isinstance(bound_config, dict)
     assert bound_config["configurable"]["merge_hold_requested"] is True
+    assert bound_config["configurable"]["merge_hold_known"] is True
     assert prepare_run._merge_hold_requested is True
     assert prepare_run._merge_hold_known is True
     assert prepare_run._auto_merge_eligible is False
@@ -529,6 +531,7 @@ async def test_merge_hold_read_failure_is_current_run_only() -> None:
     bound_config = captured["bound_config"]
     assert isinstance(bound_config, dict)
     assert bound_config["configurable"]["merge_hold_requested"] is False
+    assert bound_config["configurable"]["merge_hold_known"] is False
     assert bound_config["configurable"]["auto_merge_eligible"] is False
     assert prepare_run._merge_hold_requested is False
     assert prepare_run._merge_hold_known is False

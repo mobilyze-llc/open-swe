@@ -635,6 +635,7 @@ def test_auto_merge_eligible_forces_non_draft_and_reports_tracking(
             "thread_id": "thread-1",
             "auto_merge_mode": "always",
             "auto_merge_eligible": True,
+            "merge_hold_known": True,
             "require_plan_approval": False,
         },
     )
@@ -664,6 +665,7 @@ def test_auto_merge_hold_is_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None
             "thread_id": "thread-1",
             "auto_merge_mode": "always",
             "auto_merge_eligible": True,
+            "merge_hold_known": True,
             "merge_hold_requested": True,
         },
     )
@@ -692,6 +694,7 @@ async def test_on_plan_approval_requires_gate_and_approved_plan(
             "thread_id": "t1",
             "auto_merge_mode": "on_plan_approval",
             "auto_merge_eligible": True,
+            "merge_hold_known": True,
             "require_plan_approval": True,
         }
     )
@@ -700,6 +703,7 @@ async def test_on_plan_approval_requires_gate_and_approved_plan(
             "thread_id": "t1",
             "auto_merge_mode": "on_plan_approval",
             "auto_merge_eligible": True,
+            "merge_hold_known": True,
             "require_plan_approval": False,
         }
     )
@@ -713,6 +717,7 @@ def test_auto_merge_non_default_base_remains_draft(monkeypatch: pytest.MonkeyPat
             "thread_id": "thread-1",
             "auto_merge_mode": "always",
             "auto_merge_eligible": True,
+            "merge_hold_known": True,
         },
     )
     _stub_token(monkeypatch)
@@ -748,3 +753,22 @@ def test_auto_merge_non_default_base_remains_draft(monkeypatch: pytest.MonkeyPat
 
     assert client.post_calls[0]["json"]["draft"] is True
     assert result["auto_merge_eligible"] is False
+
+
+@pytest.mark.asyncio
+async def test_state_approval_cannot_override_unknown_hold_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(opr, "_thread_has_active_auto_merge", lambda *_a: _coro(False))
+
+    eligible = await opr._resolve_auto_merge_eligibility(
+        {
+            "thread_id": "t1",
+            "auto_merge_mode": "always",
+            "auto_merge_eligible": False,
+            "merge_hold_known": False,
+        },
+        {"auto_merge_eligible": True, "merge_hold_known": False},
+    )
+
+    assert eligible is False

@@ -963,6 +963,7 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
             "work_dir": work_dir,
             "auto_merge_eligible": auto_merge_eligible,
             "merge_hold_requested": merge_hold_requested,
+            "merge_hold_known": merge_hold_known,
             "rendered_system_prompt": construct_system_prompt(
                 working_dir=work_dir,
                 linear_project_id=self._linear_project_id,
@@ -1051,6 +1052,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
     configurable["require_plan_approval"] = require_plan_approval
     configurable["auto_merge_eligible"] = merge_eligible
     configurable["merge_hold_requested"] = merge_hold_requested
+    configurable["merge_hold_known"] = merge_hold_known
 
     plan_profile = resolve_stage_profile(
         "plan",

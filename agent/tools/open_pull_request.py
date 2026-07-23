@@ -107,9 +107,13 @@ async def _resolve_auto_merge_eligibility(
 ) -> bool:
     thread_id = configurable.get("thread_id")
     state_eligible = isinstance(state, dict) and state.get("auto_merge_eligible") is True
+    merge_hold_known = configurable.get("merge_hold_known") is True or (
+        isinstance(state, dict) and state.get("merge_hold_known") is True
+    )
     if (
         not isinstance(thread_id, str)
         or not thread_id
+        or not merge_hold_known
         or not (configurable.get("auto_merge_eligible") is True or state_eligible)
         or configurable.get("merge_hold_requested") is True
         or (isinstance(state, dict) and state.get("merge_hold_requested") is True)

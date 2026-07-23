@@ -32,6 +32,7 @@ class ApprovePlanState(TypedDict, total=False):
     plan_approval_blocked: bool
     auto_merge_eligible: bool
     merge_hold_requested: bool
+    merge_hold_known: bool
 
 
 async def approve_plan(
@@ -76,11 +77,18 @@ async def approve_plan(
             or content_requests_merge_hold(feedback)
             or content_requests_merge_hold(plan_markdown)
         )
-        auto_merge_eligible = not hold_merge and (
-            mode == AUTO_MERGE_ALWAYS
-            or (
-                mode == AUTO_MERGE_ON_PLAN_APPROVAL
-                and configurable.get("require_plan_approval") is True
+        hold_known = (
+            isinstance(state, dict) and state.get("merge_hold_known") is True
+        ) or configurable.get("merge_hold_known") is True
+        auto_merge_eligible = (
+            hold_known
+            and not hold_merge
+            and (
+                mode == AUTO_MERGE_ALWAYS
+                or (
+                    mode == AUTO_MERGE_ON_PLAN_APPROVAL
+                    and configurable.get("require_plan_approval") is True
+                )
             )
         )
     except Exception as exc:  # noqa: BLE001
@@ -92,6 +100,7 @@ async def approve_plan(
             "plan_mode": False,
             "auto_merge_eligible": auto_merge_eligible,
             "merge_hold_requested": hold_merge,
+            "merge_hold_known": hold_known,
             "messages": [
                 ToolMessage(
                     content=_approved_message(
