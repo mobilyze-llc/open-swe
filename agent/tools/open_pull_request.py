@@ -31,6 +31,7 @@ _CLOSING_TITLE_RE = re.compile(r"\[closes\s+(?P<ticket>[A-Z][A-Z0-9]*-\d+)\]\s*$
 _ACCESS_FAILURE_CODE = "github_app_access_missing_or_repo_not_found"
 _BRANCH_FAILURE_CODE = "github_pr_branch_not_visible"
 _PREFLIGHT_FAILURE_CODE = "github_pr_preflight_failed"
+_PR_UPDATE_FAILURE_CODE = "github_pr_update_failed"
 _PR_CREATED_FALSE = False
 _AUTO_MERGE_METADATA_LOCKS: dict[str, asyncio.Lock] = {}
 
@@ -807,6 +808,46 @@ async def _open_pull_request(
         if resp.status_code == 422:  # noqa: PLR2004
             existing = await _find_existing_pr(client, token, owner, repo, head)
             if existing is not None:
+                if _CLOSING_TITLE_RE.search(title):
+                    number = existing.get("number")
+                    if not isinstance(number, int):
+                        return _failure_payload(
+                            code=_PR_UPDATE_FAILURE_CODE,
+                            owner=owner,
+                            repo=repo,
+                            head=head,
+                            base=base,
+                            token_kind=kind,
+                            http_status=None,
+                            reason="the existing pull request number was unavailable",
+                            likely_cause="GitHub returned an incomplete existing pull request payload",
+                            suggested_action="inspect the existing pull request and update its body",
+                            branch_pushed=True,
+                            failed_step="update_existing_pull_request",
+                        )
+                    update_resp = await client.patch(
+                        f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{number}",
+                        headers=_auth_headers(token),
+                        json={"body": body},
+                    )
+                    if update_resp.status_code != 200:  # noqa: PLR2004
+                        return _failure_payload(
+                            code=_PR_UPDATE_FAILURE_CODE,
+                            owner=owner,
+                            repo=repo,
+                            head=head,
+                            base=base,
+                            token_kind=kind,
+                            http_status=update_resp.status_code,
+                            reason=(
+                                "GitHub rejected the existing pull request body update: "
+                                f"{_github_message(update_resp)}"
+                            ),
+                            likely_cause="the PR author token cannot edit the existing pull request",
+                            suggested_action="inspect the existing pull request and update its body",
+                            branch_pushed=True,
+                            failed_step="update_existing_pull_request",
+                        )
                 await _record_pr_telemetry(
                     client=client,
                     token=token,

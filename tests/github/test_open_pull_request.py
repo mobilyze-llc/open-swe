@@ -22,11 +22,19 @@ class _FakeResponse:
 
 
 class _FakeClient:
-    def __init__(self, *, post: _FakeResponse, get: _FakeResponse | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        post: _FakeResponse,
+        get: _FakeResponse | None = None,
+        patch: _FakeResponse | None = None,
+    ) -> None:
         self._post = post
         self._get = get
+        self._patch = patch
         self.post_calls: list[dict[str, Any]] = []
         self.get_calls: list[dict[str, Any]] = []
+        self.patch_calls: list[dict[str, Any]] = []
 
     async def __aenter__(self) -> _FakeClient:
         return self
@@ -47,6 +55,12 @@ class _FakeClient:
         if self._get is not None:
             return self._get
         return _FakeResponse(200, {"name": "ok", "default_branch": "main"})
+
+    async def patch(
+        self, url: str, *, headers: dict[str, str], json: dict[str, Any]
+    ) -> _FakeResponse:
+        self.patch_calls.append({"url": url, "headers": headers, "json": json})
+        return self._patch or _FakeResponse(200, {})
 
 
 class _RoutingClient:
@@ -88,15 +102,15 @@ def _set_config(monkeypatch: pytest.MonkeyPatch, configurable: dict[str, Any]) -
     monkeypatch.setattr(opr, "get_config", lambda: {"configurable": configurable})
 
 
-def _open() -> dict[str, Any]:
+def _open(*, title: str = "feat: x", body: str = "body") -> dict[str, Any]:
     return asyncio.run(
         opr._open_pull_request(
             owner="langchain-ai",
             repo="open-swe",
             head="open-swe/feature",
             base="main",
-            title="feat: x",
-            body="body",
+            title=title,
+            body=body,
             draft=True,
         )
     )
@@ -252,6 +266,38 @@ def test_returns_existing_pr_on_422(monkeypatch: pytest.MonkeyPatch) -> None:
         "head": "langchain-ai:open-swe/feature",
         "state": "open",
     }
+    assert client.patch_calls == []
+
+
+def test_updates_existing_pr_body_with_linear_closing_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_config(monkeypatch, {"source": "slack", "github_login": "johannes117"})
+
+    from agent.dashboard import profiles
+
+    monkeypatch.setattr(profiles, "get_valid_access_token", lambda *_a, **_k: _coro("user-tok"))
+    monkeypatch.setattr(opr, "get_github_app_installation_token", lambda: _coro("bot"))
+
+    client = _FakeClient(
+        post=_FakeResponse(422, text="A pull request already exists"),
+        get=_FakeResponse(
+            200, [{"html_url": "https://x/pull/9", "number": 9, "user": {"login": "johannes117"}}]
+        ),
+    )
+    _install_client(monkeypatch, client)
+
+    result = _open(title="feat: x [closes AB-12]")
+
+    assert result["success"] is True
+    assert result["created"] is False
+    assert client.patch_calls == [
+        {
+            "url": "https://api.github.com/repos/langchain-ai/open-swe/pulls/9",
+            "headers": opr._auth_headers("user-tok"),
+            "json": {"body": "body\n\nCloses AB-12"},
+        }
+    ]
 
 
 def test_error_surfaced_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
