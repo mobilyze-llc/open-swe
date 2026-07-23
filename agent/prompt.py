@@ -238,6 +238,7 @@ Steps, in order:
 **Rules:**
 - **Never claim a PR was opened/updated** unless the operation returned success and you have the PR URL (from `open_pull_request`'s returned `url`, `gh` output, or `GH_TOKEN=dummy gh pr view --json url --jq .url`). If push or PR creation fails, or there are no changes, say so explicitly. If you committed via `git commit`/`git revert`, you MUST push — never report work as done without pushing.
 - **Never force-push.** Never run `git push --force` or `git push --force-with-lease`, and never amend or rebase commits already on the remote — reviewers rely on inter-commit diffs; add follow-up work as new commits. If a normal push is rejected because the remote has new commits, run `git pull --rebase origin <branch>` and push again; if that conflicts, report it and stop.
+- **Never directly merge a pull request.** `gh pr merge` is permitted only with `--auto --squash` when an Auto-Merge section below explicitly authorizes it. Never use `--admin` or any bypass.
 - **Workflow files** (`.github/workflows/`) may be changed only when explicitly requested.
 - If `git push`, `open_pull_request`, or `gh pr edit` fails with an infrastructure/permission/access error — including "403", "404"/"Not Found" from `open_pull_request`, "GitHub App not installed/access denied", or "Permission denied" — do not retry via `gh pr create`, `gh api repos/.../pulls`, direct REST `POST /repos/.../pulls`, or any other PR creation fallback. Report the failure to the user and end the task."""
 
@@ -276,6 +277,19 @@ def _render_collaboration_section(
     )
 
 
+AUTO_MERGE_SECTION = """---
+
+### Auto-Merge Policy
+
+This run is eligible for merge-on-clean. For every new PR you open:
+- Call `open_pull_request` with `draft=false`; do not later convert the PR back to draft.
+- After the tool returns success with `auto_merge_eligible=true`, arm merge-when-ready with `GH_TOKEN=dummy gh pr merge <number-or-url> --auto --squash`.
+- This only requests auto-merge; branch protection, Open SWE Review, CI, and the merge queue still gate the merge.
+- If the dispatch or plan approval says `hold merge`, do not arm. The durable post-open pause switch is the `hold-merge` label.
+- Never run `gh pr merge` without both `--auto` and `--squash`, and never use `--admin`.
+"""
+
+
 ALWAYS_CREATE_PR_SECTION = """---
 
 ### Always Create PRs Policy Override
@@ -312,6 +326,7 @@ SYSTEM_PROMPT_TEMPLATE = (
     + DEPENDENCY_SECTION
     + EXTERNAL_UNTRUSTED_COMMENTS_SECTION
     + COMMIT_PR_SECTION
+    + "{auto_merge_section}"
     + "{pr_policy_override_section}"
     + "{collaboration_section}"
     + "{repo_instructions_section}"
@@ -324,6 +339,7 @@ def construct_system_prompt(
     linear_issue_number: str = "",
     triggering_user_identity: CollaboratorIdentity | None = None,
     create_prs: bool = False,
+    auto_merge_eligible: bool = False,
     default_repo: dict[str, str] | None = None,
     plan_mode: bool = False,
     plan_url: str | None = None,
@@ -359,6 +375,7 @@ def construct_system_prompt(
         ),
         default_prompt_section=default_prompt_section,
         corridor_prompt_section=CORRIDOR_PROMPT if corridor_enabled else "",
+        auto_merge_section=AUTO_MERGE_SECTION if auto_merge_eligible else "",
         pr_policy_override_section=ALWAYS_CREATE_PR_SECTION if create_prs else "",
         collaboration_section=_render_collaboration_section(triggering_user_identity, thread_url),
         repo_instructions_section=_render_repo_instructions_section(repo_custom_instructions),

@@ -35,6 +35,11 @@ TEAM_SETTINGS_KEY = "default"
 ORG_GUIDELINES_MAX_CHARS = 10_000
 REVIEW_TRACING_PROJECT_MAX_CHARS = 256
 REVIEWER_ROUTING_VALUES = frozenset({"reviewer", "reviewer_adversarial"})
+AutoMergeMode = Literal["never", "on_plan_approval", "always"]
+AUTO_MERGE_NEVER: AutoMergeMode = "never"
+AUTO_MERGE_ON_PLAN_APPROVAL: AutoMergeMode = "on_plan_approval"
+AUTO_MERGE_ALWAYS: AutoMergeMode = "always"
+AUTO_MERGE_MODES = frozenset({AUTO_MERGE_NEVER, AUTO_MERGE_ON_PLAN_APPROVAL, AUTO_MERGE_ALWAYS})
 
 
 class TeamSettingsUpdate(BaseModel):
@@ -49,6 +54,7 @@ class TeamSettingsUpdate(BaseModel):
     autofix_enabled: bool | None = None
     autofix_severity_threshold: Literal["low", "medium", "high", "critical"] | None = None
     require_plan_approval: bool | None = None
+    auto_merge_mode: AutoMergeMode | None = None
     fable_enabled: bool = False
     review_tracing_project: str | None = None
     org_guidelines: str | None = None
@@ -239,8 +245,17 @@ _MODEL_PAIR_FIELDS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _normalize_auto_merge_mode(value: object) -> AutoMergeMode:
+    if value == AUTO_MERGE_ALWAYS:
+        return AUTO_MERGE_ALWAYS
+    if value == AUTO_MERGE_ON_PLAN_APPROVAL:
+        return AUTO_MERGE_ON_PLAN_APPROVAL
+    return AUTO_MERGE_NEVER
+
+
 def normalize_team_settings_for_response(settings: dict[str, Any]) -> dict[str, Any]:
     value = dict(settings)
+    value["auto_merge_mode"] = _normalize_auto_merge_mode(value.get("auto_merge_mode"))
     for model_field, effort_field in _MODEL_PAIR_FIELDS:
         model = value.get(model_field)
         effort = value.get(effort_field)
@@ -281,6 +296,7 @@ def _default_settings() -> dict[str, Any]:
         "autofix_enabled": False,
         "autofix_severity_threshold": "medium",
         "require_plan_approval": False,
+        "auto_merge_mode": AUTO_MERGE_NEVER,
         "fable_enabled": False,
         "review_tracing_project": None,
         "org_guidelines": None,
@@ -364,6 +380,11 @@ async def upsert_team_settings(update: TeamSettingsUpdate) -> dict[str, Any]:
             update.require_plan_approval
             if update.require_plan_approval is not None
             else stored.get("require_plan_approval")
+        ),
+        "auto_merge_mode": (
+            update.auto_merge_mode
+            if update.auto_merge_mode is not None
+            else _normalize_auto_merge_mode(stored.get("auto_merge_mode"))
         ),
         "fable_enabled": update.fable_enabled,
         "review_tracing_project": update.review_tracing_project,
@@ -515,6 +536,12 @@ async def get_team_require_plan_approval() -> bool:
     """Read the plan gate policy without converting store failures to the default."""
     settings = await get_team_settings(raise_on_error=True)
     return settings.get("require_plan_approval") is True
+
+
+async def get_team_auto_merge_mode() -> AutoMergeMode:
+    """Read the auto-merge policy, defaulting invalid legacy values to Never."""
+    settings = await get_team_settings(raise_on_error=True)
+    return _normalize_auto_merge_mode(settings.get("auto_merge_mode"))
 
 
 async def get_team_review_trace_links_enabled() -> bool:

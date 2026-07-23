@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from typing import Any
+from datetime import UTC, datetime
+from typing import Annotated, Any
 from urllib.parse import quote
 
 import httpx
 from langgraph.config import get_config
+from langgraph.prebuilt import InjectedState
 from langgraph_sdk import get_client
 
 from ..dashboard.agent_usage import record_agent_pr_usage
-from ..dashboard.plan_store import get_plan_content
+from ..dashboard.plan_store import PLAN_STATUS_APPROVED, get_plan_content
+from ..dashboard.team_settings import AUTO_MERGE_ALWAYS, AUTO_MERGE_ON_PLAN_APPROVAL
 from ..utils.dashboard_links import dashboard_plan_url
 from ..utils.github_app import get_github_app_installation_token
 from ..utils.github_comments import derive_pr_state
@@ -26,6 +30,7 @@ _ACCESS_FAILURE_CODE = "github_app_access_missing_or_repo_not_found"
 _BRANCH_FAILURE_CODE = "github_pr_branch_not_visible"
 _PREFLIGHT_FAILURE_CODE = "github_pr_preflight_failed"
 _PR_CREATED_FALSE = False
+_AUTO_MERGE_METADATA_LOCKS: dict[str, asyncio.Lock] = {}
 
 
 async def _resolve_pr_author_token() -> tuple[str | None, str]:
@@ -83,6 +88,50 @@ def _configurable() -> dict[str, Any]:
         return {}
     configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
     return dict(configurable) if isinstance(configurable, dict) else {}
+
+
+async def _thread_has_active_auto_merge(thread_id: str) -> bool:
+    try:
+        thread = await get_client().threads.get(thread_id)
+    except Exception:
+        logger.warning("Could not verify existing auto-merge intent for thread %s", thread_id)
+        return True
+    metadata = (
+        thread.get("metadata") if isinstance(thread, dict) else getattr(thread, "metadata", None)
+    )
+    return isinstance(metadata, dict) and metadata.get("auto_merge_reconcile") is True
+
+
+async def _resolve_auto_merge_eligibility(
+    configurable: dict[str, Any], state: dict[str, Any] | None = None
+) -> bool:
+    thread_id = configurable.get("thread_id")
+    state_eligible = isinstance(state, dict) and state.get("auto_merge_eligible") is True
+    merge_hold_known = configurable.get("merge_hold_known") is True or (
+        isinstance(state, dict) and state.get("merge_hold_known") is True
+    )
+    if (
+        not isinstance(thread_id, str)
+        or not thread_id
+        or not merge_hold_known
+        or not (configurable.get("auto_merge_eligible") is True or state_eligible)
+        or configurable.get("merge_hold_requested") is True
+        or (isinstance(state, dict) and state.get("merge_hold_requested") is True)
+    ):
+        return False
+    if await _thread_has_active_auto_merge(thread_id):
+        return False
+    mode = configurable.get("auto_merge_mode")
+    if mode == AUTO_MERGE_ALWAYS:
+        return True
+    if mode != AUTO_MERGE_ON_PLAN_APPROVAL or configurable.get("require_plan_approval") is not True:
+        return False
+    try:
+        plan = await get_plan_content(thread_id, raise_on_error=True)
+    except Exception:
+        logger.warning("Could not verify plan approval while opening PR", exc_info=True)
+        return False
+    return bool(plan and plan.get("status") == PLAN_STATUS_APPROVED)
 
 
 def _head_branch_for_repo(owner: str, head: str) -> str | None:
@@ -456,33 +505,38 @@ async def _record_pr_telemetry(
     head: str,
     base: str,
     pr: dict[str, Any],
-) -> None:
+    auto_merge_intent: bool = False,
+    seed_auto_merge_metadata: bool = False,
+) -> bool:
     pr_number = pr.get("number")
     if not isinstance(pr_number, int):
-        return
+        return False
     try:
         details = await _fetch_pr_details(client, token, owner, repo, pr_number)
-        config = get_config()
-        configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
-        thread_id = configurable.get("thread_id")
-        github_login = configurable.get("github_login")
-        user_email = configurable.get("user_email")
+    except Exception:
+        logger.debug("Failed to fetch PR details for %s/%s#%s", owner, repo, pr_number)
+        details = {}
+    configurable = _configurable()
+    thread_id = configurable.get("thread_id")
+    github_login = configurable.get("github_login")
+    user_email = configurable.get("user_email")
+    pr_url = details.get("html_url") or pr.get("html_url")
+    merged = bool(details.get("merged"))
+    is_draft = bool(details.get("draft", pr.get("draft")))
+    state = details.get("state") if isinstance(details.get("state"), str) else "open"
+    additions_value = details.get("additions")
+    additions = additions_value if isinstance(additions_value, int) else 0
+    deletions_value = details.get("deletions")
+    deletions = deletions_value if isinstance(deletions_value, int) else 0
+    changed_files_value = details.get("changed_files")
+    changed_files = changed_files_value if isinstance(changed_files_value, int) else 0
+    try:
         if not isinstance(github_login, str) or not github_login.strip():
             from ..dashboard.user_mappings import login_for_email
 
             github_login = (
                 await login_for_email(user_email if isinstance(user_email, str) else None) or ""
             )
-        pr_url = details.get("html_url") or pr.get("html_url")
-        merged = bool(details.get("merged"))
-        is_draft = bool(details.get("draft", pr.get("draft")))
-        state = details.get("state") if isinstance(details.get("state"), str) else "open"
-        additions_value = details.get("additions")
-        additions = additions_value if isinstance(additions_value, int) else 0
-        deletions_value = details.get("deletions")
-        deletions = deletions_value if isinstance(deletions_value, int) else 0
-        changed_files_value = details.get("changed_files")
-        changed_files = changed_files_value if isinstance(changed_files_value, int) else 0
         await record_agent_pr_usage(
             thread_id=thread_id if isinstance(thread_id, str) else None,
             github_login=github_login,
@@ -499,28 +553,57 @@ async def _record_pr_telemetry(
             state=state,
             merged=merged,
         )
-        if isinstance(thread_id, str) and thread_id:
-            await get_client().threads.update(
-                thread_id=thread_id,
-                metadata={
-                    "agent_kind": "agent",
-                    "pr_url": pr_url if isinstance(pr_url, str) else "",
-                    "pr_number": pr_number,
-                    "pr_state": derive_pr_state(state=state, merged=merged, draft=is_draft),
-                    "pr_title": details.get("title") or pr.get("title"),
-                    "branch_name": head,
-                    "base_branch": base,
-                    "diff_stats": {
-                        "files": changed_files,
-                        "additions": additions,
-                        "deletions": deletions,
-                    },
-                },
-            )
     except Exception:
-        logger.debug(
-            "Failed to record PR usage for %s/%s#%s", owner, repo, pr_number, exc_info=True
-        )
+        logger.debug("Failed to record PR usage for %s/%s#%s", owner, repo, pr_number)
+    if not isinstance(thread_id, str) or not thread_id:
+        return False
+    lock = _AUTO_MERGE_METADATA_LOCKS.setdefault(thread_id, asyncio.Lock())
+    async with lock:
+        if seed_auto_merge_metadata and await _thread_has_active_auto_merge(thread_id):
+            logger.warning(
+                "Leaving active auto-merge PR metadata unchanged for thread %s", thread_id
+            )
+            return False
+        metadata = {
+            "agent_kind": "agent",
+            "pr_url": pr_url if isinstance(pr_url, str) else "",
+            "pr_number": pr_number,
+            "pr_state": derive_pr_state(state=state, merged=merged, draft=is_draft),
+            "pr_title": details.get("title") or pr.get("title"),
+            "branch_name": head,
+            "base_branch": base,
+            "diff_stats": {
+                "files": changed_files,
+                "additions": additions,
+                "deletions": deletions,
+            },
+        }
+        if seed_auto_merge_metadata and auto_merge_intent:
+            metadata.update(
+                {
+                    "pr_owner": owner,
+                    "pr_repo": repo,
+                    "auto_merge_intent": True,
+                    "auto_merge_reconcile": True,
+                    "auto_merge_phase": "pending",
+                    "auto_merge_phase_at": datetime.now(UTC).isoformat(),
+                    "auto_merge_head_sha": "",
+                    "auto_merge_recovery_attempted": False,
+                    "auto_merge_alert_reason": "",
+                }
+            )
+        try:
+            await get_client().threads.update(thread_id=thread_id, metadata=metadata)
+        except Exception:
+            logger.warning(
+                "Failed to persist PR reconciliation metadata for %s/%s#%s",
+                owner,
+                repo,
+                pr_number,
+                exc_info=True,
+            )
+            return False
+    return seed_auto_merge_metadata and auto_merge_intent
 
 
 async def _plan_reference_line(configurable: dict[str, Any]) -> str | None:
@@ -620,7 +703,10 @@ async def _open_pull_request(
     title: str,
     body: str,
     draft: bool,
+    state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    configurable = _configurable()
+    auto_merge_requested = await _resolve_auto_merge_eligibility(configurable, state)
     token, kind = await _resolve_pr_author_token()
     if not token:
         return _failure_payload(
@@ -650,6 +736,17 @@ async def _open_pull_request(
         )
         if preflight_failure is not None:
             return preflight_failure
+        repo_resp = await _github_get(client, token, f"/repos/{owner}/{repo}")
+        repo_data = repo_resp.json() if repo_resp.status_code == 200 else {}
+        default_branch = repo_data.get("default_branch") if isinstance(repo_data, dict) else None
+        auto_merge_intent = (
+            auto_merge_requested
+            and isinstance(default_branch, str)
+            and bool(default_branch)
+            and base == default_branch
+        )
+        if auto_merge_intent:
+            draft = False
         body = await _maybe_append_references(client, token, owner, repo, body)
         payload = {"title": title, "head": head, "base": base, "body": body, "draft": draft}
         resp = await client.post(
@@ -660,7 +757,7 @@ async def _open_pull_request(
         if resp.status_code == 201:
             pr = resp.json()
             if isinstance(pr, dict):
-                await _record_pr_telemetry(
+                auto_merge_tracked = await _record_pr_telemetry(
                     client=client,
                     token=token,
                     owner=owner,
@@ -668,7 +765,12 @@ async def _open_pull_request(
                     head=head,
                     base=base,
                     pr=pr,
+                    auto_merge_intent=auto_merge_intent,
+                    seed_auto_merge_metadata=True,
                 )
+            else:
+                auto_merge_tracked = False
+            effective_auto_merge = auto_merge_intent and auto_merge_tracked
             return {
                 "success": True,
                 "created": True,
@@ -676,6 +778,8 @@ async def _open_pull_request(
                 "number": pr.get("number"),
                 "author": (pr.get("user") or {}).get("login"),
                 "token_kind": kind,
+                "auto_merge_eligible": effective_auto_merge,
+                "auto_merge_tracked": auto_merge_tracked,
             }
 
         # A PR for this head branch may already exist — return it so the agent
@@ -699,6 +803,8 @@ async def _open_pull_request(
                     "number": existing.get("number"),
                     "author": (existing.get("user") or {}).get("login"),
                     "token_kind": kind,
+                    "auto_merge_eligible": False,
+                    "auto_merge_tracked": False,
                 }
 
         if resp.status_code == 404:
@@ -746,6 +852,7 @@ async def open_pull_request(
     title: str,
     body: str,
     draft: bool = True,
+    state: Annotated[dict[str, Any] | None, InjectedState] = None,
 ) -> dict[str, Any]:
     """Open a draft GitHub pull request attributed to the triggering user.
 
@@ -781,4 +888,5 @@ async def open_pull_request(
         title=title,
         body=body,
         draft=draft,
+        state=state,
     )

@@ -161,10 +161,13 @@ export interface ProfileUpdate {
   review_draft_prs?: boolean | null
 }
 
+export type AutoMergeMode = "never" | "on_plan_approval" | "always"
+
 export interface TeamSettings {
   review_draft_prs: boolean
   pr_summaries: boolean
   review_trace_links: boolean
+  auto_merge_mode?: AutoMergeMode | null
   /** Tri-state LLM Gateway toggle; null inherits the LANGSMITH_GATEWAY_ENABLED default. */
   gateway_enabled?: boolean | null
   fable_enabled?: boolean

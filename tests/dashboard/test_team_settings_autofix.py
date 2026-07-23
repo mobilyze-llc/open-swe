@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from agent.dashboard.team_settings import (
+    AUTO_MERGE_ALWAYS,
+    AUTO_MERGE_NEVER,
+    AUTO_MERGE_ON_PLAN_APPROVAL,
     TeamSettingsUpdate,
+    get_team_auto_merge_mode,
     get_team_autofix_settings,
     get_team_require_plan_approval,
     upsert_team_settings,
@@ -189,3 +193,50 @@ async def test_plan_approval_lookup_failure_propagates_to_policy_cache() -> None
     ):
         with pytest.raises(RuntimeError, match="store unavailable"):
             await get_team_require_plan_approval()
+
+
+@pytest.mark.asyncio
+async def test_auto_merge_defaults_never_when_absent_or_invalid() -> None:
+    for value in ({}, {"auto_merge_mode": "sometimes"}):
+        with patch(
+            "agent.dashboard.team_settings.get_team_settings",
+            new_callable=AsyncMock,
+            return_value=value,
+        ):
+            assert await get_team_auto_merge_mode() == AUTO_MERGE_NEVER
+
+
+@pytest.mark.asyncio
+async def test_auto_merge_mode_survives_settings_scrub() -> None:
+    with patch(
+        "agent.dashboard.team_settings._get_stored_team_settings",
+        new_callable=AsyncMock,
+        return_value={"auto_merge_mode": AUTO_MERGE_ALWAYS},
+    ):
+        assert await get_team_auto_merge_mode() == AUTO_MERGE_ALWAYS
+
+
+@pytest.mark.asyncio
+async def test_upsert_preserves_and_sets_auto_merge_mode() -> None:
+    client, put = _put_capture()
+    with (
+        patch(
+            "agent.dashboard.team_settings._get_stored_team_settings",
+            new_callable=AsyncMock,
+            return_value={"auto_merge_mode": AUTO_MERGE_ALWAYS},
+        ),
+        patch("agent.dashboard.team_settings._client", return_value=client),
+    ):
+        preserved = await upsert_team_settings(TeamSettingsUpdate())
+        updated = await upsert_team_settings(
+            TeamSettingsUpdate(auto_merge_mode=AUTO_MERGE_ON_PLAN_APPROVAL)
+        )
+
+    assert preserved["auto_merge_mode"] == AUTO_MERGE_ALWAYS
+    assert updated["auto_merge_mode"] == AUTO_MERGE_ON_PLAN_APPROVAL
+    assert put.await_count == 2
+
+
+def test_update_rejects_unknown_auto_merge_mode() -> None:
+    with pytest.raises(ValueError):
+        TeamSettingsUpdate(auto_merge_mode="sometimes")  # type: ignore[arg-type]

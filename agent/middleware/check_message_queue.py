@@ -18,6 +18,7 @@ from langgraph.store.base import BaseStore
 from langgraph_sdk import get_client
 
 from ..dashboard.options import model_supports_images
+from ..dispatch import content_requests_merge_hold
 from ..utils.dashboard_handoff import (  # noqa: F401
     DASHBOARD_HANDOFF_INSTRUCTION,
     DASHBOARD_HANDOFF_MARKER,
@@ -33,6 +34,7 @@ class LinearNotifyState(AgentState):
 
     linear_messages_sent_count: int
     plan_approval_blocked: NotRequired[bool]
+    merge_hold_requested: NotRequired[bool]
 
 
 async def _resolve_thread_model_id(thread_id: str) -> str | None:
@@ -99,6 +101,7 @@ def _message_update(
     thread_id: str,
     *,
     plan_approval_blocked: bool | None = None,
+    merge_hold_requested: bool = False,
 ) -> dict[str, Any] | None:
     if not content_blocks:
         return None
@@ -110,6 +113,8 @@ def _message_update(
     update: dict[str, Any] = {"messages": [{"role": "user", "content": content_blocks}]}
     if plan_approval_blocked is not None:
         update["plan_approval_blocked"] = plan_approval_blocked
+    if merge_hold_requested:
+        update["merge_hold_requested"] = True
     return update
 
 
@@ -240,8 +245,16 @@ async def check_message_queue_before_model(  # noqa: PLR0911
                 logger.debug("Queued message contains text content")
                 content_blocks.append({"type": "text", "text": content})
 
+        merge_hold_requested = content_requests_merge_hold(content_blocks)
+        if merge_hold_requested:
+            await get_client().threads.update(
+                thread_id=thread_id, metadata={"merge_hold_requested": True}
+            )
         return _message_update(
-            content_blocks, thread_id, plan_approval_blocked=plan_approval_blocked
+            content_blocks,
+            thread_id,
+            plan_approval_blocked=plan_approval_blocked,
+            merge_hold_requested=merge_hold_requested,
         )  # noqa: TRY300
     except Exception:
         logger.exception("Error in check_message_queue_before_model")

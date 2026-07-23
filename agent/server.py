@@ -52,9 +52,15 @@ from .dashboard.options import (
     gate_fable_model,
     model_supports_effort,
 )
+from .dashboard.plan_store import PLAN_STATUS_APPROVED, get_plan_content
 from .dashboard.repo_snapshots import resolve_repo_snapshot_id
 from .dashboard.team_settings import (
+    AUTO_MERGE_ALWAYS,
+    AUTO_MERGE_NEVER,
+    AUTO_MERGE_ON_PLAN_APPROVAL,
+    AutoMergeMode,
     get_effective_gateway_enabled,
+    get_team_auto_merge_mode,
     get_team_default_model_pair,
     get_team_default_repo,
     get_team_fable_enabled,
@@ -62,6 +68,7 @@ from .dashboard.team_settings import (
     get_team_stage_profile,
 )
 from .dashboard.user_mappings import email_for_login
+from .dispatch import content_requests_merge_hold
 from .integrations.corridor_mcp import load_corridor_tools
 from .integrations.currents_tools import load_currents_tools
 from .integrations.datadog_mcp import load_datadog_tools
@@ -739,6 +746,60 @@ async def _cached_require_plan_approval() -> bool:
         return True
 
 
+_AUTO_MERGE_MODE_CACHE_KEY = "team:auto-merge-mode"
+
+
+async def _cached_auto_merge_mode() -> AutoMergeMode:
+    try:
+        return await ttl_cache.cached(
+            _AUTO_MERGE_MODE_CACHE_KEY,
+            60,
+            get_team_auto_merge_mode,
+        )
+    except Exception:
+        logger.warning(
+            "Auto-merge policy unavailable with no known-good value; disabling auto-merge",
+            exc_info=True,
+        )
+        ttl_cache.set_cached(_AUTO_MERGE_MODE_CACHE_KEY, AUTO_MERGE_NEVER, 60)
+        return AUTO_MERGE_NEVER
+
+
+def _auto_merge_eligible(
+    mode: AutoMergeMode,
+    *,
+    require_plan_approval: bool,
+    plan_approved: bool,
+    hold_merge: bool,
+) -> bool:
+    if hold_merge:
+        return False
+    if mode == AUTO_MERGE_ALWAYS:
+        return True
+    return mode == AUTO_MERGE_ON_PLAN_APPROVAL and require_plan_approval and plan_approved
+
+
+async def _persisted_merge_hold_requested(thread_id: str) -> bool | None:
+    try:
+        thread = await client.threads.get(thread_id)
+    except Exception:
+        logger.warning("Could not verify persisted merge hold; auto-merge disabled", exc_info=True)
+        return None
+    metadata = (
+        thread.get("metadata") if isinstance(thread, dict) else getattr(thread, "metadata", None)
+    )
+    return isinstance(metadata, dict) and metadata.get("merge_hold_requested") is True
+
+
+async def _plan_was_approved(thread_id: str) -> bool:
+    try:
+        plan = await get_plan_content(thread_id, raise_on_error=True)
+    except Exception:
+        logger.warning("Could not verify plan approval; auto-merge disabled", exc_info=True)
+        return False
+    return bool(plan and plan.get("status") == PLAN_STATUS_APPROVED)
+
+
 async def _record_plan_gate_bypass(thread_id: str, github_login: str | None) -> None:
     """Audit a bypass; v1 leaves authorization to noop auth/single-operator deployment."""
     actor = github_login or "unknown"
@@ -785,6 +846,10 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
         linear_project_id: str,
         linear_issue_number: str,
         create_prs: bool,
+        auto_merge_mode: AutoMergeMode,
+        auto_merge_eligible: bool,
+        merge_hold_requested: bool,
+        merge_hold_known: bool,
         plan_mode: bool,
         plan_gate_forced: bool,
         plan_profile_name: str,
@@ -803,6 +868,10 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
         self._linear_project_id = linear_project_id
         self._linear_issue_number = linear_issue_number
         self._create_prs = create_prs
+        self._auto_merge_mode = auto_merge_mode
+        self._auto_merge_eligible = auto_merge_eligible
+        self._merge_hold_requested = merge_hold_requested
+        self._merge_hold_known = merge_hold_known
         self._plan_mode = plan_mode
         self._plan_gate_forced = plan_gate_forced
         self._plan_profile_name = plan_profile_name
@@ -820,12 +889,25 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
             "repo": configurable.get("repo"),
             "plan_mode": self._plan_mode,
             "plan_gate_forced": self._plan_gate_forced,
+            "auto_merge_mode": self._auto_merge_mode,
+            "auto_merge_eligible": self._auto_merge_eligible,
+            "merge_hold_requested": self._merge_hold_requested,
+            "merge_hold_known": self._merge_hold_known,
             "plan_profile": self._plan_profile_name,
             "model": self._model_id,
             "effort": self._effort,
         }
 
     async def _prepare(self, state: PrepareRunState, runtime: Runtime) -> dict[str, Any]:  # noqa: ARG002
+        messages = state.get("messages")
+        latest = messages[-1] if isinstance(messages, list) and messages else None
+        latest_content = getattr(latest, "content", latest)
+        message_requests_hold = isinstance(
+            latest_content, (str, list)
+        ) and content_requests_merge_hold(latest_content)
+        merge_hold_requested = self._merge_hold_requested or message_requests_hold
+        merge_hold_known = self._merge_hold_known or message_requests_hold
+        auto_merge_eligible = self._auto_merge_eligible and not merge_hold_requested
         github_token, _expires_at = await resolve_github_token(self._config, self._thread_id)
         configurable = (self._config or {}).get("configurable") or {}
         prompt_default_repo = await _resolve_prompt_default_repo(configurable)
@@ -850,18 +932,20 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
         repo_custom_instructions = await _resolve_repo_custom_instructions(prompt_default_repo)
 
         try:
-            await client.threads.update(
-                thread_id=self._thread_id,
-                metadata={
-                    "agent_kind": "agent",
-                    "model": self._model_id,
-                    "effort": self._effort,
-                    "source": self._source,
-                    "plan_mode": self._plan_mode,
-                    "plan_gate_forced": self._plan_gate_forced,
-                    "plan_profile": self._plan_profile_name,
-                },
-            )
+            metadata_update = {
+                "agent_kind": "agent",
+                "model": self._model_id,
+                "effort": self._effort,
+                "source": self._source,
+                "plan_mode": self._plan_mode,
+                "plan_gate_forced": self._plan_gate_forced,
+                "plan_profile": self._plan_profile_name,
+                "auto_merge_mode": self._auto_merge_mode,
+                "auto_merge_eligible": auto_merge_eligible,
+            }
+            if merge_hold_known:
+                metadata_update["merge_hold_requested"] = merge_hold_requested
+            await client.threads.update(thread_id=self._thread_id, metadata=metadata_update)
             await record_agent_thread_usage(
                 thread_id=self._thread_id,
                 github_login=self._profile_login,
@@ -877,12 +961,16 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
 
         return {
             "work_dir": work_dir,
+            "auto_merge_eligible": auto_merge_eligible,
+            "merge_hold_requested": merge_hold_requested,
+            "merge_hold_known": merge_hold_known,
             "rendered_system_prompt": construct_system_prompt(
                 working_dir=work_dir,
                 linear_project_id=self._linear_project_id,
                 linear_issue_number=self._linear_issue_number,
                 triggering_user_identity=triggering_user_identity,
                 create_prs=self._create_prs,
+                auto_merge_eligible=auto_merge_eligible,
                 default_repo=prompt_default_repo,
                 plan_mode=self._plan_mode,
                 plan_url=dashboard_plan_url(self._thread_id),
@@ -927,6 +1015,7 @@ async def get_agent(config: RunnableConfig) -> Pregel:
         _cached_stage_profile_name("plan"),
         _cached_require_plan_approval(),
     )
+    auto_merge_mode = await _cached_auto_merge_mode()
     plan_gate_bypass = configurable.get("plan_gate_bypass") is True
     plan_mode_forced = configurable.get("plan_gate_forced") is True
     plan_gate_bypassed = plan_gate_bypass and (
@@ -942,6 +1031,28 @@ async def get_agent(config: RunnableConfig) -> Pregel:
         configurable["plan_mode"] = True
         configurable["plan_gate_forced"] = True
         logger.info("Plan approval policy forced plan mode for thread %s", thread_id)
+
+    configured_merge_hold = configurable.get("merge_hold_requested") is True
+    persisted_merge_hold = await _persisted_merge_hold_requested(thread_id)
+    merge_hold_requested = configured_merge_hold or persisted_merge_hold is True
+    merge_hold_known = configured_merge_hold or persisted_merge_hold is not None
+    merge_hold_fail_closed = not merge_hold_known
+    plan_approved = (
+        await _plan_was_approved(thread_id)
+        if auto_merge_mode == AUTO_MERGE_ON_PLAN_APPROVAL
+        else False
+    )
+    merge_eligible = _auto_merge_eligible(
+        auto_merge_mode,
+        require_plan_approval=require_plan_approval,
+        plan_approved=plan_approved,
+        hold_merge=merge_hold_requested or merge_hold_fail_closed,
+    )
+    configurable["auto_merge_mode"] = auto_merge_mode
+    configurable["require_plan_approval"] = require_plan_approval
+    configurable["auto_merge_eligible"] = merge_eligible
+    configurable["merge_hold_requested"] = merge_hold_requested
+    configurable["merge_hold_known"] = merge_hold_known
 
     plan_profile = resolve_stage_profile(
         "plan",
@@ -1225,6 +1336,10 @@ async def get_agent(config: RunnableConfig) -> Pregel:
                     linear_project_id=linear_project_id,
                     linear_issue_number=linear_issue_number,
                     create_prs=always_create_prs,
+                    auto_merge_mode=auto_merge_mode,
+                    auto_merge_eligible=merge_eligible,
+                    merge_hold_requested=merge_hold_requested,
+                    merge_hold_known=merge_hold_known,
                     plan_mode=plan_mode,
                     plan_gate_forced=plan_mode_forced,
                     plan_profile_name=plan_profile.name,

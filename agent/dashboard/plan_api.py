@@ -338,6 +338,8 @@ async def _dispatch_followup(
     configurable["plan_mode"] = plan_mode
     if metadata.get("plan_gate_forced") is True:
         configurable["plan_gate_forced"] = True
+    if metadata.get("merge_hold_requested") is True:
+        configurable["merge_hold_requested"] = True
     if plan_gate_bypass:
         configurable["plan_gate_bypass"] = True
 
