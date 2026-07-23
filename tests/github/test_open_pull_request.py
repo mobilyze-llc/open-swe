@@ -331,17 +331,47 @@ async def _coro(value: Any) -> Any:
     return value
 
 
-def _open_with_body(body: str) -> dict[str, Any]:
+def _open_with_body(body: str, *, title: str = "feat: x") -> dict[str, Any]:
     return asyncio.run(
         opr._open_pull_request(
             owner="langchain-ai",
             repo="open-swe",
             head="open-swe/feature",
             base="main",
-            title="feat: x",
+            title=title,
             body=body,
             draft=True,
         )
+    )
+
+
+def test_appends_linear_closing_line_from_title() -> None:
+    assert (
+        opr._maybe_append_linear_closing_line("feat: x [closes OSWE-123]", "body")
+        == "body\n\nCloses OSWE-123"
+    )
+
+
+def test_omits_linear_closing_line_without_title_suffix() -> None:
+    assert opr._maybe_append_linear_closing_line("feat: x", "body") == "body"
+
+
+def test_does_not_duplicate_linear_closing_line() -> None:
+    body = "body\n\ncLoSeS oswe-123"
+    assert opr._maybe_append_linear_closing_line("feat: x [closes OSWE-123]", body) == body
+
+
+def test_normalizes_case_in_linear_closing_line() -> None:
+    assert (
+        opr._maybe_append_linear_closing_line("feat: x [CLOSES oswe-123]", "body")
+        == "body\n\nCloses OSWE-123"
+    )
+
+
+def test_places_linear_closing_line_before_existing_references() -> None:
+    body = "body\n\n## References\n- existing"
+    assert opr._maybe_append_linear_closing_line("feat: x [closes OSWE-123]", body) == (
+        "body\n\nCloses OSWE-123\n\n## References\n- existing"
     )
 
 
@@ -546,9 +576,10 @@ def test_appends_linear_reference_for_private_repo(monkeypatch: pytest.MonkeyPat
     )
     _install_client(monkeypatch, client)
 
-    _open_with_body("body")
+    _open_with_body("body", title="feat: x [closes AB-12]")
 
     sent_body = client.post_calls[0]["json"]["body"]
+    assert "Closes AB-12\n\n## References" in sent_body
     assert "- Linear ticket: [AB-12](https://linear.app/x/AB-12)" in sent_body
 
 

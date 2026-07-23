@@ -231,7 +231,7 @@ Steps, in order:
    ## Test Plan
    - [ ] <new/novel verification steps only — not "run existing tests">
    ```
-   For private repos, `open_pull_request` appends a `## References` section automatically; for public repos, don't reference private repos or PR/issue numbers. Commit messages: concise, focused on the "why"; default to the PR title.
+   `open_pull_request` derives a standalone `Closes <TICKET>` body line from the title suffix and places it before references. For private repos, it also appends a `## References` section automatically; for public repos, don't reference private repos or PR/issue numbers. Commit messages: concise, focused on the "why"; default to the PR title.
 
 3. **Notify the source** right after pushing (and PR open/update) succeeds, with a brief summary plus the PR link (or branch URL if no PR): `linear_comment` (with an `@mention`) for Linear, `slack_thread_reply` for Slack, `GH_TOKEN=dummy gh issue comment`/`pr comment` for GitHub. Skip if there is no known source channel.
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Annotated, Any
 from urllib.parse import quote
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 GITHUB_API = "https://api.github.com"
 _USER_TOKEN_SOURCES = ("slack", "linear", "dashboard")
 _REFERENCES_HEADING = "## References"
+_CLOSING_TITLE_RE = re.compile(r"\[closes\s+(?P<ticket>[A-Z][A-Z0-9]*-\d+)\]\s*$", re.IGNORECASE)
 _ACCESS_FAILURE_CODE = "github_app_access_missing_or_repo_not_found"
 _BRANCH_FAILURE_CODE = "github_pr_branch_not_visible"
 _PREFLIGHT_FAILURE_CODE = "github_pr_preflight_failed"
@@ -666,6 +668,23 @@ async def _is_private_repo(client: httpx.AsyncClient, token: str, owner: str, re
     return bool(data.get("private")) if isinstance(data, dict) else False
 
 
+def _maybe_append_linear_closing_line(title: str, body: str) -> str:
+    """Append the closing line declared by the PR title."""
+    match = _CLOSING_TITLE_RE.search(title)
+    if match is None:
+        return body
+    ticket = match.group("ticket").upper()
+    if re.search(rf"(?im)^\s*closes\s+{re.escape(ticket)}\s*$", body):
+        return body
+    closing_line = f"Closes {ticket}"
+    if _REFERENCES_HEADING not in body:
+        separator = "\n\n" if body.rstrip() else ""
+        return f"{body.rstrip()}{separator}{closing_line}"
+    before, after = body.split(_REFERENCES_HEADING, 1)
+    separator = "\n\n" if before.rstrip() else ""
+    return f"{before.rstrip()}{separator}{closing_line}\n\n{_REFERENCES_HEADING}{after}"
+
+
 async def _maybe_append_references(
     client: httpx.AsyncClient, token: str, owner: str, repo: str, body: str
 ) -> str:
@@ -747,6 +766,7 @@ async def _open_pull_request(
         )
         if auto_merge_intent:
             draft = False
+        body = _maybe_append_linear_closing_line(title, body)
         body = await _maybe_append_references(client, token, owner, repo, body)
         payload = {"title": title, "head": head, "base": base, "body": body, "draft": draft}
         resp = await client.post(
