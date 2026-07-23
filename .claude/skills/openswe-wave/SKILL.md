@@ -1,0 +1,58 @@
+---
+name: openswe-wave
+description: Operate an Open SWE delivery wave with full-weight plan adjudication and low-noise mechanical monitoring. Use for wave dispatch, plan approval, spot-audit, review follow-up, closeout, recorded-event replay, the two documented merge-queue recoveries, source-anchor checks, and LangSmith trace summaries.
+---
+
+# Open SWE wave operations
+
+Keep plan adjudication and spot-audits at full operator weight. Use these files only to remove mechanical polling, status relay, and deterministic recovery work.
+
+## Required setup
+
+Run from the target repository checkout. Live commands require the named environment variables below and fail with an export instruction when one is absent.
+
+```bash
+export GH_TOKEN=dummy
+export LINEAR_API_KEY=...
+export LANGGRAPH_URL=https://...
+export LANGSMITH_API_KEY=...
+```
+
+`GH_TOKEN=dummy` is correct inside an Open SWE sandbox because the GitHub proxy injects the installation token. Outside that environment, set a token accepted by `gh`.
+
+## Workflow
+
+1. Use `scripts/anchor-sweep <ref> <ticket-file>` before dispatch. Treat present/moved/missing as mechanical evidence only; inspect semantic drift yourself.
+2. Use the templates in `references/comment-templates.md` for dispatch, approval, spot-audit, closeout, and the OSWE-100 tally.
+3. Apply `references/adjudication-checklist.md` before approving a plan.
+4. Start the quiet monitor after dispatch:
+
+```bash
+.claude/skills/openswe-wave/scripts/wave-monitor watch   --issue-id <linear-uuid> --repo <owner/repo> --pr-number <number>
+```
+
+The first sample is a silent baseline. The only emitted wake nodes are:
+
+- `plan_posted`
+- `review_findings_posted`
+- `terminal_merged`
+- `terminal_closed`
+- `terminal_run_error`
+- `unhandled_condition`
+
+PR creation, acknowledgements, normal progress, successful recoveries, queue entry/position changes, and comments authored by the Linear viewer identity stay quiet. Pass `--session-user-id` only when viewer discovery is unavailable.
+
+5. Follow `references/recovery-runbook.md`. The watch command begins before PR creation and discovers the PR from LangGraph metadata. It defaults to recovery dry-run output; after reviewing the recorded-state exercises, restart it with `--apply` to enable acting recovery.
+6. Use `scripts/trace-digest <thread>` for status, token, error, recent-activity, and prompt-size rollups.
+7. Complete the spot-audit and closeout templates. Confirm the tracker transition rather than assuming it.
+
+## Replay and diagnostics
+
+```bash
+scripts/wave-monitor replay --fixture tests/skills/fixtures/openswe_wave/oswe-79-events.json --max-wakes 6
+scripts/wave-monitor recover --fixture tests/skills/fixtures/openswe_wave/pr-43-green-draft.json
+scripts/wave-monitor recover --fixture tests/skills/fixtures/openswe_wave/pr-44-queue-stall.json
+scripts/trace-digest <thread> --fixture <recorded-runs.json>
+```
+
+The monitor is disposable when OSWE-106 replaces session-side liveness polling. The templates, adjudication checklist, recovery evidence gates, anchor sweep, and trace digest remain useful operator assets. Never wire this skill into the deployed service or modify product auto-merge behavior from here.

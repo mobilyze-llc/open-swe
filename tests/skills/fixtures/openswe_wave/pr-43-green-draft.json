@@ -1,0 +1,40 @@
+{
+  "source": "OSWE-109 field report and PR #43 GraphQL timeline",
+  "reason": "green_draft",
+  "repo": "mobilyze-llc/open-swe",
+  "pr_number": 43,
+  "thread_metadata": {
+    "auto_merge_alert_reason": "green_draft"
+  },
+  "pr": {
+    "number": 43,
+    "state": "OPEN",
+    "isDraft": true,
+    "baseRefName": "main",
+    "defaultBranch": "main",
+    "headRefOid": "288272b5ac87252de405bce553a1fa001bd8c944",
+    "mergeStateStatus": "CLEAN",
+    "isInMergeQueue": false,
+    "autoMergeRequest": null,
+    "labels": {
+      "nodes": []
+    },
+    "statusCheckRollup": {
+      "state": "SUCCESS"
+    }
+  },
+  "convert_to_draft_events": [
+    {
+      "createdAt": "2026-07-23T03:20:25Z",
+      "actor": {
+        "__typename": "Bot",
+        "login": "mobilyze-open-swe-studio2"
+      }
+    }
+  ],
+  "linear_comments": [],
+  "inferred_fields": [
+    "thread_metadata.auto_merge_alert_reason projected from the later reconciler contract",
+    "PR state/check/queue fields reconstructed from the OSWE-109 field report at the stall moment"
+  ]
+}

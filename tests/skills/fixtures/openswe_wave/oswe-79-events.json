@@ -1,0 +1,105 @@
+{
+  "source": "OSWE-79 Linear thread and PR #44 timeline, 2026-07-23",
+  "session_user_id": "0f2475b5-868c-46d3-a9ac-a343e360396a",
+  "events": [
+    {
+      "poll_id": "01",
+      "source": "linear",
+      "kind": "ack",
+      "author_id": "98515a73-66e1-4262-bbf8-bd52581d8598",
+      "summary": "On it"
+    },
+    {
+      "poll_id": "02",
+      "source": "linear",
+      "kind": "plan_posted",
+      "author_id": "98515a73-66e1-4262-bbf8-bd52581d8598",
+      "summary": "Plan ready for review"
+    },
+    {
+      "poll_id": "03",
+      "source": "linear",
+      "kind": "approval",
+      "author_id": "0f2475b5-868c-46d3-a9ac-a343e360396a",
+      "summary": "Plan approved"
+    },
+    {
+      "poll_id": "04",
+      "source": "linear",
+      "kind": "ack",
+      "author_id": "98515a73-66e1-4262-bbf8-bd52581d8598",
+      "summary": "On it"
+    },
+    {
+      "poll_id": "05",
+      "source": "langgraph",
+      "kind": "run_error",
+      "summary": "implementation run errored"
+    },
+    {
+      "poll_id": "06",
+      "source": "linear",
+      "kind": "resume",
+      "author_id": "0f2475b5-868c-46d3-a9ac-a343e360396a",
+      "summary": "resume implementation"
+    },
+    {
+      "poll_id": "07",
+      "source": "linear",
+      "kind": "ack",
+      "author_id": "98515a73-66e1-4262-bbf8-bd52581d8598",
+      "summary": "On it"
+    },
+    {
+      "poll_id": "08",
+      "source": "linear",
+      "kind": "pr_created",
+      "author_id": "98515a73-66e1-4262-bbf8-bd52581d8598",
+      "summary": "draft PR opened"
+    },
+    {
+      "poll_id": "09",
+      "source": "github",
+      "kind": "review_findings",
+      "summary": "two unresolved review findings"
+    },
+    {
+      "poll_id": "10",
+      "source": "linear",
+      "kind": "progress",
+      "author_id": "98515a73-66e1-4262-bbf8-bd52581d8598",
+      "summary": "first fixes pushed"
+    },
+    {
+      "poll_id": "11",
+      "source": "github",
+      "kind": "review_findings",
+      "summary": "delta review finding"
+    },
+    {
+      "poll_id": "12",
+      "source": "linear",
+      "kind": "progress",
+      "author_id": "98515a73-66e1-4262-bbf8-bd52581d8598",
+      "summary": "delta fix pushed"
+    },
+    {
+      "poll_id": "13",
+      "source": "github",
+      "kind": "checks_green",
+      "summary": "all checks green"
+    },
+    {
+      "poll_id": "14",
+      "source": "github",
+      "kind": "queue_position",
+      "summary": "queue position changed"
+    },
+    {
+      "poll_id": "15",
+      "source": "github",
+      "kind": "merged",
+      "summary": "PR #44 merged"
+    }
+  ]
+}

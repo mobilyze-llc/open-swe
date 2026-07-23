@@ -1,0 +1,59 @@
+# Merge-queue recovery runbook
+
+Both procedures default to dry-run. Review the emitted evidence and commands before adding `--apply`. Apply mode re-reads every gate and the head SHA immediately before mutation. Any ambiguity becomes `unhandled_condition` and performs no action.
+
+## Green, CLEAN, draft
+
+Trigger only from LangGraph metadata `auto_merge_alert_reason=green_draft`.
+
+Required evidence:
+
+- PR is open, draft, targets the repository default branch, and has a stable head SHA.
+- Required checks are green and merge state is CLEAN.
+- GitHub GraphQL reports `isInMergeQueue=false`.
+- The merge-hold label is absent.
+- At least one `ConvertToDraftEvent` exists.
+- Every event actor is GraphQL `__typename=Bot` and `login=mobilyze-open-swe-studio2`.
+- No Linear action marker exists for the same reason, PR, and head.
+
+Dry-run:
+
+```bash
+scripts/wave-monitor recover --issue-id <issue> --thread-id <thread>   --repo <owner/repo> --pr-number <number>
+```
+
+Apply adds `--apply` and executes, in order:
+
+```bash
+gh pr ready <number> --repo <owner/repo>
+gh pr merge <number> --repo <owner/repo> --auto --squash
+```
+
+The monitor verifies the unchanged head is non-draft with auto-merge armed, then posts a deduplicated Linear action log. A human, missing, null, or unknown actor blocks recovery.
+
+## Armed, green, CLEAN, unqueued
+
+This is a regression fallback. Product reconciliation owns the normal one-shot recovery.
+
+Trigger only from LangGraph metadata `auto_merge_alert_reason=queue_stall`.
+
+Required evidence:
+
+- PR is open, non-draft, targets the default branch, and has a stable head SHA.
+- Auto-merge is armed, required checks are green, and merge state is CLEAN.
+- GitHub GraphQL reports `isInMergeQueue=false`; never substitute `gh pr view --json`.
+- The merge-hold label is absent.
+- No Linear action marker exists for the same reason, PR, and head.
+
+Apply mode executes, in order:
+
+```bash
+gh pr merge <number> --repo <owner/repo> --disable-auto
+gh pr merge <number> --repo <owner/repo> --auto --squash
+```
+
+The monitor verifies the unchanged head remains non-draft with auto-merge armed and posts the Linear action log. It never directly merges or bypasses checks.
+
+## Stand down
+
+Do not mutate when any evidence gate fails, the head moves, an API call fails, a prior action marker exists, the PR is terminal, or post-action verification fails. Emit `unhandled_condition` with the blocking evidence for operator judgment.

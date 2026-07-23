@@ -1,0 +1,33 @@
+{
+  "source": "OSWE-109 field report for PR #44 at 2026-07-23T04:19Z",
+  "reason": "queue_stall",
+  "repo": "mobilyze-llc/open-swe",
+  "pr_number": 44,
+  "thread_metadata": {
+    "auto_merge_alert_reason": "queue_stall"
+  },
+  "pr": {
+    "number": 44,
+    "state": "OPEN",
+    "isDraft": false,
+    "baseRefName": "main",
+    "defaultBranch": "main",
+    "headRefOid": "6cde6d410907cd8cd58572beabdc810ab562fbac",
+    "mergeStateStatus": "CLEAN",
+    "isInMergeQueue": false,
+    "autoMergeRequest": {
+      "enabledAt": "2026-07-23T03:27:17Z"
+    },
+    "labels": {
+      "nodes": []
+    },
+    "statusCheckRollup": {
+      "state": "SUCCESS"
+    }
+  },
+  "linear_comments": [],
+  "inferred_fields": [
+    "thread_metadata.auto_merge_alert_reason projected from the later reconciler contract",
+    "PR open/green/CLEAN/unqueued fields reconstructed from the OSWE-109 field report at the stall moment"
+  ]
+}

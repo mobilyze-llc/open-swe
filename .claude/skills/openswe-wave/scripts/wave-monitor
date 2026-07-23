@@ -1,0 +1,4 @@
+#!/usr/bin/env python3
+from openswe_wave import main
+
+raise SystemExit(main())

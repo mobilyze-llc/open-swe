@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+import sys
+
+from openswe_wave import main
+
+raise SystemExit(main(["trace-digest", *sys.argv[1:]]))
