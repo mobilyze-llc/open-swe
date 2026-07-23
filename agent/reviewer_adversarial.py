@@ -177,7 +177,9 @@ async def _prepare_context(
     if review_context:
         prompt = f"{prompt}\n\n{review_context}"
         context_parts.append(review_context)
-    parent_review_context = _format_parent_review_context(bundle)
+    parent_review_context = _format_parent_review_context(
+        bundle, include_repo_style=not bundle.reviewer_eval
+    )
     if parent_review_context:
         prompt = f"{prompt}\n\n{parent_review_context}"
     prepared = {

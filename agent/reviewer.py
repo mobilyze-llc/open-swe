@@ -956,7 +956,9 @@ async def _prepare_pr_trace_context_best_effort(
         return None
 
 
-def _format_parent_review_context(bundle: ReviewContextBundle) -> str:
+def _format_parent_review_context(
+    bundle: ReviewContextBundle, *, include_repo_style: bool = True
+) -> str:
     sections: list[str] = []
     if bundle.existing_threads_block:
         sections.append(
@@ -968,7 +970,9 @@ def _format_parent_review_context(bundle: ReviewContextBundle) -> str:
         section
         for section in (
             _format_org_review_guidelines_prompt(bundle.org_guidelines),
-            _format_repo_review_style_prompt(bundle.repo_style_prompt),
+            _format_repo_review_style_prompt(bundle.repo_style_prompt)
+            if include_repo_style
+            else "",
             _format_api_standards_prompt(bundle.api_standards_skill),
             format_pr_trace_context_prompt(bundle.pr_trace_context),
         )

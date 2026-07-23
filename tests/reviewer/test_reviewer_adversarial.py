@@ -29,6 +29,7 @@ from agent.reviewer_adversarial import (
     RESERVED_SUBAGENT_TOOLS,
     PrepareAdversarialReviewerRunMiddleware,
     _judgment_context,
+    _prepare_context,
     _render_parent_prompt,
     get_reviewer_adversarial_agent,
 )
@@ -192,6 +193,34 @@ def test_parent_review_context_is_optional_and_uses_stock_framing(
         )
         == f"baseline\n\n{rendered}"
     )
+
+
+@pytest.mark.asyncio
+async def test_adversarial_eval_excludes_historical_repo_style() -> None:
+    eval_bundle = replace(
+        _empty_review_bundle(),
+        reviewer_eval=True,
+        repo_style_prompt="HISTORICAL STYLE MARKER",
+        org_guidelines="ORG MARKER",
+    )
+    non_eval_bundle = replace(eval_bundle, reviewer_eval=False)
+    with (
+        patch(
+            "agent.reviewer_adversarial.gather_review_context",
+            new_callable=AsyncMock,
+            side_effect=[eval_bundle, non_eval_bundle],
+        ),
+        patch("agent.reviewer_adversarial._schedule_diff_grouping", new_callable=AsyncMock),
+    ):
+        eval_prepared = await _prepare_context("thread", {"reviewer_eval": True})
+        non_eval_prepared = await _prepare_context("thread", {})
+
+    assert REVIEWER_EVAL_PROMPT_SUFFIX in eval_prepared["rendered_system_prompt"]
+    assert "HISTORICAL STYLE MARKER" not in eval_prepared["rendered_system_prompt"]
+    assert "HISTORICAL STYLE MARKER" not in eval_prepared["parent_review_context"]
+    assert "ORG MARKER" in eval_prepared["parent_review_context"]
+    assert "HISTORICAL STYLE MARKER" in non_eval_prepared["rendered_system_prompt"]
+    assert "HISTORICAL STYLE MARKER" in non_eval_prepared["parent_review_context"]
 
 
 @pytest.mark.asyncio
