@@ -63,21 +63,21 @@ def test_fastapi_import_path_installs_filters() -> None:
 
 
 def test_httpx_url_is_redacted_through_logging_machinery() -> None:
-    secret = "a" * 64
+    token_value = "a" * 64
     _install()
 
     with _capture("httpx", logging.Formatter("%(levelname)s %(name)s %(message)s")) as stream:
         logging.getLogger("httpx").info(
             'HTTP Request: %s %s "%s %d %s"',
             "POST",
-            httpx.URL(f"https://example.test/webhooks/run-complete?token={secret}"),
+            httpx.URL(f"https://example.test/webhooks/run-complete?token={token_value}"),
             "HTTP/1.1",
             200,
             "OK",
         )
 
     output = stream.getvalue()
-    assert secret not in output
+    assert token_value not in output
     assert "token=***" in output
     assert (
         'HTTP Request: POST https://example.test/webhooks/run-complete?token=*** "HTTP/1.1 200 OK"'
@@ -86,8 +86,8 @@ def test_httpx_url_is_redacted_through_logging_machinery() -> None:
 
 
 def test_webhook_structlog_success_and_failure_fields_are_redacted() -> None:
-    secret = "b" * 64
-    url = f"https://example.test/webhooks/run-complete?token={secret}"
+    token_value = "b" * 64
+    url = f"https://example.test/webhooks/run-complete?token={token_value}"
     _install()
     logger = structlog.stdlib.get_logger("langgraph_api.webhook")
 
@@ -101,7 +101,7 @@ def test_webhook_structlog_success_and_failure_fields_are_redacted() -> None:
         )
 
     output = stream.getvalue()
-    assert secret not in output
+    assert token_value not in output
     assert output.count("token=***") == 4
     assert "Background worker called webhook" in output
     assert "Background worker failed to call webhook" in output
@@ -110,7 +110,7 @@ def test_webhook_structlog_success_and_failure_fields_are_redacted() -> None:
 
 
 def test_server_access_log_query_string_is_redacted_and_fields_are_preserved() -> None:
-    secret = "c" * 64
+    token_value = "c" * 64
     _install()
     logger = structlog.stdlib.get_logger("langgraph_api.server")
 
@@ -121,11 +121,11 @@ def test_server_access_log_query_string_is_redacted_and_fields_are_preserved() -
             path="/webhooks/run-complete",
             status=401,
             route="/webhooks/run-complete",
-            query_string=f"token={secret}",
+            query_string=f"token={token_value}",
         )
 
     output = stream.getvalue()
-    assert secret not in output
+    assert token_value not in output
     assert "token=***" in output
     assert output.count("POST") == 2
     assert output.count("/webhooks/run-complete") == 3
@@ -149,17 +149,17 @@ def test_logger_filter_survives_handler_reconfiguration_and_install_is_idempoten
     assert redaction_filters[0] in logger.filters
     assert old_handler not in logger.handlers
 
-    secret = "d" * 64
+    token_value = "d" * 64
     with _capture("httpx", logging.Formatter("%(message)s")) as stream:
-        logger.info("GET https://example.test/?token=%s", secret)
-    assert secret not in stream.getvalue()
+        logger.info("GET https://example.test/?token=%s", token_value)
+    assert token_value not in stream.getvalue()
     assert "token=***" in stream.getvalue()
 
 
 def test_redaction_failure_never_emits_token_bearing_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    secret = "e" * 64
+    token_value = "e" * 64
     _install()
 
     def fail(_record: logging.LogRecord) -> tuple[object, object]:
@@ -169,18 +169,18 @@ def test_redaction_failure_never_emits_token_bearing_payload(
 
     with _capture("httpx", logging.Formatter("%(name)s %(levelname)s %(message)s")) as stream:
         logging.getLogger("httpx").info("ordinary request completed")
-        logging.getLogger("httpx").warning("GET https://example.test/?token=%s", secret)
+        logging.getLogger("httpx").warning("GET https://example.test/?token=%s", token_value)
 
     lines = stream.getvalue().splitlines()
     assert lines == [
         "httpx INFO ordinary request completed",
         "httpx WARNING token redaction failed",
     ]
-    assert secret not in stream.getvalue()
+    assert token_value not in stream.getvalue()
 
 
 def test_scan_failure_uses_safe_placeholder_before_later_token_argument() -> None:
-    secret = "0" * 64
+    token_value = "0" * 64
     _install()
 
     class Unrenderable:
@@ -188,16 +188,16 @@ def test_scan_failure_uses_safe_placeholder_before_later_token_argument() -> Non
             raise RuntimeError("cannot render")
 
     with _capture("httpx", logging.Formatter("%(name)s %(levelname)s %(message)s")) as stream:
-        logging.getLogger("httpx").warning("%s %s", Unrenderable(), f"token={secret}")
+        logging.getLogger("httpx").warning("%s %s", Unrenderable(), f"token={token_value}")
 
     assert stream.getvalue() == "httpx WARNING token redaction failed\n"
-    assert secret not in stream.getvalue()
+    assert token_value not in stream.getvalue()
 
 
 def test_structlog_redaction_failure_uses_renderable_safe_placeholder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    secret = "f" * 64
+    token_value = "f" * 64
     _install()
 
     def fail(_record: logging.LogRecord) -> tuple[object, object]:
@@ -208,11 +208,11 @@ def test_structlog_redaction_failure_uses_renderable_safe_placeholder(
     with _capture("langgraph_api.server", _structlog_formatter()) as stream:
         structlog.stdlib.get_logger("langgraph_api.server").warning(
             "POST /webhooks/run-complete 401 3ms",
-            query_string=f"token={secret}",
+            query_string=f"token={token_value}",
         )
 
     output = stream.getvalue()
-    assert secret not in output
+    assert token_value not in output
     assert "token redaction failed" in output
     assert "langgraph_api.server" in output
     assert "warning" in output
