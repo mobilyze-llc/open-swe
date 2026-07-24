@@ -37,7 +37,7 @@ def _capture(name: str, formatter: logging.Formatter) -> Iterator[io.StringIO]:
 
 @pytest.fixture(autouse=True)
 def _restore_filters() -> Iterator[None]:
-    names = ("httpx", "langgraph_api.webhook", "langgraph_api.server")
+    names = ("httpx", "langgraph_api.webhook", "langgraph_api.server", "asgi")
     original = {name: logging.getLogger(name).filters[:] for name in names}
     yield
     for name, filters in original.items():
@@ -55,7 +55,7 @@ def _structlog_formatter() -> logging.Formatter:
 def test_fastapi_import_path_installs_filters() -> None:
     importlib.reload(importlib.import_module("agent.api.app"))
 
-    for name in ("httpx", "langgraph_api.webhook", "langgraph_api.server"):
+    for name in ("httpx", "langgraph_api.webhook", "langgraph_api.server", "asgi"):
         assert any(
             getattr(item, logging_redaction._FILTER_MARKER, False)
             for item in logging.getLogger(name).filters
@@ -63,7 +63,7 @@ def test_fastapi_import_path_installs_filters() -> None:
 
 
 def test_httpx_url_is_redacted_through_logging_machinery() -> None:
-    token_value = "a" * 64
+    token_value = "'LEAK outbound value\""
     _install()
 
     with _capture("httpx", logging.Formatter("%(levelname)s %(name)s %(message)s")) as stream:
@@ -77,7 +77,7 @@ def test_httpx_url_is_redacted_through_logging_machinery() -> None:
         )
 
     output = stream.getvalue()
-    assert token_value not in output
+    assert "LEAK" not in output
     assert "token=***" in output
     assert (
         'HTTP Request: POST https://example.test/webhooks/run-complete?token=*** "HTTP/1.1 200 OK"'
@@ -86,7 +86,7 @@ def test_httpx_url_is_redacted_through_logging_machinery() -> None:
 
 
 def test_webhook_structlog_success_and_failure_fields_are_redacted() -> None:
-    token_value = "b" * 64
+    token_value = "'LEAK worker value\""
     url = f"https://example.test/webhooks/run-complete?token={token_value}"
     _install()
     logger = structlog.stdlib.get_logger("langgraph_api.webhook")
@@ -101,7 +101,7 @@ def test_webhook_structlog_success_and_failure_fields_are_redacted() -> None:
         )
 
     output = stream.getvalue()
-    assert token_value not in output
+    assert "LEAK" not in output
     assert output.count("token=***") == 4
     assert "Background worker called webhook" in output
     assert "Background worker failed to call webhook" in output
@@ -109,12 +109,12 @@ def test_webhook_structlog_success_and_failure_fields_are_redacted() -> None:
     assert "run-2" in output
 
 
-def test_server_access_log_query_string_is_redacted_and_fields_are_preserved() -> None:
-    token_value = "c" * 64
+def test_asgi_access_log_query_string_is_redacted_and_fields_are_preserved() -> None:
+    token_value = "'LEAK inbound value\""
     _install()
-    logger = structlog.stdlib.get_logger("langgraph_api.server")
+    logger = structlog.stdlib.get_logger("asgi")
 
-    with _capture("langgraph_api.server", _structlog_formatter()) as stream:
+    with _capture("asgi", _structlog_formatter()) as stream:
         logger.warning(
             "POST /webhooks/run-complete 401 3ms",
             method="POST",
@@ -125,7 +125,7 @@ def test_server_access_log_query_string_is_redacted_and_fields_are_preserved() -
         )
 
     output = stream.getvalue()
-    assert token_value not in output
+    assert "LEAK" not in output
     assert "token=***" in output
     assert output.count("POST") == 2
     assert output.count("/webhooks/run-complete") == 3
@@ -205,8 +205,8 @@ def test_structlog_redaction_failure_uses_renderable_safe_placeholder(
 
     monkeypatch.setattr(logging_redaction, "_redact_record_payload", fail)
 
-    with _capture("langgraph_api.server", _structlog_formatter()) as stream:
-        structlog.stdlib.get_logger("langgraph_api.server").warning(
+    with _capture("asgi", _structlog_formatter()) as stream:
+        structlog.stdlib.get_logger("asgi").warning(
             "POST /webhooks/run-complete 401 3ms",
             query_string=f"token={token_value}",
         )
@@ -214,5 +214,5 @@ def test_structlog_redaction_failure_uses_renderable_safe_placeholder(
     output = stream.getvalue()
     assert token_value not in output
     assert "token redaction failed" in output
-    assert "langgraph_api.server" in output
+    assert "asgi" in output
     assert "warning" in output

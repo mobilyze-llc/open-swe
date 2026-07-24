@@ -5,8 +5,8 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-_TOKEN_RE = re.compile(r"(token=)[^&\s\"'#]*", re.IGNORECASE)
-_REDACTED_LOGGERS = ("httpx", "langgraph_api.webhook", "langgraph_api.server")
+_TOKEN_RE = re.compile(r"(token=)[^&#]*", re.IGNORECASE)
+_REDACTED_LOGGERS = ("httpx", "langgraph_api.webhook", "langgraph_api.server", "asgi")
 _FILTER_MARKER = "_open_swe_webhook_token_redaction"
 
 
@@ -56,7 +56,12 @@ def _redact_record_payload(
             _redact_value(record.msg, render_objects=False),
             _redact_value(record.args, render_objects=True),
         )
-    return _redact_text(record.getMessage()), ()
+    if isinstance(record.msg, str) and "token=" in record.msg.lower():
+        return _redact_text(record.getMessage()), ()
+    return (
+        _redact_value(record.msg, render_objects=True),
+        _redact_value(record.args, render_objects=True),
+    )
 
 
 def _replace_with_safe_placeholder(record: logging.LogRecord) -> None:
